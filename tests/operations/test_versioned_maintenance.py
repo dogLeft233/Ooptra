@@ -92,7 +92,7 @@ def test_quiesced_handoff_is_durable_and_repeated_plan_returns_same_job(tmp_path
         async def quiesce(self, job_id, deadline):
             return QuiesceResult(('generation', 'channel', 'context'))
         async def request_exit(self, ref):
-            raw = json.loads((tmp_path / 'data/maintenance/job.json').read_text())
+            raw = json.loads((tmp_path / 'data/maintenance/job.json').read_text(encoding='utf-8'))
             assert raw['phase'] == 'awaiting_exit'
             assert raw['revision'] == ref.revision
             assert raw['handoff_token'] == ref.token
@@ -254,7 +254,7 @@ def test_credential_save_serializes_validated_rsa_key_instead_of_raw_pem_tail(tm
     store = create_credential_store(config_path=path, private_key_path=private,
                                     runtime_config=lambda: SimpleNamespace(OOPZ_CONFIG={}))
     store.save(payload)
-    assert 'must_not_execute' not in private.read_text()
+    assert 'must_not_execute' not in private.read_text(encoding='utf-8')
     assert store.load_private_key().private_numbers() == key.private_numbers()
 
 
