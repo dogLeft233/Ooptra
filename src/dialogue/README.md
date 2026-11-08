@@ -57,3 +57,5 @@ MiMo、阿里 ASR/DeepSeek/阿里 TTS、Gemini Live 为实际适配。OpenAI Rea
 ## 当前画面输入
 
 `DialogueCapabilities.image_input` 声明图像能力；当前仅配置为 `deepseek-flash` 的阿里/DeepSeek 后端开启。`generate(..., screen=ScreenFrame)` 接受原会话三秒内捕获的可选画面，独占任务固定该帧；其他后端拒绝图像输入。图像只放在本轮 user 的 image_url 内容块，不加入历史、记忆工具结果或 TTS。无画面时维持文字路径，不能声称已看见屏幕。
+
+`semantic_reply` 能力的后端通过 `assess_reply` 输出绑定原会话/输入的严格语义候选，不能直接授权发言。阿里/DeepSeek 已实现；JSON、4秒期限、取消与连接关闭由生成拥有，模型失败不伪造silent。调用契约见 `api.py`，验证见 `tests/dialogue/test_reply_assessment.py`。

@@ -89,6 +89,20 @@ class BehaviorService:
             result = ControlAction(action_id, trigger.session, control)
         elif not observed.text.strip():
             result = NoAction("no_speech")
+        elif observed.reply_assessment is not None:
+            assessment = observed.reply_assessment
+            named = self._policy.matches_keywords(observed.text, list(settings.keywords))
+            if named or assessment.decision == "addressed":
+                allowed, reason = True, "addressed"
+            elif observed.audio_ms < settings.min_utterance_ms:
+                allowed, reason = False, "too_short"
+            else:
+                allowed = assessment.decision == "contribute"
+                reason = "semantic_" + assessment.decision
+            result = (Speak(SpeechIntent(uuid4().hex, action_id, trigger.session, trigger.trigger_id,
+                        observed.context_version, min(permit.expires_at, self._clock() + settings.lifetime_seconds),
+                        observed.text, trigger.user_key, permit.attempt_id))
+                      if allowed else NoAction(reason))
         elif observed.audio_ms < settings.min_utterance_ms:
             result = NoAction("too_short")
         elif (self._policy.observe(observed.text, list(settings.keywords), trigger.user_key,

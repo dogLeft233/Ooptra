@@ -36,3 +36,5 @@
 执行 `python -m pytest -q tests/behavior tests/test_conversation_window.py tests/test_voice_reply_probability.py tests/test_voice_turn_limit.py tests/test_auto_visit_controller.py tests/test_auto_visit_state.py`。公开反例覆盖改触发冒用许可、过期许可、旧会话/同 session_id 不同绑定、错误执行反馈、重复终态、许可失败后重复抽样。真实应用测试经外部 socket/音频验证窗口、概率、逐轮抢话与换房，双 bot 按 [验收指南](../../docs/bot-pair-acceptance.md) 另行执行。
 
 允许依赖 `context.models`、`channels.models` 和公共机制；不导入其他模块实现。内部规则变更保持在本模块，接口/状态归属变化同时维护本页和相应子模块说明。
+
+阿里/DeepSeek 的 `RecognitionObserved.reply_assessment` 携带绑定原会话/输入的语义候选。行为以叫名优先、addressed/contribute允许、silent/invalid/unavailable沉默决定，不再抽样或用固定窗口强制接话；已命名短语可绕过普通最短时长。无语义候选的后端保留原策略。验证见 `tests/behavior/test_semantic_replies.py`。

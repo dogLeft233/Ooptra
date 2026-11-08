@@ -83,7 +83,7 @@ def test_local_keys_do_not_expand_shell_or_override_process_env(tmp_path, monkey
 
 
 @asynccontextmanager
-async def model_servers(*, fail_asr=False, truncate=False, control=False, invalid_answer="", incomplete_asr=False, effort="low"):
+async def model_servers(*, fail_asr=False, truncate=False, control=False, invalid_answer="", incomplete_asr=False, effort="low", assessment=None, transcript="你好"):
     state = SimpleNamespace(
         text=[], chat_requests=[], audio_seen=asyncio.Event(), llm_finished=False,
         open_sockets=0, asr_bytes=bytearray(), sockets_idle=asyncio.Event(),
@@ -132,7 +132,7 @@ async def model_servers(*, fail_asr=False, truncate=False, control=False, invali
                         await event('result-generated', {'output': {'sentence': {
                             'sentence_id': 1, 'text': '错误的中间结果', 'sentence_end': False}}})
                         await event('result-generated', {'output': {'sentence': {
-                            'sentence_id': 1, 'text': '你好', 'sentence_end': not incomplete_asr}}})
+                            'sentence_id': 1, 'text': transcript, 'sentence_end': not incomplete_asr}}})
                         await event('result-generated', {'output': {'sentence': {
                             'sentence_id': 0, 'text': 'heartbeat', 'sentence_end': True,
                             'heartbeat': True}}})
@@ -149,6 +149,11 @@ async def model_servers(*, fail_asr=False, truncate=False, control=False, invali
         body = await request.json()
         state.chat_requests.append(body)
         assert body['model'] == 'deepseek-flash'
+        if body.get('response_format') and body['max_tokens'] == 128:
+            assert body['thinking'] == {'type': 'disabled'}
+            assert body['reasoning_effort'] == 'none'
+            return web.json_response({'choices': [{'finish_reason': 'stop', 'message': {
+                'content': json.dumps({'decision': assessment or 'contribute'})}}]})
         assert body['thinking'] == {'type': 'disabled' if state.expected_effort == 'none' else 'enabled'}
         assert body['reasoning_effort'] == state.expected_effort
         if body.get('response_format'):
@@ -457,14 +462,17 @@ def test_streaming_recognition_uploads_before_end_and_only_final_text_is_authori
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('end', ['reply', 'leave', 'gap'])
+@pytest.mark.parametrize('end', ['reply', 'short_name', 'leave', 'gap'])
 def test_room_capture_streams_before_cut_and_releases_original_attempt(tmp_path, end):
+    spoken = "大肥鱼" if end == "short_name" else "你好"
     async def run():
-        async with model_servers() as (backend, state):
+        async with model_servers(transcript=spoken, assessment="silent" if end == "short_name" else "contribute") as (backend, state):
             agent = make_agent(tmp_path)
             await agent.backend.aclose()
             agent.backend = backend
-            agent.settings.min_utterance_ms = 60
+            agent.settings.min_utterance_ms = 500 if end == "short_name" else 60
+            agent.settings.force_reply_keywords = ["大肥鱼"]
+            agent.settings.reply_probability_percent = 0 if end == "short_name" else 100
             agent.settings.silence_ms = 60
             agent.settings.cascade_turn_limit = 1
             await agent.join('a', 'c')
@@ -476,7 +484,7 @@ def test_room_capture_streams_before_cut_and_releases_original_attempt(tmp_path,
                 return {'ok': True}
             agent.duplex.push_tts_pcm = push
             try:
-                await agent._on_remote_pcm('member', b'\x00\x20' * 960, 16000)
+                await agent._on_remote_pcm('member', b'\x00\x20' * (4800 if end == 'short_name' else 960), 16000)
                 await asyncio.wait_for(state.first_input.wait(), 1)
                 assert agent.status()['cascade_attempts'] == 1
                 assert not state.chat_requests
@@ -495,14 +503,14 @@ def test_room_capture_streams_before_cut_and_releases_original_attempt(tmp_path,
                             await asyncio.sleep(0)
                     await asyncio.wait_for(completed(), 1)
                     assert agent.memory.as_messages(user_key='oopz:member') == [
-                        {'role':'user', 'content':'你好'},
+                        {'role':'user', 'content':spoken},
                         {'role':'assistant', 'content':'你好。再见。'}]
                     assert state.text == ['你好。', '再见。']
                     assert agent.status()['cascade_attempts'] == 1
                     await agent.leave()
                 await asyncio.wait_for(state.sockets_idle.wait(), 1)
                 assert state.open_sockets == 0
-                if end != 'reply':
+                if end not in {'reply', 'short_name'}:
                     assert not state.chat_requests and not agent.memory.as_messages()
             finally:
                 await agent.close()
@@ -613,4 +621,48 @@ def test_screen_image_is_sent_only_with_this_reply_and_never_as_spoken_text():
             assert state.chat_requests[3]["messages"][-1]["content"] == "你好"
             assert isinstance(state.chat_requests[0]["messages"][-1]["content"], str)
             assert state.text == ["你好。", "再见。", "你好。", "再见。"]
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("text,assessment,percent,expected", [
+    ("大肥鱼，在吗？", "silent", 0, True),
+    ("大飞鱼，能听到吗？", "addressed", 0, True),
+    ("这个题有人能帮忙解释吗？", "contribute", 0, True),
+    ("我继续算我的", "silent", 100, False),
+])
+def test_real_cascade_uses_semantic_decision_and_name_fallback(tmp_path, text, assessment, percent, expected):
+    from app.flows import run_cascade
+    from behavior import create_behavior
+    from behavior.models import ReplySettings
+    from channels import create_channel
+    from channels.models import AudioPushResult, JoinRoom, RoomTarget
+    from context import create_context_service
+    async def run():
+        async with model_servers(assessment=assessment, transcript=text) as (backend, state):
+            class Transport:
+                async def join(self, target): return "rtc"
+                async def leave(self): pass
+                async def retire_output(self): pass
+                async def push_audio(self, pcm, rate, *, finish=False):
+                    state.audio_seen.set()
+                    return AudioPushResult(True)
+                async def wait_playback(self, timeout): return AudioPushResult(True)
+            context = create_context_service(str(tmp_path / "history.jsonl"))
+            channel, behavior = create_channel(Transport()), create_behavior()
+            session = (await channel.execute(JoinRoom("join", RoomTarget("a", "b"), 0))).session
+            behavior.start_session(session)
+            try:
+                result = await run_cascade(backend=backend, context=context, behavior=behavior,
+                    channel=channel, session=session, trigger_id="input", user_key="any-member",
+                    pcm=b"\x01\x00"*16000, sample_rate=16000, limit=0,
+                    settings=ReplySettings(probability=percent, keywords=("大肥鱼",)),
+                    interpret_controls=False, current=lambda: True, on_playing=lambda _: None)
+                assert bool(result.outcome and result.outcome.status == "completed") is expected
+                assert state.audio_seen.is_set() is expected
+                assert [row["role"] for row in context.history.recent()] == (["user", "assistant"] if expected else ["user"])
+                if expected:
+                    assert result.reply_text == "你好。再见。"
+                    assert "decision" not in "".join(state.text)
+            finally:
+                await context.close()
     asyncio.run(run())

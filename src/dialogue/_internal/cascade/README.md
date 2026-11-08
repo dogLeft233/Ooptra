@@ -31,3 +31,5 @@
 真实本地协议回归见 [阿里协议测试](../../../../tests/test_aliyun_deepseek.py)、[MiMo任务与历史](../../../../tests/test_mimo_chat_history.py)、[控制解释](../../../../tests/dialogue/test_control_interpretation.py)。它们保留供应商reader、分句、任务与HTTP/WS真实代码，替换外部服务器，不替换被验证的生成协调。
 
 新模型只要保持公开事件、错误、取消和产物契约，应用流程无需学习其分片格式、JSON或重试细节。供应商能力改变时显式修改capabilities，不通过私有属性探测。
+
+阿里/DeepSeek 的 `assess_reply` 使用独立配置快照与HTTP会话，JSON模式、关闭思考、最多128输出token、总请求4秒；近期10条上下文为观察资料，重复/未知字段、截断/空白均返回invalid，网络失败返回unavailable。候选只供行为决策，不进入语音。正式生成继续复制用户配置的思考档位。

@@ -266,6 +266,29 @@ class AudioReady:
 
 
 @dataclass(frozen=True)
+class ReplyAssessment:
+    """本输入的语义候选；不可用/非法有别于模型明确要求沉默。"""
+    session: SessionRef
+    input_ref: str
+    decision: Literal["addressed", "contribute", "silent", "invalid", "unavailable"]
+
+    def __post_init__(self) -> None:
+        if (type(self.session) is not SessionRef or type(self.input_ref) is not str
+                or not self.input_ref.strip() or type(self.decision) is not str
+                or self.decision not in {"addressed", "contribute", "silent", "invalid", "unavailable"}):
+            raise ValueError("接话候选须绑定原会话、输入及明确结果")
+
+
+def parse_reply_assessment(raw: object, session: SessionRef, input_ref: str) -> ReplyAssessment:
+    fields = _command_fields(raw)
+    decision = fields.get("decision")
+    if (set(fields) != {"decision"} or type(decision) is not str
+            or (decision != "addressed" and decision != "contribute" and decision != "silent")):
+        raise ValueError("接话 JSON 需要且仅允许 decision=addressed/contribute/silent")
+    return ReplyAssessment(session, input_ref, decision)
+
+
+@dataclass(frozen=True)
 class RecognitionObserved:
     trigger: AudioReady
     permit: AttemptPermit
@@ -273,6 +296,7 @@ class RecognitionObserved:
     context_version: ContextRevision
     audio_ms: float = 1000
     control: VoiceControlDecision | None = None
+    reply_assessment: ReplyAssessment | None = None
 
     def __post_init__(self) -> None:
         import math
@@ -281,7 +305,11 @@ class RecognitionObserved:
                 or self.permit.input_ref != self.trigger.trigger_id
                 or type(self.text) is not str or type(self.context_version) is not ContextRevision
                 or type(self.audio_ms) not in {int, float} or not math.isfinite(self.audio_ms)
-                or self.audio_ms < 0 or (self.control is not None and type(self.control) is not VoiceControlDecision)):
+                or self.audio_ms < 0 or (self.control is not None and type(self.control) is not VoiceControlDecision)
+                or (self.reply_assessment is not None and (
+                    type(self.reply_assessment) is not ReplyAssessment
+                    or self.reply_assessment.session != self.trigger.session
+                    or self.reply_assessment.input_ref != self.trigger.trigger_id))):
             raise ValueError("识别事实必须保留原输入许可、合法文字/控制与有限非负时长")
 
 

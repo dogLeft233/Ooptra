@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any, Protocol, runtime_checkable
 
-from behavior.models import AttemptPermit, SpeechIntent
+from behavior.models import AttemptPermit, ReplyAssessment, SpeechIntent
 from channels.models import OutputFrame, ScreenFrame, SessionRef
 from context.models import PreparedContext, RecallRequest, RememberRequest
 from dialogue.models import (
@@ -222,6 +222,14 @@ class VoiceBackend:
     async def interpret_control(self, input: ControlInput) -> ControlInterpretation:
         """返回解析后的候选或明确非法/不可用，不执行控制。"""
         raise NotImplementedError("Control interpretation is unsupported")
+
+    async def assess_reply(self, input: ControlInput, context: PreparedContext,
+                           *, aliases: tuple[str, ...]) -> ReplyAssessment:
+        """语义候选绑定原输入，至多4秒；失败具名返回，取消传播；不合成/写历史。
+
+        只有 semantic_reply 能力的后端可调用。上下文必须属于 input.session。
+        """
+        raise NotImplementedError("Semantic reply assessment is unsupported")
 
     def generate(self, intent: SpeechIntent, context: PreparedContext, *, tools: ContextToolPort | None = None, screen: ScreenFrame | None = None) -> ExpressionJob:
         """启动已批准意图的独占表达任务，返回ExpressionJob。"""

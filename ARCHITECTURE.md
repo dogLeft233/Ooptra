@@ -107,3 +107,5 @@ Oopz → OneBot → AstrBot → OneBot → Oopz 的代理路由全部在渠道�
 配置、密钥和用户数据位置继续遵循 [配置与维护](docs/operations.md)、[语音指南](docs/voice-guide.md) 及 [AstrBot 同步](docs/astrbot-context-sync.md)。
 
 级联生成后端声明支持图像时，应用在发言决策后通过渠道 `capture_screen` 取原会话最新共享帧，作为当前表达任务的临时输入。渠道拥有屏幕观看连接与关闭，生成拥有图像 wire protocol；图片不进入权威历史或外部记忆。
+
+阿里/DeepSeek 级联接话先由生成返回绑定原输入的 `ReplyAssessment`，再由行为授权；语义模式不抽概率、不继承固定追问窗口，关键词叫名优先兜底。模型网络/JSON知识留在生成，发言权限和失败策略留在行为。其他后端保留原概率路径。

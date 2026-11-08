@@ -88,7 +88,7 @@ class RecognitionInputs:
                     prefix = bytearray()
                     self._prefix[uid] = audio.sample_rate, prefix
                 prefix.extend(cut.stream_pcm16)
-                if len(prefix) < audio.sample_rate*2*self.host.settings.min_utterance_ms/1000:
+                if len(prefix) < audio.sample_rate*2*self.host._input_policy().min_utterance_ms/1000:
                     return ""
                 revision = self.host.context_service.snapshot(session.room_target).revision
                 trigger = AudioReady(uuid4().hex, session, "oopz:"+uid, revision)

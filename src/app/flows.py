@@ -174,8 +174,24 @@ async def run_cascade(*, backend, context, behavior, channel,
                 end_reason = "classification_" + interpreted.status
                 return FlowResult(user_text=recognized.text, reason=end_reason)
             control = interpreted.candidate
+        assessment = None
+        capabilities = getattr(backend, "capabilities", None)
+        if recognized.text.strip() and capabilities is not None and capabilities().semantic_reply:
+            prepared = await context.prepare_context(ContextRequest(
+                session, user_key, trigger_id, known_revision=revision))
+            assessment_started = time.monotonic()
+            assessment = await backend.assess_reply(ControlInput(
+                recognized.text, trigger_id, session, user_key, permit.attempt_id),
+                prepared, aliases=settings.keywords)
+            timings["intent"] = (time.monotonic() - assessment_started) * 1000
+            logger.info("event=voice.reply.assessed decision=%s session_id=%s input_ref=%s duration_ms=%.1f",
+                        assessment.decision, session.session_id, trigger_id, timings["intent"])
+            if not current():
+                end_reason = "superseded"
+                return FlowResult(reason=end_reason)
+            revision = prepared.version
         decision = behavior.decide(RecognitionObserved(
-            trigger, permit, recognized.text, revision, len(pcm)/2/sample_rate*1000, control), settings)
+            trigger, permit, recognized.text, revision, len(pcm)/2/sample_rate*1000, control, assessment), settings)
         if isinstance(decision, NoAction):
             trace_reason = decision.reason
             end_reason = decision.reason
@@ -186,8 +202,9 @@ async def run_cascade(*, backend, context, behavior, channel,
             return FlowResult(user_text=recognized.text, control=decision)
         intent = decision.intent
         trace_reason = "reply"
-        prepared = await context.prepare_context(ContextRequest(
-            session, user_key, trigger_id, known_revision=intent.context_version))
+        if prepared is None:
+            prepared = await context.prepare_context(ContextRequest(
+                session, user_key, trigger_id, known_revision=intent.context_version))
         if not current():
             end_reason = "superseded"
             return FlowResult(reason=end_reason)

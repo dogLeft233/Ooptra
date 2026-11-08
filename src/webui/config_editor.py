@@ -485,7 +485,7 @@ FIELD_SPECS: dict[str, dict[str, dict[str, Any]]] = {
             "max": 100,
             "default": 30,
             "hint": (
-                "默认 30，随机回应约三成发言；0 仅在命中强制关键词时接话，100 每次均允许回复。"
+                "阿里/DeepSeek 使用模型语义判断，此概率设置不生效。其他后端默认 30，随机回应约三成发言；0 仅在命中强制关键词时接话，100 每次均允许回复。"
                 "保存后对后续回合生效，快捷开口和进退房台词不受限制。"
                 "Gemini Live 继续听取对话，按模型回复回合决定是否出声，不保证减少模型用量。"
             ),
@@ -505,7 +505,7 @@ FIELD_SPECS: dict[str, dict[str, dict[str, Any]]] = {
         },
         "conversation_window_enabled": {
             "type": "bool", "label": "连续对话窗口", "tier": "basic",
-            "hint": "叫到关键词后，同一成员可连续追问；换房清除，需先配置强制回复关键词。",
+            "hint": "阿里/DeepSeek 由模型结合上下文判断追问，此窗口不生效。其他后端叫到关键词后，同一成员可连续追问；换房清除。",
         },
         "conversation_window_seconds": {
             "type": "int", "label": "连续追问窗口 / 秒", "tier": "basic",

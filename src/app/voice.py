@@ -488,7 +488,8 @@ class VoiceCoordinator:
 
     def _input_policy(self):
         minimum = self.settings.min_utterance_ms
-        if self.settings.voice_leave_enabled or self.settings.voice_volume_enabled:
+        if (self.settings.voice_leave_enabled or self.settings.voice_volume_enabled
+                or self.backend.capabilities().semantic_reply):
             minimum = min(minimum, VOICE_CONTROL_MIN_MS)
         return AudioInputPolicy(VadvConfig(sample_rate=self.settings.sample_rate_in,
             silence_ms=self.settings.silence_ms, max_utterance_ms=self.settings.max_utterance_ms),
