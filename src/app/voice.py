@@ -495,6 +495,9 @@ class VoiceCoordinator:
             tuple(self.settings.listen_only_uids), minimum, _MIN_UTTERANCE_RMS)
 
     async def refresh(self, changed: list[str]) -> list[str]:
+        # 思考强度由新生成任务复制；不取消当前回复、问候或控制任务。
+        if changed == ["deepseek_reasoning_effort"]:
+            return ["思考强度已更新，从下一次生成回复生效"]
         # 音量只改播放增益；不取消播报，也不等待进退房或重建模型会话。
         if changed == ["output_volume"]:
             return [await self._apply_output_volume()]

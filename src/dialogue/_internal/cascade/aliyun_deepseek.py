@@ -150,7 +150,8 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
         # Tool and control responses must be completely validated before speech.
         streaming = self._audio_sink is not None and not body.get("response_format") and not body.get("tools")
         request = {**body, "model": self.settings.deepseek_model, "stream": streaming,
-                   "thinking": {"type": "enabled"}, "reasoning_effort": "low",
+                   "thinking": {"type": "disabled" if self.settings.deepseek_reasoning_effort == "none" else "enabled"},
+                   "reasoning_effort": self.settings.deepseek_reasoning_effort,
                    "max_tokens": max(2048, body.get("max_tokens", 0))}
         session = await self._http()
         async with session.post(

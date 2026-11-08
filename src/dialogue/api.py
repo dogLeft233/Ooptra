@@ -64,6 +64,11 @@ class DialogueSettings(Protocol):
     def deepseek_model(self) -> str: ...
 
     @property
+    def deepseek_reasoning_effort(self) -> str:
+        """已解析的 none/low/high/max；生成任务复制此配置。"""
+        ...
+
+    @property
     def gemini_api_key(self) -> str: ...
 
     @property

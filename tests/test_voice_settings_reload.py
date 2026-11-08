@@ -240,3 +240,18 @@ def test_reload_settings_is_noop_when_config_unchanged(
     result = asyncio.run(rt.reload_settings())
     assert result["changed"] == []
     assert result["notes"] == []
+
+
+def test_reasoning_effort_hot_reload_applies_without_replacing_backend(monkeypatch, tmp_path):
+    from operations.models import ReasoningEffort
+
+    rt = _make_runtime(monkeypatch, _settings(tmp_path, backend="aliyun_deepseek"))
+    original_backend = rt.agent.backend
+    fresh = _settings(tmp_path, backend="aliyun_deepseek", deepseek_reasoning_effort=ReasoningEffort.HIGH)
+    monkeypatch.setattr(runtime_module, "load_voice_agent_settings", lambda: (fresh, VoiceApiSettings()))
+    result = asyncio.run(rt.reload_settings())
+    assert not result["hot_reload_failed"]
+    assert result["restart_keys"] == []
+    assert rt.agent.backend is original_backend
+    assert rt.agent.backend.settings.deepseek_reasoning_effort == ReasoningEffort.HIGH
+    assert any("下一次" in note for note in result["notes"])

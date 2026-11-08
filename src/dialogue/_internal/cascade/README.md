@@ -19,7 +19,7 @@
 
 - [MiMo](mimo_cascade.py)：ASR、严格控制解释、聊天净化及PCM合成；整段产物仍由公共任务按64KiB切分，任务期限与容量限制由公共输出拥有。
 - [阿里/DeepSeek](aliyun_deepseek.py)：双向流式ASR WebSocket、DeepSeek SSE分句及阿里双向TTS。
-  DeepSeek显式开启low思考，只消费正式回答content；reasoning_content不复制到语音/历史，
+  DeepSeek按任务配置选择none/low/high/max（默认low），生成任务固定原档位，只消费正式回答content；reasoning_content不复制到语音/历史，
   仅工具协议必要时在本任务内透传供应商要求的推理字段，不持久化或广播。推理标签正文和
   缺少正式回答失败关闭；不能以关键词清洗推理字段代替结构隔离。每任务文本队列16项；TTS sender与reader共同收尾，音频采样对齐、时长至多60秒；在聊天结束前可以产出音频，不能失败后自动重播已发前缀。
 - [公共任务/输出](../output.py)：单订阅、有界背压、序号、终态、关闭与渠道源失败转换。

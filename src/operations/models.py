@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Protocol
 from urllib.parse import unquote, urlsplit
 
@@ -221,6 +222,15 @@ class ConfigurationSaveReceipt:
         return {group: list(fields) for group, fields in self.changed}
 
 
+class ReasoningEffort(str, Enum):
+    """DeepSeek 已确认的思考档位；none 显式关闭思考。"""
+
+    NONE = "none"
+    LOW = "low"
+    HIGH = "high"
+    MAX = "max"
+
+
 @dataclass
 class VoiceAgentSettings:
     enabled: bool = False
@@ -280,6 +290,7 @@ class VoiceAgentSettings:
     deepseek_api_key: str = field(default="", repr=False)
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-flash"
+    deepseek_reasoning_effort: ReasoningEffort = ReasoningEffort.LOW
 
     # Gemini Live
     gemini_api_key: str = field(default="", repr=False)

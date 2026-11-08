@@ -18,10 +18,10 @@ from test_voice_operations import make_agent
 from channels.models import OutputSourceError
 from dialogue.models import VoiceStreamInterrupted
 from operations import load_voice_agent_settings
-from operations.models import VoiceAgentSettings
+from operations.models import ReasoningEffort, VoiceAgentSettings
 
 
-async def run_expression_protocol(backend, pcm, *, sample_rate, user_key, channel_key, on_audio):
+async def run_expression_protocol(backend, pcm, *, sample_rate, user_key, channel_key, on_audio, after_generate=None):
     """按公开识别/分类/表达契约驱动真实供应商，不调用旧复合后端入口。"""
     import time
     from uuid import uuid4
@@ -50,6 +50,8 @@ async def run_expression_protocol(backend, pcm, *, sample_rate, user_key, channe
     intent = SpeechIntent(action, action, session, input.input_ref, context.version,
                           time.monotonic()+5, recognized.text, user_key)
     audio = audio_output(backend.generate(intent, context))
+    if after_generate is not None:
+        after_generate()
     output = bytearray()
     try:
         async for frame in audio.frames():
@@ -75,11 +77,11 @@ def test_local_keys_do_not_expand_shell_or_override_process_env(tmp_path, monkey
 
 
 @asynccontextmanager
-async def model_servers(*, fail_asr=False, truncate=False, control=False, invalid_answer="", incomplete_asr=False):
+async def model_servers(*, fail_asr=False, truncate=False, control=False, invalid_answer="", incomplete_asr=False, effort="low"):
     state = SimpleNamespace(
         text=[], chat_requests=[], audio_seen=asyncio.Event(), llm_finished=False,
         open_sockets=0, asr_bytes=bytearray(), sockets_idle=asyncio.Event(),
-        first_input=asyncio.Event(), asr_parameters=None,
+        first_input=asyncio.Event(), asr_parameters=None, expected_effort=effort,
     )
 
     async def websocket(request):
@@ -141,8 +143,8 @@ async def model_servers(*, fail_asr=False, truncate=False, control=False, invali
         body = await request.json()
         state.chat_requests.append(body)
         assert body['model'] == 'deepseek-flash'
-        assert body['thinking'] == {'type': 'enabled'}
-        assert body['reasoning_effort'] == 'low'
+        assert body['thinking'] == {'type': 'disabled' if state.expected_effort == 'none' else 'enabled'}
+        assert body['reasoning_effort'] == state.expected_effort
         if body.get('response_format'):
             value = {'leave': control, 'volume': None}
             return web.json_response({'choices': [{'message': {'content': json.dumps(value)}}]})
@@ -186,6 +188,7 @@ async def model_servers(*, fail_asr=False, truncate=False, control=False, invali
         backend='aliyun_deepseek', dashscope_api_key='fake-dashscope',
         deepseek_api_key='fake-deepseek', dashscope_ws_url=f'ws://127.0.0.1:{port}/speech',
         deepseek_base_url=f'http://127.0.0.1:{port}', reply_probability_percent=100,
+        deepseek_reasoning_effort=ReasoningEffort(effort),
     )
     backend = AliyunDeepSeekBackend(settings)
     try:
@@ -195,9 +198,10 @@ async def model_servers(*, fail_asr=False, truncate=False, control=False, invali
         await runner.cleanup()
 
 
-def test_audio_reaches_sink_before_llm_finishes_and_controls_are_not_spoken():
+@pytest.mark.parametrize("effort", ["none", "low", "high", "max"])
+def test_audio_reaches_sink_before_llm_finishes_and_controls_are_not_spoken(effort):
     async def run():
-        async with model_servers() as (backend, state):
+        async with model_servers(effort=effort) as (backend, state):
             output = bytearray()
 
             async def sink(pcm, rate):
@@ -560,4 +564,27 @@ def test_streaming_asr_missing_final_result_cannot_become_a_recognized_input():
                 assert not state.chat_requests and not state.text
             finally:
                 await stream.aclose()
+    asyncio.run(run())
+
+
+def test_new_effort_applies_to_next_generation_without_changing_started_reply():
+    async def run():
+        async with model_servers() as (backend, state):
+            async def sink(_pcm, _rate):
+                state.audio_seen.set()
+
+            def change_effort():
+                backend.settings.deepseek_reasoning_effort = ReasoningEffort.HIGH
+
+            first = await run_expression_protocol(backend, b"\x01\x00" * 8000,
+                sample_rate=16000, user_key="member", channel_key="area/channel",
+                on_audio=sink, after_generate=change_effort)
+            assert first.text == "你好。再见。"
+            state.expected_effort = "high"
+            second = await run_expression_protocol(backend, b"\x01\x00" * 8000,
+                sample_rate=16000, user_key="member", channel_key="area/channel", on_audio=sink)
+            assert second.text == "你好。再见。"
+            assert [request["reasoning_effort"] for request in state.chat_requests] == [
+                "low", "low", "high", "high"]
+            assert state.text == ["你好。", "再见。", "你好。", "再见。"]
     asyncio.run(run())

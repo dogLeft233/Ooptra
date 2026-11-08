@@ -365,6 +365,17 @@ FIELD_SPECS: dict[str, dict[str, dict[str, Any]]] = {
             "type": "str", "label": "DeepSeek 模型", "tier": "basic",
             "vendor": "aliyun_deepseek", "default": "deepseek-flash",
         },
+        "aliyun_deepseek.reasoning_effort": {
+            "type": "select", "label": "DeepSeek 思考强度", "tier": "basic",
+            "vendor": "aliyun_deepseek", "default": "low",
+            "options": [
+                {"value": "none", "label": "关闭"},
+                {"value": "low", "label": "低（low，默认）"},
+                {"value": "high", "label": "高（high）"},
+                {"value": "max", "label": "最高（max）"},
+            ],
+            "hint": "保存后从下一次生成回复生效，持续使用此档位；当前回复不变。强度越高通常等待越久，仅播正式回答。",
+        },
         # ── MiMo 级联厂商预设 ──
         "mimo.api_key": {
             "type": "str",
