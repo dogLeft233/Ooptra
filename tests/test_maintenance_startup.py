@@ -14,7 +14,7 @@ def test_main_publishes_ready_after_bootstrap_and_clears_before_shutdown(monkeyp
     spec = importlib.util.spec_from_file_location("ooptra_bootstrap_under_test", Path(__file__).resolve().parents[1] / "main.py")
     main = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(main)
-    from voice_agent import runtime
+    from app import assembly as runtime
     from webui.server import WebUIConsole
 
     observed = []
@@ -27,7 +27,7 @@ def test_main_publishes_ready_after_bootstrap_and_clears_before_shutdown(monkeyp
         observed.append((stage, status["process"].get("bootstrap_ready"), status["health"]["process_ok"]))
 
     class Controller:
-        def __init__(self, state):
+        def __init__(self, state, **ports):
             pass
 
         def snapshot(self):

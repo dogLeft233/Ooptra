@@ -3,9 +3,10 @@
 import asyncio
 import json
 
-from behavior import create_reply_policy
-from context import create_memory
+from channels.models import RoomTarget, SessionRef
+from context.models import ContextRef, ContextRevision, PreparedContext
 from dialogue import create_gemini_backend
+from dialogue.models import LiveSessionRequest
 from operations.models import VoiceAgentSettings
 
 
@@ -38,14 +39,14 @@ def test_live_logs_lengths_without_transcript_reply_or_session_handle(caplog, tm
             return socket
 
         backend = create_gemini_backend(
-            VoiceAgentSettings(gemini_api_key='synthetic', reply_probability_percent=100),
-            create_memory(str(tmp_path / 'history.jsonl')), reply_policy=create_reply_policy(), connector=connect,
+            VoiceAgentSettings(gemini_api_key='synthetic', reply_probability_percent=100), connector=connect,
         )
-        finished = asyncio.Event()
-        backend.set_generated_out(lambda result: finished.set())
+        session = SessionRef("run", "binding", "room", RoomTarget("area", "channel"))
+        prepared = PreparedContext(ContextRef(session, 0, "local"), ContextRevision(0), "", ())
         try:
             with caplog.at_level('INFO'):
-                await backend.start_session()
+                live = await backend.open_live(LiveSessionRequest(session, prepared))
+                events = live.events()
                 await socket.incoming.put(json.dumps({
                     'sessionResumptionUpdate': {'newHandle': 'secret-session-handle'},
                 }))
@@ -54,7 +55,11 @@ def test_live_logs_lengths_without_transcript_reply_or_session_handle(caplog, tm
                     'outputTranscription': {'text': 'private-model-draft'},
                     'turnComplete': True,
                 }}))
-                await asyncio.wait_for(finished.wait(), 1)
+                for _ in range(3):
+                    event = await asyncio.wait_for(anext(events), 1)
+                    if event.kind == "updated" and event.text == "private-user-transcript":
+                        break
+                await events.aclose()
             assert 'event=dialogue.live.generated' in caplog.text
             assert 'input_chars=23' in caplog.text
             assert 'private-user-transcript' not in caplog.text

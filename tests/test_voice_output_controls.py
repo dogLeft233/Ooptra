@@ -10,22 +10,24 @@ from unittest.mock import AsyncMock
 import pytest
 from support.channel_fixtures import establish_room
 
+from app.voice import VoiceCoordinator
 from channels import create_duplex as VoiceDuplex
 from operations.models import VoiceAgentSettings, VoiceApiSettings
-from voice_agent.agent import VoiceAgent
 from webui.voice_routes import build_voice_routes
 
 
 async def make_agent(tmp_path, volume=50):
-    agent = VoiceAgent(VoiceAgentSettings(
+    agent = VoiceCoordinator(VoiceAgentSettings(
         enabled=True, backend="mimo_cascade", output_volume=volume,
         memory_path=str(tmp_path / "memory.jsonl"),
     ), VoiceApiSettings())
     await establish_room(agent)
-    agent.set_output_volume_saver(AsyncMock())
+    saver = AsyncMock()
+    agent.set_output_volume_saver(saver)
     transport = SimpleNamespace(set_tts_volume=AsyncMock(return_value={"ok": True}),
                                 set_voice_state=AsyncMock(return_value=True),
                                 push_tts_pcm=AsyncMock(return_value={"ok": True}))
+    transport.volume_saver = saver
     agent.bind_duplex(VoiceDuplex(transport))
     return agent, transport
 
@@ -41,7 +43,7 @@ def test_spoken_volume_is_bounded_saved_and_applied(tmp_path, start, command, ta
         result = await agent.apply_voice_volume(command)
         assert result["ok"] and result["volume"] == target and result["saved"]
         assert not result["muted"]
-        agent.output_controls._saver.assert_awaited_once_with(target)
+        transport.volume_saver.assert_awaited_once_with(target)
         transport.set_tts_volume.assert_awaited_once_with(target)
     asyncio.run(run())
 
@@ -52,7 +54,7 @@ def test_closed_mic_is_temporary_and_volume_change_opens_it(tmp_path):
         result = await agent.apply_voice_volume({"action": "mute"})
         assert result["ok"] and result["muted"] and not result["saved"]
         assert agent.settings.output_volume == 70
-        agent.output_controls._saver.assert_not_awaited()
+        transport.volume_saver.assert_not_awaited()
         transport.set_tts_volume.assert_awaited_with(0)
         transport.set_voice_state.assert_awaited_with(mic_muted=True, speaker_muted=False)
         await agent.duplex.push_tts_pcm(b"pcm", 24000)
@@ -94,7 +96,7 @@ def test_control_switch_does_not_disable_ui_and_rejects_spoken_commands(tmp_path
 def test_failed_save_keeps_previous_volume_and_reports_failure(tmp_path):
     async def run():
         agent, transport = await make_agent(tmp_path)
-        agent.output_controls._saver.side_effect = OSError("disk unavailable")
+        transport.volume_saver.side_effect = OSError("disk unavailable")
         result = await agent.apply_voice_volume({"action": "set", "value": 25})
         assert not result["ok"] and "disk unavailable" in result["error"]
         assert agent.settings.output_volume == 50
@@ -117,7 +119,7 @@ def test_browser_failure_does_not_claim_mic_was_closed(tmp_path):
         result = await agent.set_output_controls(muted=True)
         assert not result["ok"] and not result["muted"]
         assert not agent.output_muted and not agent.duplex.output_muted
-        agent.output_controls._saver.assert_not_awaited()
+        transport.volume_saver.assert_not_awaited()
     asyncio.run(run())
 
 
@@ -176,8 +178,8 @@ def test_cancelled_voice_command_settles_save_before_releasing_lock(tmp_path):
 
 def test_config_reload_cannot_be_overwritten_by_an_older_spoken_save(monkeypatch, tmp_path):
     import config
+    from app.assembly import VoiceRuntime
     from operations import create_configuration
-    from voice_agent.runtime import VoiceRuntime
     from webui import config_editor
 
     cfg = {"enabled": False, "backend": "mimo_cascade", "memory_path": str(tmp_path / "memory.jsonl")}
@@ -212,8 +214,8 @@ def test_config_reload_cannot_be_overwritten_by_an_older_spoken_save(monkeypatch
 
 def test_runtime_saves_spoken_volume_to_disk_but_never_temporary_mic(monkeypatch, tmp_path):
     import config
+    from app.assembly import VoiceRuntime
     from operations import create_configuration
-    from voice_agent.runtime import VoiceRuntime
     from webui import config_editor
 
     cfg = {"enabled": True, "backend": "mimo_cascade", "memory_path": str(tmp_path / "memory.jsonl")}
@@ -258,15 +260,15 @@ def test_output_route_rejects_invalid_controls(tmp_path, body):
 
 def test_ui_volume_persists_but_mic_button_does_not(tmp_path):
     async def run():
-        agent, _ = await make_agent(tmp_path)
+        agent, transport = await make_agent(tmp_path)
         route = next(r for r in build_voice_routes(SimpleNamespace(agent=agent))
                      if r.method == "POST" and r.path == "/voice/output")
         response = await route.handler(SimpleNamespace(can_read_body=True, json=AsyncMock(return_value={"volume": 35})))
         assert response.status == 200 and json.loads(response.text)["volume"] == 35
-        agent.output_controls._saver.assert_awaited_once_with(35)
+        transport.volume_saver.assert_awaited_once_with(35)
         response = await route.handler(SimpleNamespace(can_read_body=True, json=AsyncMock(return_value={"muted": True})))
         assert response.status == 200 and json.loads(response.text)["muted"]
-        assert agent.output_controls._saver.await_count == 1
+        assert transport.volume_saver.await_count == 1
     asyncio.run(run())
 
 
@@ -286,3 +288,24 @@ def test_rejoining_resets_temporary_mic_state(tmp_path):
         assert agent.settings.output_volume == 50
         await agent.leave()
     asyncio.run(run())
+
+
+def test_cancelled_live_tool_before_execution_has_no_platform_or_disk_side_effect(tmp_path):
+    from support.live_runtime import make_live_agent, settle
+
+    async def scenario():
+        agent, playback, sockets = await make_live_agent(tmp_path, voice_volume_enabled=True)
+        persisted = []
+        async def save(volume):
+            persisted.append(volume)
+        agent.set_output_volume_saver(save)
+        call = {'toolCall': {'functionCalls': [dict(id='cancel', name='control_voice_output', args={'action': 'increase'})]}}
+        sockets[0].queue.put_nowait((call, None))
+        sockets[0].queue.put_nowait(({'toolCallCancellation': {'ids': ['cancel']}}, None))
+        await settle(200)
+        assert agent.settings.output_volume == 50
+        assert playback.output_volume == 50
+        assert persisted == []
+        assert agent.status()['joined']
+        await agent.stop()
+    asyncio.run(scenario())

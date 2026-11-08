@@ -47,14 +47,17 @@ def test_public_status_never_returns_health_token(tmp_path):
 
 
 @pytest.mark.parametrize("phase", ["awaiting_restart", "switching", "checking", "rolling_back"])
-def test_stale_jobs_are_reconciled_without_blocking_new_operations(tmp_path, phase):
+def test_stale_jobs_remain_restricted_until_explicit_recovery(tmp_path, phase):
     from operations import create_maintenance as MaintenanceService
 
     initial = MaintenanceService(tmp_path)
     initial.write_job({"id": "old", "phase": phase, "service_pid": -1})
     recovered = MaintenanceService(tmp_path)
-    assert recovered.status()["job"]["phase"] == "failed"
-    recovered._claim()
+    assert recovered.status()["job"]["phase"] == phase
+    from operations import deployment_access
+    assert not deployment_access(tmp_path).allowed
+    with pytest.raises(ValueError, match="维护"):
+        recovered._claim()
 
 
 def test_restored_webui_endpoint_is_extracted_without_executing_config(tmp_path):

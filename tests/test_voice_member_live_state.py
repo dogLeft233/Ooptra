@@ -18,8 +18,9 @@ from typing import Any
 
 import pytest
 
+from channels import create_oopz_directory
 from oopz_sdk.transport.voice_browser import BrowserVoiceTransport
-from webui.voice_routes import _live_muted, _voice_live_states, normalize_member
+from webui.voice_routes import _live_muted, normalize_member
 
 
 class _Cfg:
@@ -197,13 +198,13 @@ class _Bot:
 
 def test_live_states_read_from_bot() -> None:
     bot = _Bot(_Voice({"u1": {"m": 1, "hm": 0}}, 7))
-    states, received = _voice_live_states(bot)
+    states, received = create_oopz_directory(bot).live_states()
     assert states == {"u1": {"m": 1, "hm": 0}}
     assert received == 7
 
 
 def test_live_states_without_bot() -> None:
-    assert _voice_live_states(None) == ({}, 0)
+    assert create_oopz_directory(None).live_states() == ({}, 0)
 
 
 def test_live_states_swallows_errors() -> None:
@@ -212,12 +213,12 @@ def test_live_states_swallows_errors() -> None:
         def voice(self) -> Any:
             raise RuntimeError("boom")
 
-    assert _voice_live_states(_Boom()) == ({}, 0)
+    assert create_oopz_directory(_Boom()).live_states() == ({}, 0)
 
 
 def test_live_states_ignores_non_mapping_entries() -> None:
     bot = _Bot(_Voice({"u1": {"m": 1}, "u2": "junk"}, 3))
-    states, received = _voice_live_states(bot)
+    states, received = create_oopz_directory(bot).live_states()
     assert set(states) == {"u1"}
     assert received == 3
 
@@ -228,4 +229,4 @@ def test_live_states_handles_missing_attribute() -> None:
     class _Old:
         voice = object()
 
-    assert _voice_live_states(_Old()) == ({}, 0)
+    assert create_oopz_directory(_Old()).live_states() == ({}, 0)

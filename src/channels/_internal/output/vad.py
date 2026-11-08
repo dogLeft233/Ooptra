@@ -16,6 +16,10 @@ class EnergyVad:
         self._silence_ms = 0
         self._utterance_ms = 0
 
+    @property
+    def buffered_bytes(self) -> int:
+        return len(self._buffer) + len(self._utterance)
+
     def reset(self) -> None:
         self._buffer.clear()
         self._utterance.clear()

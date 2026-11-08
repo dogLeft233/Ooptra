@@ -11,11 +11,11 @@ from unittest.mock import AsyncMock
 import pytest
 from support.channel_fixtures import establish_room
 
+from app.voice import VoiceCoordinator
 from channels import create_duplex as VoiceDuplex
 from oopz_sdk.transport.voice_browser import BrowserVoiceTransport
 from operations import load_voice_agent_settings, patch_config_text
 from operations.models import VoiceAgentSettings, VoiceApiSettings
-from voice_agent.agent import VoiceAgent
 from webui import config_editor as editor
 
 
@@ -60,7 +60,7 @@ def test_duplex_passes_current_volume_with_every_pcm_chunk():
 def test_hot_volume_change_updates_browser_without_rebuilding_model(tmp_path):
     async def run():
         settings = VoiceAgentSettings(output_volume=75, memory_path=str(tmp_path / "memory.jsonl"))
-        agent = VoiceAgent(settings, VoiceApiSettings())
+        agent = VoiceCoordinator(settings, VoiceApiSettings())
         transport = SimpleNamespace(set_tts_volume=AsyncMock(return_value={"ok": True}))
         duplex = VoiceDuplex(transport)
         agent.bind_duplex(duplex)
@@ -84,7 +84,7 @@ def test_hot_volume_change_updates_browser_without_rebuilding_model(tmp_path):
 
 def test_idle_volume_change_does_not_start_browser(tmp_path):
     async def run():
-        agent = VoiceAgent(VoiceAgentSettings(memory_path=str(tmp_path / "memory.jsonl")), VoiceApiSettings())
+        agent = VoiceCoordinator(VoiceAgentSettings(memory_path=str(tmp_path / "memory.jsonl")), VoiceApiSettings())
         transport = SimpleNamespace(set_tts_volume=AsyncMock())
         agent.bind_duplex(VoiceDuplex(transport))
         agent.settings.output_volume = 25

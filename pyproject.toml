@@ -29,7 +29,7 @@ allowed-confusables = ["，", "。", "：", "；", "（", "）", "！", "？", "
 [tool.ruff.lint.isort]
 known-first-party = [
     "app", "behavior", "bridge", "channels", "config", "context", "core", "dialogue",
-    "onebot_v11", "oopz", "oopz_sdk", "operations", "private_key", "scripts", "voice_agent", "webui",
+    "onebot_v11", "oopz", "oopz_sdk", "operations", "private_key", "scripts", "webui",
 ]
 
 [tool.pyright]

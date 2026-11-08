@@ -4,6 +4,8 @@ import zipfile
 
 import pytest
 
+from operations.models import StoppedDeployment
+
 
 def test_backup_consistent_sqlite_restore_and_excludes_maintenance(tmp_path):
     from operations import create_backup_store as BackupStore
@@ -21,7 +23,7 @@ def test_backup_consistent_sqlite_restore_and_excludes_maintenance(tmp_path):
         assert "data/maintenance/private-job.json" not in archive.namelist()
     (tmp_path / "config.py").write_text("VALUE = 2\n")
     db.close()
-    store.restore(result["id"])
+    store.restore(store.inspect(result["id"]), StoppedDeployment("isolated", 1, "test", "stopped"))
     assert (tmp_path / "config.py").read_text() == "VALUE = 1\n"
     with sqlite3.connect(tmp_path / "data/test.sqlite3") as restored:
         assert restored.execute("select value from entries").fetchall() == [(1,)]
@@ -37,7 +39,7 @@ def test_restore_rejects_paths_outside_backup_scope(tmp_path, name):
         archive.writestr("manifest.json", json.dumps({"format": 1, "files": [{"name": name, "size": 1, "sha256": ""}]}))
         archive.writestr(name, "x")
     with pytest.raises(ValueError):
-        store.restore(bad_id)
+        store.restore(store.inspect(bad_id), StoppedDeployment("isolated", 1, "test", "stopped"))
     assert not (tmp_path.parent / "escape").exists()
 
 
@@ -53,5 +55,5 @@ def test_restore_rejects_changed_content_before_overwriting_config(tmp_path):
         archive.writestr("manifest.json", manifest)
         archive.writestr("config.py", "VALUE = 2")
     with pytest.raises(ValueError):
-        store.restore(backup["id"])
+        store.restore(store.inspect(backup["id"]), StoppedDeployment("isolated", 1, "test", "stopped"))
     assert (tmp_path / "config.py").read_text() == "VALUE = 1"

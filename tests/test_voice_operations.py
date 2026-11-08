@@ -11,7 +11,7 @@ from operations import load_voice_agent_settings
 
 @pytest.mark.parametrize("operation", ["leave", "stop_current_reply"])
 def test_stop_reply_when_backend_query_completes_does_not_wait_forever(tmp_path, monkeypatch, operation):
-    from dialogue.models import VoiceReply
+    from dialogue.models import Recognition
 
     async def run():
         agent = make_agent(tmp_path)
@@ -23,12 +23,12 @@ def test_stop_reply_when_backend_query_completes_does_not_wait_forever(tmp_path,
             asyncio.get_running_loop().call_soon(
                 lambda: tasks.append(asyncio.create_task(getattr(agent, operation)()))
             )
-            return VoiceReply()
+            return Recognition("input", agent.channels.snapshot().session, "attempt", "member", "no_speech")
 
         async def handle(*args, **kwargs):
             return await asyncio.wait_for(completed_query(), 1)
 
-        monkeypatch.setattr(agent.backend, "handle_utterance", handle)
+        monkeypatch.setattr(agent.backend, "recognize", handle)
         agent._offer_utterance("member", b"\x00\x00", 16000)
         try:
             while not tasks:
@@ -93,7 +93,7 @@ def test_old_empty_room_check_cannot_leave_a_rejoined_room(tmp_path):
         result = await agent.leave(expected_operation_epoch=old_epoch)
         assert not result["ok"]
         assert agent.status()["joined"] and agent.status()["channel"] == "c"
-        assert agent._bot.voice.leaves == 1
+        assert agent.test_platform.voice.leaves == 1
         await agent.leave()
     asyncio.run(run())
 
@@ -105,13 +105,13 @@ def test_empty_guard_uses_real_agent_and_retries_failed_manual_exit(tmp_path):
         from behavior import parse_auto_visit_config
 
         agent = make_agent(tmp_path)
-        agent._bot.config = SimpleNamespace(person_uid="bot")
+        agent.test_platform.config = SimpleNamespace(person_uid="bot")
 
         async def members(area):
             assert area == "a"
             return {"channelMembers": {"c": [{"uid": "bot"}]}}
 
-        agent._bot.channels = SimpleNamespace(get_voice_channel_members=members)
+        agent.test_platform.channels = SimpleNamespace(get_voice_channel_members=members)
         elapsed = 0
         clock = SimpleNamespace(
             monotonic=lambda: elapsed,
@@ -125,13 +125,13 @@ def test_empty_guard_uses_real_agent_and_retries_failed_manual_exit(tmp_path):
         try:
             await agent.join("a", "c")
             await ctrl._check_empty_room()
-            agent._bot.voice.fail_leave = True
+            agent.test_platform.voice.fail_leave = True
             elapsed = 30
             await ctrl._check_empty_room()
             assert agent.status()["joined"]
             assert "leave failed" in ctrl.status()["last_error"]
             assert "a" not in store.snapshot(clock.utcnow())["area_cooldowns"]
-            agent._bot.voice.fail_leave = False
+            agent.test_platform.voice.fail_leave = False
             await ctrl._check_empty_room()
             elapsed = 59
             await ctrl._check_empty_room()
@@ -139,7 +139,7 @@ def test_empty_guard_uses_real_agent_and_retries_failed_manual_exit(tmp_path):
             elapsed = 60
             await ctrl._check_empty_room()
             assert not agent.status()["joined"]
-            assert agent._bot.voice.leaves == 1
+            assert agent.test_platform.voice.leaves == 1
             assert store.snapshot(clock.utcnow())["area_cooldowns"]["a"]
         finally:
             await ctrl.stop()
@@ -161,7 +161,7 @@ def test_room_switch_emits_system_leave_even_if_new_join_fails(tmp_path):
         async def fail(**kwargs):
             raise RuntimeError("join failed")
 
-        agent._bot.voice.join = fail
+        agent.test_platform.voice.join = fail
         with pytest.raises(RuntimeError, match="join failed"):
             await agent.join("b", "d")
         assert [(e.kind, e.source) for e in events] == [("join", "auto"), ("leave", "system")]
@@ -173,12 +173,12 @@ def test_leave_failure_preserves_room_and_emits_no_success(tmp_path):
     async def run():
         agent = make_agent(tmp_path)
         await agent.join("a", "c", source="auto", visit_id="v")
-        agent._bot.voice.fail_leave = True
+        agent.test_platform.voice.fail_leave = True
         agent._speaking = True
         result = await agent.leave(source="auto", expected_visit_id="v")
         assert not result["ok"] and agent.is_auto_visit_current("v")
         assert not agent.status()["speaking"]
-        agent._bot.voice.fail_leave = False
+        agent.test_platform.voice.fail_leave = False
         await agent.leave()
     asyncio.run(run())
 
@@ -248,8 +248,8 @@ def test_concurrent_join_and_leave_never_overlap_sdk_operations(tmp_path):
         async def leave():
             trace.append("leave")
 
-        agent._bot.voice.join = join
-        agent._bot.voice.leave = leave
+        agent.test_platform.voice.join = join
+        agent.test_platform.voice.leave = leave
         task = asyncio.create_task(agent.join("a", "c"))
         await joining.wait()
         exit_task = asyncio.create_task(agent.leave())
@@ -272,6 +272,8 @@ def test_manual_leave_cancels_quick_speak_before_tts_is_generated(tmp_path):
             started.set()
             await asyncio.Event().wait()
 
+        from support.expression_runtime import ScriptedExpression
+        agent.backend = ScriptedExpression()
         agent.backend.tts = tts
         task = asyncio.create_task(agent.speak_text("text"))
         await started.wait()
@@ -290,7 +292,7 @@ def test_auto_join_cannot_replace_a_manual_room(tmp_path):
         with pytest.raises(RuntimeError, match="occupied"):
             await agent.join("auto-area", "auto-room", source="auto", visit_id="v")
         assert agent.status()["area"] == "manual-area"
-        assert agent._bot.voice.leaves == 0
+        assert agent.test_platform.voice.leaves == 0
         await agent.leave()
     asyncio.run(run())
 
@@ -324,13 +326,13 @@ def test_failed_system_leave_closes_backend_and_suspends_listening(tmp_path):
 
         agent.backend.aclose = close
         agent.duplex.enable_listen = listen
-        agent._bot.voice.fail_leave = True
+        agent.test_platform.voice.fail_leave = True
         agent.set_connection_ready(False)
         result = await agent.leave(source="system")
         assert not result["ok"] and agent.is_auto_visit_current("v")
         assert closes and listening[-1] is False
         assert agent._round_task is None and agent._voice_suspended
-        agent._bot.voice.fail_leave = False
+        agent.test_platform.voice.fail_leave = False
         assert (await agent.leave())["ok"]
     asyncio.run(run())
 

@@ -6,9 +6,9 @@ from types import SimpleNamespace
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from app.http import VoiceApiServer
 from context import create_context_bridge as ContextBridge
 from operations.models import VoiceApiSettings
-from voice_agent.api import VoiceApiServer
 from webui.voice_routes import build_voice_routes
 
 
@@ -74,7 +74,8 @@ def test_text_channels_reuse_onebot_registry_and_exclude_voice_channels():
                 SimpleNamespace(channel_id="voice-a", channel_type="VOICE", name="语音")])]
         adapter = SimpleNamespace(protocol="onebot.v11", self_id=42, ids=SimpleNamespace(createId=mapped))
         bot = SimpleNamespace(adapters=[adapter], areas=SimpleNamespace(get_area_channels=channels))
-        runtime = SimpleNamespace(agent=SimpleNamespace(_bot=bot))
+        from channels import create_oopz_directory
+        runtime = SimpleNamespace(agent=SimpleNamespace(directory=create_oopz_directory(bot)))
         api = VoiceApiServer(runtime, VoiceApiSettings(token="test-secret"))
         app = web.Application()
         app.add_routes(build_voice_routes(runtime, wrap=api._wrap))

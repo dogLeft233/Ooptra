@@ -70,7 +70,7 @@ def test_cleanup_revalidates_preview_before_any_deletion(tmp_path, change):
     if change == "content":
         (retired / "asset").write_bytes(b"new content")
     elif change == "active":
-        service.write_job({"phase": "checking", "service_pid": 1, "new_python": str(retired / "Scripts/python.exe")})
+        service.write_job({"id": "fixture", "phase": "checking", "service_pid": 1, "new_python": str(retired / "Scripts/python.exe")})
     else:
         (tmp_path / "data/maintenance/runtime.json").write_text(json.dumps({"python": str(retired / "Scripts/python.exe")}))
     with pytest.raises(ValueError):
@@ -83,7 +83,7 @@ def test_cleanup_preserves_every_backup_referenced_by_latest_job(tmp_path):
     backups = [service.backups.create()["id"] for _ in range(5)]
     for index, backup in enumerate(backups):
         os.utime(service.backups.path(backup), (1700000000 + index, 1700000000 + index))
-    service.write_job({"phase": "failed", "backup_id": backups[0], "safety_backup_id": backups[1]})
+    service.write_job({"id": "fixture", "phase": "failed", "backup_id": backups[0], "safety_backup_id": backups[1]})
     preview = service.preview_cleanup()
     assert {row["id"] for row in preview["items"] if row["kind"] == "backup"} == {backups[2]}
 

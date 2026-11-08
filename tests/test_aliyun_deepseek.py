@@ -15,10 +15,50 @@ from support.channel_fixtures import establish_room
 from support.dialogue_fixtures import aliyun_backend as AliyunDeepSeekBackend
 from test_voice_operations import make_agent
 
-from dialogue.models import VoiceReply, VoiceStreamError, VoiceStreamInterrupted
+from channels.models import OutputSourceError
+from dialogue.models import VoiceStreamInterrupted
 from operations import load_voice_agent_settings
 from operations.models import VoiceAgentSettings
-from voice_agent.preview import EphemeralMemory
+
+
+async def run_expression_protocol(backend, pcm, *, sample_rate, user_key, channel_key, on_audio):
+    """按公开识别/分类/表达契约驱动真实供应商，不调用旧复合后端入口。"""
+    import time
+    from uuid import uuid4
+
+    from behavior.models import AttemptPermit, SpeechIntent
+    from channels.models import RoomTarget, SessionRef
+    from context.models import ContextRef, ContextRevision, PreparedContext
+    from dialogue import audio_output
+    from dialogue.models import AudioInput, ControlInput
+
+    session = SessionRef("test-run", "test-binding", uuid4().hex, RoomTarget("area", "channel"))
+    input_ref = uuid4().hex
+    permit = AttemptPermit(session, 1, input_ref=input_ref, expires_at=time.monotonic()+5)
+    input = AudioInput(input_ref, session, pcm, sample_rate, user_key, permit.attempt_id)
+    recognized = await backend.recognize(input, permit)
+    if recognized.status != "recognized":
+        return SimpleNamespace(user_text="", text="", pcm16=b"", user_key=user_key, control=None)
+    result = await backend.interpret_control(ControlInput(recognized.text, input.input_ref, session, user_key))
+    if result.status != "candidate":
+        raise ValueError(result.reason)
+    if result.candidate.leave or result.candidate.volume is not None:
+        return SimpleNamespace(user_text=recognized.text, text="", pcm16=b"", user_key=user_key,
+                               control=result.candidate)
+    context = PreparedContext(ContextRef(session, 0, "local"), ContextRevision(0), backend.settings.persona, ())
+    action = uuid4().hex
+    intent = SpeechIntent(action, action, session, input.input_ref, context.version,
+                          time.monotonic()+5, recognized.text, user_key)
+    audio = audio_output(backend.generate(intent, context))
+    output = bytearray()
+    try:
+        async for frame in audio.frames():
+            await on_audio(frame.pcm16, frame.sample_rate)
+            output.extend(frame.pcm16)
+        return SimpleNamespace(user_text=recognized.text, text=audio.evidence().text,
+                               pcm16=bytes(output), user_key=user_key, control=None)
+    finally:
+        await audio.aclose()
 
 
 def test_local_keys_do_not_expand_shell_or_override_process_env(tmp_path, monkeypatch):
@@ -38,7 +78,7 @@ def test_local_keys_do_not_expand_shell_or_override_process_env(tmp_path, monkey
 async def model_servers(*, fail_asr=False, truncate=False, control=False):
     state = SimpleNamespace(
         text=[], chat_requests=[], audio_seen=asyncio.Event(), llm_finished=False,
-        open_sockets=0, asr_bytes=bytearray(),
+        open_sockets=0, asr_bytes=bytearray(), sockets_idle=asyncio.Event(),
     )
 
     async def websocket(request):
@@ -46,6 +86,7 @@ async def model_servers(*, fail_asr=False, truncate=False, control=False):
         ws = web.WebSocketResponse()
         await ws.prepare(request)
         state.open_sockets += 1
+        state.sockets_idle.clear()
         try:
             run = await ws.receive_json()
             task = run['header']['task_id']
@@ -85,6 +126,8 @@ async def model_servers(*, fail_asr=False, truncate=False, control=False):
                     break
         finally:
             state.open_sockets -= 1
+            if not state.open_sockets:
+                state.sockets_idle.set()
         return ws
 
     async def chat(request):
@@ -129,7 +172,7 @@ async def model_servers(*, fail_asr=False, truncate=False, control=False):
         deepseek_api_key='fake-deepseek', dashscope_ws_url=f'ws://127.0.0.1:{port}/speech',
         deepseek_base_url=f'http://127.0.0.1:{port}', reply_probability_percent=100,
     )
-    backend = AliyunDeepSeekBackend(settings, EphemeralMemory())
+    backend = AliyunDeepSeekBackend(settings)
     try:
         yield backend, state
     finally:
@@ -149,7 +192,7 @@ def test_audio_reaches_sink_before_llm_finishes_and_controls_are_not_spoken():
                 output.extend(pcm)
                 state.audio_seen.set()
 
-            reply = await backend.handle_utterance_stream(
+            reply = await run_expression_protocol(backend,
                 b'\x01\x00' * 24000, sample_rate=24000,
                 user_key='oopz:member', channel_key='area/channel', on_audio=sink,
             )
@@ -159,7 +202,8 @@ def test_audio_reaches_sink_before_llm_finishes_and_controls_are_not_spoken():
             assert reply.pcm16 == bytes(output)
             assert len(state.asr_bytes) == 32000  # Resampled from 24 kHz to 16 kHz.
             assert len(state.chat_requests) == 2  # Control classification then speech.
-            assert backend._tts_task is None and backend._audio_sink is None
+            await asyncio.wait_for(state.sockets_idle.wait(), 1)
+            assert state.open_sockets == 0
 
     asyncio.run(run())
 
@@ -168,7 +212,7 @@ def test_control_request_never_opens_tts():
     async def run():
         async with model_servers(control=True) as (backend, state):
             sink = AsyncMock()
-            reply = await backend.handle_utterance_stream(
+            reply = await run_expression_protocol(backend,
                 b'\x01\x00' * 16000, sample_rate=16000,
                 user_key='member', channel_key='channel', on_audio=sink,
             )
@@ -191,15 +235,15 @@ def test_stream_failure_cleans_up_without_retrying_audible_reply(interruption):
                     raise asyncio.CancelledError()
 
             expected = {'barge_in': VoiceStreamInterrupted, 'cancel': asyncio.CancelledError,
-                        'truncated_sse': VoiceStreamError}[interruption]
+                        'truncated_sse': OutputSourceError}[interruption]
             with pytest.raises(expected):
-                await backend.handle_utterance_stream(
+                await run_expression_protocol(backend,
                     b'\x01\x00' * 16000, sample_rate=16000,
                     user_key='member', channel_key='channel', on_audio=sink,
                 )
             assert len(state.chat_requests) == 2
-            assert backend._tts_task is None and backend._texts is None
-            assert backend._audio_sink is None
+            await asyncio.wait_for(state.sockets_idle.wait(), 1)
+            assert state.open_sockets == 0
 
     asyncio.run(run())
 
@@ -216,64 +260,91 @@ def test_asr_task_failure_does_not_reach_llm():
 
 @pytest.mark.parametrize('invalidate', [False, True])
 def test_room_stream_is_not_replayed_and_stale_audio_is_rejected(tmp_path, invalidate):
+    from uuid import uuid4
+
+    from channels.models import LeaveRoom
+    from dialogue import create_expression_job
+    from dialogue.models import Recognition
+
     async def run():
         agent = make_agent(tmp_path)
         await establish_room(agent)
+        agent.settings.min_utterance_ms = 0
+        agent.settings.reply_probability_percent = 100
+        agent.settings.voice_leave_enabled = False
+        agent.settings.voice_volume_enabled = False
         pushed = []
-
+        first = asyncio.Event()
         async def push(pcm, rate, **kwargs):
             pushed.append((pcm, kwargs.get('finish', False)))
+            if pcm:
+                first.set()
             return {'ok': True}
-
         agent.duplex.push_tts_pcm = push
         agent.duplex.stop_tts = AsyncMock(return_value={'ok': True})
-
         class Backend:
-            async def handle_utterance_stream(self, pcm, *, on_audio, **kwargs):
-                await on_audio(b'\x01\x00', 24000)
-                if invalidate:
-                    agent._operation_epoch += 1
-                    await on_audio(b'\x02\x00', 24000)
-                return VoiceReply(user_text='你好', text='收到', pcm16=b'\x01\x00')
-
+            async def recognize(self, input, permit):
+                return Recognition(input.input_ref, input.session, permit.attempt_id,
+                                   input.user_key, 'recognized', '你好')
+            def generate(self, intent, context, **kwargs):
+                async def produce(emit):
+                    await emit('text_final', text='收到')
+                    await emit('audio', pcm16=b'\x01\x00', sample_rate=24000)
+                    if invalidate:
+                        await asyncio.Event().wait()
+                return create_expression_job(intent.action_id, intent.session, produce,
+                                             deadline=intent.deadline)
         agent.backend = Backend()
-        await agent._handle_utterance('member', b'\x00\x00', 16000)
+        worker = asyncio.create_task(agent._handle_utterance('member', b'\x00\x00', 16000))
+        await asyncio.wait_for(first.wait(), 1)
+        if invalidate:
+            await agent.channels.execute(LeaveRoom(uuid4().hex, agent.channels.snapshot().session))
+        await asyncio.wait_for(worker, 1)
         assert [pcm for pcm, finish in pushed if not finish] == [b'\x01\x00']
         assert any(finish for _, finish in pushed) is not invalidate
         assert agent.turns == 1
         if not invalidate:
             assert not agent._speaking
-
     asyncio.run(run())
 
 
 def test_barge_in_cancels_generation_without_cancelling_room_worker(tmp_path):
+    from dialogue import create_expression_job
+    from dialogue.models import Recognition
+
     async def run():
         agent = make_agent(tmp_path)
         await establish_room(agent)
+        agent.settings.min_utterance_ms = 0
+        agent.settings.reply_probability_percent = 100
+        agent.settings.voice_leave_enabled = False
+        agent.settings.voice_volume_enabled = False
         agent.duplex.push_tts_pcm = AsyncMock(return_value={'ok': True})
         started = asyncio.Event()
         cancelled = asyncio.Event()
-
         class Backend:
-            async def handle_utterance_stream(self, pcm, *, on_audio, **kwargs):
-                await on_audio(b'\x01\x00', 24000)
-                started.set()
-                try:
-                    await asyncio.Event().wait()
-                finally:
-                    cancelled.set()
-
+            async def recognize(self, input, permit):
+                return Recognition(input.input_ref, input.session, permit.attempt_id,
+                                   input.user_key, 'recognized', '你好')
+            def generate(self, intent, context, **kwargs):
+                async def produce(emit):
+                    await emit('audio', pcm16=b'\x01\x00', sample_rate=24000)
+                    started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        cancelled.set()
+                return create_expression_job(intent.action_id, intent.session, produce,
+                                             deadline=intent.deadline)
         agent.backend = Backend()
         worker = asyncio.create_task(agent._handle_utterance('member', b'\x00\x00', 16000))
-        await started.wait()
+        await asyncio.wait_for(started.wait(), 1)
         await agent._interrupt_speaking()
         await asyncio.wait_for(worker, .5)
         assert cancelled.is_set()
         assert not worker.cancelled()
         assert agent._stream_reply_task is None
         assert not agent._speaking
-
     asyncio.run(run())
 
 
@@ -285,8 +356,9 @@ def test_streaming_barge_in_ignores_silence_and_requires_hold_duration(tmp_path)
         agent.duplex.stop_tts = AsyncMock(return_value={'ok': True})
 
         class Backend:
-            async def handle_utterance_stream(self, *args, **kwargs):
-                return VoiceReply()
+            def capabilities(self):
+                from dialogue.models import DialogueCapabilities
+                return DialogueCapabilities(streaming_utterance=True)
 
         agent.backend = Backend()
         await agent._on_remote_pcm('member', b'\x00\x00' * 1600, 16000)
@@ -312,7 +384,7 @@ def test_concurrent_generation_keeps_each_output_sink_separate():
                     outputs[index].extend(pcm)
                     state.audio_seen.set()
 
-                return await backend.handle_utterance_stream(
+                return await run_expression_protocol(backend,
                     b'\x01\x00' * 16000, sample_rate=16000,
                     user_key=f'member-{index}', channel_key='channel', on_audio=sink,
                 )

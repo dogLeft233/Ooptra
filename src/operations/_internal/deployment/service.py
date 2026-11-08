@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -14,20 +16,34 @@ import sys
 import tarfile
 import tempfile
 import uuid
+from dataclasses import asdict
 from pathlib import Path
 
 from operations._internal.backups.storage import BackupStore, atomic_json, restored_endpoint
-from operations.models import MaintenancePlatform, UpdateTarget
+from operations._internal.mutation import ACTIVE_PHASES, deployment_access, mutation_lock
+from operations.models import (
+    HandoffRef,
+    JobRef,
+    JobSnapshot,
+    MaintenancePlan,
+    MaintenancePlatform,
+    MaintenanceRequest,
+    RevisionConflict,
+    SystemSnapshot,
+    UpdateTarget,
+)
+
+from .jobs import transition
 
 OFFICIAL_REMOTES = {
     "https://github.com/eason4869/ooptra", "https://github.com/eason4869/ooptra.git",
     "git@github.com:eason4869/ooptra.git", "ssh://git@github.com/eason4869/ooptra.git",
 }
 CHANNELS = {"main": "正式版", "beta": "测试版", "dev": "预览版"}
-ACTIVE_PHASES = {"preparing", "awaiting_restart", "switching", "checking", "rolling_back"}
 PUBLIC_JOB_FIELDS = {
     "id", "action", "phase", "detail", "started_at", "updated_at", "target_sha",
     "old_sha", "backup_id", "channel", "progress_stage", "stage_started_at",
+    "revision", "closed", "pending", "plan_id",
 }
 QUERY_WAIT_SECONDS = 12
 PREFLIGHT_SECONDS = 10
@@ -58,7 +74,7 @@ class MaintenanceService:
     def probe_network(self, mirror, channel, **options):
         return self.platform.test_mirror_connection(mirror, channel, self.platform.run_command, **options)
 
-    def __init__(self, root, *, shutdown=None, managed=None, venv=None, port=3090, host="127.0.0.1", token="", runtime_status=None, bootstrap_ready=None, platform: MaintenancePlatform):
+    def __init__(self, root, *, shutdown=None, managed=None, venv=None, port=3090, host="127.0.0.1", token="", runtime_status=None, bootstrap_ready=None, runtime_control=None, platform: MaintenancePlatform):
         self.platform = platform
         self.root = Path(root).resolve()
         self.backups = BackupStore(self.root)
@@ -71,6 +87,8 @@ class MaintenanceService:
         self.token = token
         self._task = None
         self._busy = False
+        self._mutation_guard = None
+        self.runtime_control = runtime_control
         self._mutation_tasks = set()
         self._check = None
         self._cleanup = None
@@ -83,12 +101,6 @@ class MaintenanceService:
         self._check_stage = None
         self.runtime_status = runtime_status
         self.bootstrap_ready = bootstrap_ready
-        previous = self.read_job()
-        if (previous and previous.get("phase") in ACTIVE_PHASES and previous.get("service_pid") != os.getpid()
-                and os.environ.get("OOPTRA_UPDATE_ID", "") != previous.get("id")):
-            previous.update(phase="failed", detail="上次维护被中断；请核对版本与数据，需要时恢复安全备份后重新操作")
-            self.write_job(previous)
-
     def read_job(self):
         try:
             value = json.loads(self.job_file.read_text(encoding="utf-8"))
@@ -97,9 +109,118 @@ class MaintenanceService:
             return None
 
     def write_job(self, value):
-        value["updated_at"] = self.platform.clock.time()
-        atomic_json(self.job_file, value)
+        transition(self.root, value, role='application', now=self.platform.clock.time(),
+                   locked=self._mutation_guard is not None)
         self._invalidate_reads()
+
+    def set_runtime_control(self, control):
+        self.runtime_control = control
+
+    def job(self, reference: JobRef):
+        raw = self.read_job()
+        if raw is None or raw.get('id') != reference.job_id:
+            try:
+                raw = json.loads((self.root / 'data/maintenance/jobs' /
+                    (hashlib.sha256(reference.job_id.encode()).hexdigest() + '.json')).read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                return None
+        return JobSnapshot(raw['id'], raw.get('revision', 0), raw.get('action', ''),
+            raw.get('phase', 'unknown'), raw.get('detail', ''),
+            tuple(raw.get('closed', [])), tuple(raw.get('pending', [])))
+
+    def snapshot(self):
+        raw = self.read_job()
+        return SystemSnapshot(deployment_access(self.root),
+            self.job(JobRef(raw['id'])) if raw and isinstance(raw.get('id'), str) else None)
+
+    def _config_revision(self):
+        path = self.root / 'config.py'
+        return hashlib.sha256(path.read_bytes() if path.exists() else b'').hexdigest()
+
+    async def plan(self, request: MaintenanceRequest) -> MaintenancePlan:
+        if not isinstance(request, MaintenanceRequest):
+            raise TypeError('需要已解析的维护请求')
+        access = deployment_access(self.root)
+        if not access.allowed or self._busy:
+            raise ValueError(access.reason or '维护任务进行中')
+        backup_fingerprint = ''
+        if request.action == 'update':
+            await self._validate_update(request.target, request.confirm_channel_switch)
+        else:
+            if not self.managed or not self.runtime_control:
+                raise ValueError('恢复需要使用 python launcher.py 启动，确保数据库已安全关闭')
+            self.backups.path(request.backup_id)
+            def validate():
+                with tempfile.TemporaryDirectory(dir=self.backups.directory) as folder:
+                    self.backups.validate(request.backup_id, Path(folder))
+            await asyncio.to_thread(validate)
+            verified = await asyncio.to_thread(self.backups.inspect, request.backup_id)
+            backup_fingerprint = verified.fingerprint
+        installed, _ = await asyncio.to_thread(self.installed)
+        plan = MaintenancePlan(uuid.uuid4().hex, request, installed, self._config_revision(),
+            self.platform.clock.time() + 600, ('停止业务资源', '重启应用', '保留身份映射与用户数据'), backup_fingerprint)
+        with mutation_lock(self.root):
+            if not deployment_access(self.root).allowed:
+                raise ValueError('维护任务进行中')
+            atomic_json(self.root / 'data/maintenance/plans' / (plan.plan_id + '.json'), asdict(plan))
+        return plan
+
+    async def execute(self, plan: MaintenancePlan) -> JobRef:
+        if not isinstance(plan, MaintenancePlan) or re.fullmatch(r'[a-f0-9]{32}', plan.plan_id) is None:
+            raise ValueError('维护计划无效')
+        plan_path = self.root / 'data/maintenance/plans' / (plan.plan_id + '.json')
+        try:
+            saved = json.loads(plan_path.read_text(encoding='utf-8'))
+        except (OSError, ValueError) as exc:
+            raise ValueError('维护计划不存在或损坏') from exc
+        bound_job = saved.pop('execution_id', None)
+        if saved != json.loads(json.dumps(asdict(plan))):
+            raise ValueError('维护计划与已检查内容不符')
+        if bound_job:
+            return JobRef(bound_job)
+        current_job = self.read_job()
+        if current_job and current_job.get('plan_id') == plan.plan_id:
+            return JobRef(current_job['id'])
+        if (self.platform.clock.time() > plan.expires_at or self._config_revision() != plan.config_revision
+                or (await asyncio.to_thread(self.installed))[0] != plan.deployment_revision):
+            raise RevisionConflict('维护计划过期或部署/配置已变化，请重新规划')
+        if plan.request.action == 'update':
+            await self._validate_update(plan.request.target, plan.request.confirm_channel_switch)
+        if plan.request.action == 'restore':
+            verified = await asyncio.to_thread(self.backups.inspect, plan.request.backup_id)
+            if verified.fingerprint != plan.backup_fingerprint:
+                raise RevisionConflict('维护计划绑定的备份内容变化，请重新规划')
+        self._claim()
+        try:
+            # Recheck under the shared configuration/maintenance mutation gate.
+            if self._config_revision() != plan.config_revision:
+                raise RevisionConflict('维护计划的配置版本已变化')
+            job = {'id': uuid.uuid4().hex, 'plan_id': plan.plan_id,
+                'action': plan.request.action, 'phase': 'preparing',
+                'detail': '准备维护资源，当前服务继续运行',
+                'started_at': self.platform.clock.time(), 'service_pid': os.getpid(),
+                'service_start_marker': os.environ.get('OOPTRA_PROCESS_MARKER', ''),
+                'config_revision': plan.config_revision, 'deployment_revision': plan.deployment_revision}
+            if plan.request.action == 'update':
+                target = plan.request.target
+                if target is None:
+                    raise ValueError('更新计划缺少目标')
+                job.update(channel=target.channel, target_sha=target.commit)
+            else:
+                job['backup_id'] = plan.request.backup_id
+                job['backup_fingerprint'] = plan.backup_fingerprint
+            self.write_job(job)
+            saved['execution_id'] = job['id']
+            atomic_json(plan_path, saved)
+            # Persistent preparing now blocks new writes; never hold the OS gate while
+            # waiting for resource shutdown (an old save thread may still need to fail).
+            self._release_guard()
+            self._task = asyncio.create_task(self._prepare(job) if job['action'] == 'update'
+                                             else self._prepare_restore(job))
+            return JobRef(job['id'])
+        except BaseException:
+            self._release()
+            raise
 
     def _invalidate_reads(self):
         self._read_generation += 1
@@ -332,7 +453,7 @@ class MaintenanceService:
             self._cleanup = None
             return result
         finally:
-            self._busy = False
+            self._release()
             self._invalidate_reads()
 
     async def apply_cleanup(self, token):
@@ -350,7 +471,7 @@ class MaintenanceService:
                 return {"ok": True, "removed": len(current), "removed_bytes": sum(item["size"] for item in current)}
             return await self._run_mutation(apply)
         finally:
-            self._busy = False
+            self._release()
             self._invalidate_reads()
 
     async def check_update(self, channel=None):
@@ -407,10 +528,28 @@ class MaintenanceService:
         return {"ok": True, **self._check}
 
     def _claim(self):
-        job = self.read_job() or {}
-        if self._busy or job.get("phase") in ACTIVE_PHASES:
-            raise ValueError("维护任务进行中")
-        self._busy = True
+        if self._busy:
+            raise ValueError('维护任务进行中')
+        guard = mutation_lock(self.root, blocking=False)
+        guard.__enter__()
+        try:
+            access = deployment_access(self.root)
+            if not access.allowed:
+                raise ValueError(access.reason)
+            self._busy = True
+            self._mutation_guard = guard
+        except BaseException:
+            guard.__exit__(None, None, None)
+            raise
+
+    def _release(self):
+        self._busy = False
+        self._release_guard()
+
+    def _release_guard(self):
+        guard, self._mutation_guard = self._mutation_guard, None
+        if guard is not None:
+            guard.__exit__(None, None, None)
 
     async def _wait_owned(self, task):
         cancelled = None
@@ -447,11 +586,19 @@ class MaintenanceService:
         try:
             return await self._run_mutation(self.backups.create)
         finally:
-            self._busy = False
+            self._release()
             self._invalidate_reads()
 
     async def start_update(self, channel, target_sha, *, confirm_channel_switch=False):
-        target = UpdateTarget.parse(channel, target_sha)
+        plan = await self.plan(MaintenanceRequest('update', UpdateTarget.parse(channel, target_sha),
+                                                 confirm_channel_switch=confirm_channel_switch))
+        await self.execute(plan)
+        job = self.read_job()
+        if job is None:
+            raise RuntimeError("维护受理后缺少任务记录")
+        return {k: v for k, v in job.items() if k in PUBLIC_JOB_FIELDS}
+
+    async def _validate_update(self, target, confirm_channel_switch):
         channel, target_sha = target.channel, target.commit
         # Checking can overlap an awaited Git read; bind all decisions to this
         # immutable result rather than a later check from another browser.
@@ -468,20 +615,12 @@ class MaintenanceService:
             raise ValueError("当前已是该渠道最新版本")
         if not (await asyncio.to_thread(self.preflight))["supported"]:
             raise ValueError("当前部署不支持自动升级，请查看预检查结果")
-        self._claim()
-        job = {"id": uuid.uuid4().hex, "action": "update", "phase": "preparing", "detail": "准备独立虚拟环境，当前服务继续运行", "target_sha": target_sha, "channel": channel, "started_at": self.platform.clock.time(), "service_pid": os.getpid()}
-        self.write_job(job)
-        self._task = asyncio.create_task(self._prepare(job))
-        return {k: v for k, v in job.items() if k in PUBLIC_JOB_FIELDS}
-
     async def start_restore(self, backup_id):
-        if not self.managed or not self.shutdown:
-            raise ValueError("恢复需要使用 python launcher.py 启动，确保数据库已安全关闭")
-        self.backups.path(backup_id)
-        self._claim()
-        job = {"id": uuid.uuid4().hex, "action": "restore", "phase": "preparing", "backup_id": backup_id, "detail": "校验备份并创建恢复前备份", "started_at": self.platform.clock.time(), "service_pid": os.getpid()}
-        self.write_job(job)
-        self._task = asyncio.create_task(self._prepare_restore(job))
+        plan = await self.plan(MaintenanceRequest('restore', backup_id=backup_id))
+        await self.execute(plan)
+        job = self.read_job()
+        if job is None:
+            raise RuntimeError("维护受理后缺少任务记录")
         return {k: v for k, v in job.items() if k in PUBLIC_JOB_FIELDS}
 
     def _progress(self, job, stage, detail):
@@ -522,6 +661,16 @@ class MaintenanceService:
             if (not (source / "launcher.py").is_file()
                     or any(marker not in server_text for marker in ("OOPTRA_UPDATE_ID", "bootstrap_ready"))):
                 raise ValueError("目标版本不支持自动升级健康检查，请按 README 手动安装")
+            contract_path = source / 'src/operations/models.py'
+            constants = {}
+            if contract_path.is_file():
+                for node in ast.parse(contract_path.read_text(encoding='utf-8')).body:
+                    if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+                        for target in node.targets:
+                            if isinstance(target, ast.Name):
+                                constants[target.id] = node.value.value
+            if constants.get('DEPLOYMENT_CONTRACT_VERSION') != 2 or constants.get('CONTEXT_SCHEMA_MAX', 0) < 1:
+                raise ValueError('目标版本不支持维护激活屏障或当前上下文格式，请先导出数据后手动迁移')
             self._progress(job, "environment", "正在创建独立 Python 虚拟环境")
             self.platform.run_command(self.root, [sys.executable, "-m", "venv", str(environment)], 120)
             python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
@@ -559,6 +708,8 @@ class MaintenanceService:
                     self.backups.validate(job["backup_id"], Path(folder))
                     job["restore_endpoint"] = restored_endpoint(Path(folder) / "config.py")
             await asyncio.to_thread(validate)
+            if (await asyncio.to_thread(self.backups.inspect, job['backup_id'])).fingerprint != job['backup_fingerprint']:
+                raise ValueError('准备期间备份内容变化，取消恢复')
             self._progress(job, "backup", "正在创建恢复前安全备份")
             job["safety_backup_id"] = (await asyncio.to_thread(self.backups.create))["id"]
             await self._ready(job)
@@ -566,20 +717,56 @@ class MaintenanceService:
             self._fail(job, exc)
 
     async def _ready(self, job):
-        if not self.shutdown:
-            raise ValueError("当前启动方式不支持安全重启")
-        job.update({"old_channel": (await asyncio.to_thread(self.installed))[1],
-                    "old_python": sys.executable, "service_pid": os.getpid(), "health_port": self.port,
-                    "health_token": self.token, "health_host": self.host,
-                    "old_browser_path": os.environ.get("PLAYWRIGHT_BROWSERS_PATH", ""),
-                    "phase": "awaiting_restart", "detail": "准备完成，正在安全关闭语音与数据库"})
+        if not self.runtime_control:
+            raise ValueError('当前启动方式不支持安全重启')
+        if self._config_revision() != job.get('config_revision', self._config_revision()):
+            raise RevisionConflict('准备期间配置版本变化，已取消切换')
+        job.update({'old_channel': (await asyncio.to_thread(self.installed))[1],
+            'old_python': sys.executable, 'service_pid': os.getpid(), 'health_port': self.port,
+            'health_token': self.token, 'health_host': self.host,
+            'old_browser_path': os.environ.get('PLAYWRIGHT_BROWSERS_PATH', ''),
+            'phase': 'quiescing', 'detail': '准备完成，正在静默业务资源'})
         self.write_job(job)
-        self.shutdown()
+        try:
+            result = await self.runtime_control.quiesce(job['id'], self.platform.clock.monotonic() + 60)
+        except Exception as exc:
+            job.update(phase='blocked_degraded', detail='业务静默异常，禁止切换；需显式重启原部署',
+                       pending=['runtime'], errors=[type(exc).__name__])
+            self.write_job(job)
+            self._release()
+            return
+        job.update(closed=list(result.closed), pending=list(result.pending), errors=list(result.errors))
+        if not result.complete:
+            job.update(phase='blocked_degraded', detail='部分业务资源未关闭，禁止切换；需显式重启原部署')
+            self.write_job(job)
+            self._release()
+            return
+        job.update(phase='quiesced', detail='业务资源已静默，持久化父进程交接')
+        self.write_job(job)
+        token = uuid.uuid4().hex
+        job.update(phase='awaiting_exit', handoff_token=token,
+                   detail='交接已持久化，等待启动器确认原进程实际退出')
+        self.write_job(job)
+        handoff = HandoffRef(job['id'], job['revision'], token)
+        self._release()  # The persistent awaiting_exit gate now blocks new mutations.
+        try:
+            response = await self.runtime_control.request_exit(handoff)
+        except Exception as exc:
+            job.update(phase='blocked_degraded', detail='退出通知失败，禁止切换；需显式重启原部署',
+                       errors=[type(exc).__name__])
+            self.write_job(job)
+            return
+        if not response.accepted:
+            job.update(phase='blocked_degraded', detail='退出请求被拒绝，禁止切换；需显式重启原部署')
+            self.write_job(job)
 
     def _fail(self, job, exc):
-        job.update(phase="failed", detail=str(exc) if isinstance(exc, ValueError) else f"维护准备失败（{type(exc).__name__}）；当前服务继续运行")
+        if job.get('phase') in {'quiescing', 'quiesced', 'awaiting_exit', 'blocked_degraded'}:
+            job.update(phase='blocked_degraded', detail='维护静默/交接失败，业务保持受限；需显式重启原部署')
+        else:
+            job.update(phase='failed', detail=str(exc) if isinstance(exc, ValueError) else f'维护准备失败（{type(exc).__name__}）；当前服务继续运行')
         self.write_job(job)
-        self._busy = False
+        self._release()
 
     async def close(self):
         for mutation in tuple(self._mutation_tasks):
@@ -589,6 +776,7 @@ class MaintenanceService:
             # race the supervisor's code switch. No shutdown is requested until ready.
             with contextlib.suppress(Exception):
                 await self._wait_owned(self._task)
+        self._release()
         for task in [*self._query_tasks.values(), self._check_task]:
             if task is not None:
                 with contextlib.suppress(Exception, asyncio.CancelledError):

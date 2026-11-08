@@ -12,14 +12,14 @@ def test_detached_updated_install_retains_its_verified_source(tmp_path, monkeypa
     git_dir.mkdir()
     (git_dir / "HEAD").write_text(current, encoding="utf-8")
     service = MaintenanceService(tmp_path)
-    service.write_job({"action": "update", "phase": "complete", "channel": "main", "target_sha": current})
+    service.write_job({"id": "first", "action": "update", "phase": "complete", "channel": "main", "target_sha": current})
     assert service.status()["update"]["channel"] == "main"
     (git_dir / "refs/heads").mkdir(parents=True)
     (git_dir / "refs/heads/dev").write_text(current, encoding="utf-8")
     (git_dir / "HEAD").write_text("ref: refs/heads/dev", encoding="utf-8")
     assert service.status()["update"]["channel"] == "dev"
     (git_dir / "HEAD").write_text(current, encoding="utf-8")
-    service.write_job({"action": "update", "phase": "complete", "channel": "main", "target_sha": "b" * 40})
+    service.write_job({"id": "second", "action": "update", "phase": "complete", "channel": "main", "target_sha": "b" * 40})
     assert service.status()["update"]["channel"] == "dev"
 
 

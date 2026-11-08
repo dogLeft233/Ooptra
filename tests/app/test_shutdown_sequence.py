@@ -2,13 +2,13 @@
 import asyncio
 
 import main
-from voice_agent import runtime
+from app import assembly as runtime
 
 
 def test_shutdown_drains_console_before_stopping_runtime_and_bridge(monkeypatch):
     stopped = []
     class Controller:
-        def __init__(self, state):
+        def __init__(self, state, **kwargs):
             pass
         async def start(self):
             pass
@@ -29,6 +29,8 @@ def test_shutdown_drains_console_before_stopping_runtime_and_bridge(monkeypatch)
         async def start(self):
             self.shutdown()
         def set_bootstrap_ready(self, value):
+            pass
+        def set_runtime_control(self, value):
             pass
         async def stop(self):
             stopped.append("console")

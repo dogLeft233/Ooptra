@@ -1,33 +1,36 @@
-"""行为策略的已实现公开边界；完整决策/反馈契约仍在迁移。"""
+"""行为决策、输入尝试、Live许可及串门任务的公开边界。"""
 
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from behavior.models import (
+    AttemptFinished,
     AttemptPermit,
     AttemptRejected,
     AttemptsSnapshot,
+    AudioReady,
     AutoVisitConfig,
+    ControlAction,
+    ControlProposal,
+    DeferLive,
+    FeedbackReceipt,
+    LiveProposal,
+    NoAction,
+    NotExecuted,
+    RecognitionObserved,
+    ReplySettings,
     ScheduledReply,
+    Speak,
     SpeechActivity,
 )
-from channels.models import AreaMembership, JoinedAreas, RoomOperation, SessionRef
-
-
-class CascadeAttempts(Protocol):
-    """在同一事件循环内、首次模型等待前原子预留会话输入额度。
-
-    每次 admit 代表一次新输入；调用者不得对同一输入重复调用。0 表示不限额。
-    仅实际新会话重置；旧会话输入拒绝，不改变新会话额度。没有失败退款。
-    """
-
-    def start_session(self, session: SessionRef) -> None: ...
-
-    def admit(self, session: SessionRef, limit: int) -> AttemptPermit | AttemptRejected: ...
-
-    def exhausted(self, limit: int) -> bool: ...
-
-    def snapshot(self) -> AttemptsSnapshot: ...
+from channels.models import (
+    ActionOutcome,
+    AreaMembership,
+    JoinedAreas,
+    PlaybackResult,
+    RoomOperation,
+    SessionRef,
+)
 
 
 class ReplyPolicy(Protocol):
@@ -35,7 +38,7 @@ class ReplyPolicy(Protocol):
 
     observe 对已知成员延长关键词/连续对话窗口；未知成员不能获得窗口。
     clear 在换房/混合成员无法归属时清理；select 每次调用独立抽样，
-    同一回合的最终选择及 Live 的迟到信息协调仍由旧后端持有。
+    同一回合的最终选择及 Live 的迟到信息由 Behavior 决策台账持有。
     """
 
     def select(self, percent: int) -> bool: ...
@@ -82,7 +85,7 @@ class VisitsHost(Protocol):
     async def leave(self, *, source: str = "manual", expected_visit_id: str | None = None,
                     expected_operation_epoch: int | None = None) -> dict[str, Any]: ...
 
-    async def speak_announcement(self, kind: str, template: str, *,
+    async def speak_announcement(self, kind: Literal["enter", "leave"], template: str, *,
                                  expected_visit_id: str, timeout: float = 20) -> dict[str, Any]: ...
 
     async def wait_for_reply_end(self, timeout: float = 30) -> bool: ...
@@ -161,3 +164,21 @@ class BargeInGate(Protocol):
     def armed(self) -> bool: ...
     def observe(self, activity: SpeechActivity, *, hold_ms: int) -> bool: ...
     def rearm(self) -> None: ...
+
+
+class Behavior(Protocol):
+    """按原会话和稳定触发登记尝试/行动；终态幂等并区分冲突。
+
+    0额度不限；输入一经受理，沉默或失败不退还。Live有限等待不计级联额度。
+    决策不执行SDK或模型。满载拒绝新触发，不能丢活跃关联以重新计费。
+    """
+
+    def start_session(self, session: SessionRef) -> None: ...
+    def snapshot(self) -> AttemptsSnapshot: ...
+    def exhausted(self, limit: int) -> bool: ...
+    def admit(self, trigger: AudioReady, limit: int) -> AttemptPermit | AttemptRejected: ...
+    def decide(self, observed: RecognitionObserved, settings: ReplySettings) -> Speak | NoAction | ControlAction: ...
+    def decide_live(self, proposal: LiveProposal, settings: ReplySettings) -> Speak | NoAction | DeferLive: ...
+    def decide_control(self, proposal: ControlProposal, settings: ReplySettings) -> ControlAction | NoAction: ...
+    def finish_attempt(self, finished: AttemptFinished) -> FeedbackReceipt: ...
+    def feedback(self, result: NotExecuted | ActionOutcome | PlaybackResult) -> FeedbackReceipt: ...

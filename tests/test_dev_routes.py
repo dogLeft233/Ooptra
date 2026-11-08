@@ -10,7 +10,7 @@ from webui.voice_routes import build_voice_routes
 
 
 def test_diagnostic_audio_and_stop_routes_use_current_agent(monkeypatch):
-    from voice_agent import diagnostics
+    from app import diagnostics
 
     async def run():
         agent = SimpleNamespace(stop_current_reply=AsyncMock())
@@ -35,7 +35,7 @@ def test_diagnostic_audio_and_stop_routes_use_current_agent(monkeypatch):
 
 
 def test_invalid_diagnostic_audio_is_rejected_before_model_call(monkeypatch):
-    from voice_agent import diagnostics
+    from app import diagnostics
 
     async def run():
         diagnose = AsyncMock(return_value={"checks": []})

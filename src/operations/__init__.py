@@ -11,17 +11,38 @@ from operations.api import (
     BackupArchive,
     Configuration,
     ConfigurationGroupMerger,
+    CredentialStore,
     Maintenance,
+    PlatformConfiguration,
     StorageScanner,
     Supervisor,
     UpdateTransport,
 )
 from operations.models import MaintenancePlatform, VoiceAgentSettings, VoiceApiSettings
 
+from ._internal.configuration.credentials import (
+    PRIVATE_KEY_PATH,
+    credentials_payload,
+    load_private_key_from_pem,
+    persist_credentials,
+    save_credentials,
+)
 from ._internal.configuration.document import patch_config_text, validate_config_text
 from ._internal.configuration.service import FileConfiguration
 
-__all__ = ["create_configuration", "patch_config_text", "validate_config_text"]
+__all__ = [
+    "PRIVATE_KEY_PATH",
+    "apply_runtime_overrides",
+    "create_configuration",
+    "create_platform_configuration",
+    "credentials_payload",
+    "load_private_key_from_pem",
+    "patch_config_text",
+    "persist_credentials",
+    "save_credentials",
+    "validate_config_text",
+    "validate_runtime_config",
+]
 
 
 def create_configuration(
@@ -83,12 +104,12 @@ def create_maintenance_platform() -> MaintenancePlatform:
 
 def create_maintenance(root, *, shutdown=None, managed=None, venv=None, port=3090,
                        host="127.0.0.1", token="", runtime_status=None, bootstrap_ready=None,
-                       platform: MaintenancePlatform | None = None) -> Maintenance:
+                       platform: MaintenancePlatform | None = None, runtime_control=None) -> Maintenance:
     """创建维护能力；应用注入停止和运行状态端口，WebUI 只调用此门面。"""
     from ._internal.deployment.service import MaintenanceService
     return MaintenanceService(root, shutdown=shutdown, managed=managed, venv=venv, port=port,
                               host=host, token=token, runtime_status=runtime_status,
-                              bootstrap_ready=bootstrap_ready,
+                              bootstrap_ready=bootstrap_ready, runtime_control=runtime_control,
                               platform=platform or create_maintenance_platform())
 
 
@@ -140,3 +161,73 @@ def resolve_agent_proxy_url(proxy: str) -> str | None:
 
 
 __all__ += ["apply_settings", "load_voice_agent_settings", "resolve_agent_proxy_url"]
+
+
+def deployment_access(root):
+    """读取持久维护激活屏障；损坏/未知记录保持受限。"""
+    from ._internal.mutation import deployment_access as read_access
+    return read_access(root)
+
+__all__ += ['deployment_access']
+
+
+async def configuration_transaction(root, operation):
+    """受管配置任务：持久化和组件应用共享部署变更许可，观察取消后的任务。"""
+    from ._internal.mutation import configuration_transaction as execute
+    return await execute(root, operation)
+
+__all__ += ['configuration_transaction']
+
+
+
+def create_platform_configuration(*, config_path=None, private_key_path=None, runtime_config=None) -> PlatformConfiguration:
+    from ._internal.configuration.platform import PlatformConfigurationStore
+    return PlatformConfigurationStore(config_path=config_path, private_key_path=private_key_path,
+                                      runtime_config=runtime_config)
+
+
+
+def patch_credentials(content, credentials):
+    from ._internal.configuration.credentials import patch_credentials as patch
+    return patch(content, credentials)
+
+
+def create_credential_store(*, config_path=None, private_key_path=None, runtime_config=None) -> CredentialStore:
+    from ._internal.configuration.credentials import CredentialStore
+    return CredentialStore(config_path=config_path, private_key_path=private_key_path, runtime_config=runtime_config)
+
+
+def validate_handoff(root, reference):
+    """只认可当前进程已经耐久发布的 awaiting_exit 交接引用。"""
+    import hmac
+    import json
+    import os
+
+    from operations.models import HandoffRef
+    if not isinstance(reference, HandoffRef):
+        return False
+    try:
+        raw = json.loads((Path(root) / 'data/maintenance/job.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return False
+    return bool(isinstance(raw, dict) and raw.get('phase') == 'awaiting_exit'
+        and raw.get('id') == reference.job_id and raw.get('revision') == reference.revision
+        and raw.get('service_pid') == os.getpid() and isinstance(raw.get('handoff_token'), str)
+        and isinstance(reference.token, str) and reference.token
+        and hmac.compare_digest(raw['handoff_token'].encode(), reference.token.encode()))
+
+__all__ += ['validate_handoff']
+
+
+
+def apply_runtime_overrides():
+    from ._internal.configuration.runtime import apply_runtime_overrides as apply
+    return apply()
+
+
+def validate_runtime_config():
+    from ._internal.configuration.runtime import validate_runtime_config as validate
+    return validate()
+
+
+__all__ += ['create_credential_store', 'patch_credentials']

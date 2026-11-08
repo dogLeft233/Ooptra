@@ -14,11 +14,12 @@ _ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _ROOT)
 sys.path.insert(0, os.path.join(_ROOT, "src"))
 
-from bridge.app import BridgeController
-from bridge.runtime import apply_runtime_overrides, validate_runtime_config
-from bridge.state import BridgeState
+from app.management import RuntimeManagement
+from channels import create_platform_gateway as BridgeController
+from channels import create_platform_state as BridgeState
 from core.logger_config import setup_logger
 from core.version import __version__
+from operations import apply_runtime_overrides, deployment_access, validate_runtime_config
 from webui.server import WebUIConsole
 
 logger = setup_logger("Main")
@@ -61,17 +62,21 @@ async def run() -> None:
     from config import WEBUI_CONFIG
 
     state = BridgeState()
-    controller = BridgeController(state)
     voice_runtime = None
     try:
-        from voice_agent.runtime import get_voice_runtime
+        from app.assembly import get_voice_runtime
 
         voice_runtime = get_voice_runtime()
     except Exception:
         voice_runtime = None
+    from operations import create_platform_configuration
+
+    controller = BridgeController(state, configuration=create_platform_configuration(), voice=voice_runtime)
     stop_event = asyncio.Event()
     console = WebUIConsole(state, controller, config=WEBUI_CONFIG, voice_runtime=voice_runtime,
                            shutdown=stop_event.set)
+    management = RuntimeManagement(voice_runtime, controller, stop_event.set)
+    console.set_runtime_control(management)
     _install_signal_handlers(stop_event)
     _install_managed_control(stop_event)
 
@@ -85,6 +90,15 @@ async def run() -> None:
     bound = console.bind_address
     if voice_runtime is not None and bound is not None:
         voice_runtime.api.set_webui_endpoint(bound[0], bound[1])
+    # 候选版本父提交之前只开放查询，不能先连接渠道或启动自动行为。
+    deployment_blocked = not deployment_access(_ROOT).allowed
+    while not deployment_access(_ROOT).allowed and not stop_event.is_set():
+        console.set_bootstrap_ready(True)
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(stop_event.wait(), 0.25)
+    if deployment_blocked and stop_event.is_set():
+        await console.stop()
+        return
     await controller.start()
 
     try:
@@ -106,13 +120,17 @@ async def run() -> None:
     finally:
         console.set_bootstrap_ready(False)
         # 先拒绝新配置并收完已提交保存/热应用，再释放它们可能访问的业务资源。
-        await console.stop()
-        if voice_runtime is not None:
+        failures = []
+        for name, resource in [('console', console), ('voice', voice_runtime), ('channels', controller)]:
+            if resource is None:
+                continue
             try:
-                await voice_runtime.stop()
+                await resource.stop()
             except Exception:
-                logger.exception("语音 Agent 停止失败")
-        await controller.stop()
+                failures.append(name)
+                logger.exception('event=application.stop_failed resource=%s', name)
+        if failures:
+            raise RuntimeError('应用资源停止未完成：' + ','.join(failures))
     logger.info("桥接已停止。")
 
 

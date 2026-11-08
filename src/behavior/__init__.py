@@ -7,7 +7,6 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from behavior._internal.replies.attempts import SessionAttempts
 from behavior._internal.replies.policy import MemberReplyPolicy
 from behavior._internal.replies.scheduler import LatestReplies
 from behavior._internal.visits.service import AutoVisitController
@@ -15,22 +14,19 @@ from behavior._internal.visits.settings import (
     effective_area,
     merge_auto_visit_patch,
     parse_auto_visit_config,
+    saved_prompts,
 )
 from behavior._internal.visits.store import AutoVisitStateStore
 from behavior.api import (
     AutoVisits,
     BargeInGate,
-    CascadeAttempts,
+    Behavior,
     ReplyPolicy,
     ReplyScheduler,
     VisitsHost,
     VisitStore,
 )
 from behavior.models import AutoVisitConfig
-
-
-def create_cascade_attempts() -> CascadeAttempts:
-    return SessionAttempts()
 
 
 def create_reply_policy(
@@ -57,7 +53,7 @@ def create_auto_visits(
         store = create_visit_store(path)
     return AutoVisitController(host, config, store, enabled=enabled, clock=clock, rng=rng)
 
-__all__ = ["create_auto_visits", "create_barge_in_gate", "create_cascade_attempts", "create_reply_policy", "create_reply_scheduler", "create_visit_store", "effective_area", "merge_auto_visit_patch", "parse_auto_visit_config"]
+__all__ = ["create_auto_visits", "create_barge_in_gate", "create_reply_policy", "create_reply_scheduler", "create_visit_store", "effective_area", "merge_auto_visit_patch", "parse_auto_visit_config", "saved_prompts"]
 
 
 def create_reply_scheduler(
@@ -72,3 +68,16 @@ def create_barge_in_gate() -> BargeInGate:
     from behavior._internal.replies.barge_in import ContinuousSpeech
 
     return ContinuousSpeech()
+
+
+def create_behavior(*, clock: Callable[[], float] = time.monotonic,
+                    random_value: Callable[[], float] | None = None) -> Behavior:
+    from behavior._internal.replies.decisions import BehaviorService
+    return BehaviorService(clock=clock, random_value=random_value or random.random)
+
+
+def departure_template(config: AutoVisitConfig | None = None, area: str = "", *, rng=None) -> str:
+    """手动语音离场沿用该域模板；随机选择和缺省台词归行为策略。"""
+    config = config or parse_auto_visit_config({})
+    candidates = saved_prompts(config, "leave", area) or ["拜拜，我下了"]
+    return (rng or random).choice(candidates)

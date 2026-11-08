@@ -30,7 +30,7 @@ def test_manual_delete_allows_newest_and_invalidates_cleanup(tmp_path):
 def test_delete_protects_update_restore_and_rollback_references(tmp_path, field, phase):
     service = MaintenanceService(tmp_path)
     backup = service.backups.create()["id"]
-    service.write_job({"phase": phase, field: backup})
+    service.write_job({"id": "protect", "phase": phase, field: backup})
     row = service.status()["backups"][0]
     assert not row["can_delete"] and row["delete_reason"]
     with pytest.raises(ValueError, match="引用"):
@@ -58,10 +58,10 @@ def test_busy_invalid_missing_and_directory_backups_are_not_deleted(tmp_path):
     with pytest.raises(ValueError, match="进行中"):
         asyncio.run(service.delete_backup(backup))
     service._busy = False
-    service.write_job({"phase": "checking", "service_pid": 1})
+    service.write_job({"id": "busy", "phase": "checking", "service_pid": 1})
     with pytest.raises(ValueError, match="进行中"):
         asyncio.run(service.delete_backup(backup))
-    service.write_job({"phase": "complete"})
+    service.write_job({"id": "fixture", "phase": "complete"})
     for invalid in ["../config.py", "A" * 32, "", "b" * 32]:
         with pytest.raises(ValueError):
             asyncio.run(service.delete_backup(invalid))
@@ -113,7 +113,7 @@ def test_delete_rechecks_job_after_display(tmp_path):
     service = MaintenanceService(tmp_path)
     backup = service.backups.create()["id"]
     assert service.status()["backups"][0]["can_delete"]
-    service.job_file.write_text(json.dumps({"phase": "complete", "backup_id": backup}), encoding="utf-8")
+    service.job_file.write_text(json.dumps({"id": "protect", "phase": "complete", "backup_id": backup}), encoding="utf-8")
     with pytest.raises(ValueError, match="引用"):
         asyncio.run(service.delete_backup(backup))
     assert service.backups.path(backup).exists()

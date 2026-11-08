@@ -4,6 +4,7 @@ import json
 import pytest
 
 from tests.support.maintenance_harness import maintenance_worker as worker
+from tests.support.maintenance_harness import switch_stopped
 
 
 class Process:
@@ -28,7 +29,7 @@ def test_update_health_failure_restores_previous_code_data_and_python(tmp_path, 
     monkeypatch.setattr(worker, "healthy", lambda process, job: candidate_ok if sum(c[0] == "spawn" for c in calls) == 1 else True)
     job = {"id": "test", "action": "update", "old_sha": "old", "target_sha": "new", "old_python": "original",
            "new_python": "candidate", "old_channel": "beta", "channel": "dev"}
-    assert worker.switch(tmp_path, job) is not None
+    assert switch_stopped(tmp_path, job) is not None
     if candidate_ok:
         assert job["phase"] == "complete"
         assert ("checkout", "old") not in calls
@@ -51,7 +52,7 @@ def test_restore_health_failure_keeps_pre_restore_data(tmp_path, monkeypatch):
     health = iter([False, True])
     monkeypatch.setattr(worker, "healthy", lambda *a: next(health))
     job = {"id": "test", "action": "restore", "old_python": "original", "backup_id": backup["id"]}
-    assert worker.switch(tmp_path, job) is not None
+    assert switch_stopped(tmp_path, job) is not None
     assert job["phase"] == "rolled_back"
     assert (tmp_path / "config.py").read_text() == "CURRENT = True"
 
@@ -63,7 +64,7 @@ def test_restore_retains_current_release_channel(tmp_path, monkeypatch):
     monkeypatch.setattr(worker, "healthy", lambda *a: True)
     job = {"id": "test", "action": "restore", "old_python": "original", "backup_id": backup["id"],
            "old_channel": "main", "channel": "dev"}
-    assert worker.switch(tmp_path, job) is not None
+    assert switch_stopped(tmp_path, job) is not None
     runtime = json.loads((tmp_path / "data/maintenance/runtime.json").read_text())
     assert runtime["channel"] == "main"
 
@@ -82,6 +83,6 @@ def test_restore_checks_new_endpoint_and_rollback_checks_original(tmp_path, monk
     monkeypatch.setattr(worker, "healthy", check)
     job = {"id": "test", "action": "restore", "old_python": "original", "backup_id": backup["id"],
            "health_port": 3090, "health_token": "current", "restore_endpoint": {"health_port": 3199, "health_token": "saved"}}
-    assert worker.switch(tmp_path, job) is not None
+    assert switch_stopped(tmp_path, job) is not None
     assert seen == [(3199, "saved"), (3090, "current")]
     assert job["phase"] == "rolled_back"

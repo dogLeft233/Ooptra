@@ -1,14 +1,13 @@
-"""Keyword overrides survive imperfect casing and late Live transcription."""
-
+"""关键词覆盖和有限Live等待由行为接口验证，模型流仍经过真实应用/渠道。"""
 import asyncio
-import random
 
 import pytest
-from support.channel_fixtures import establish_room
-from test_round_throttle import _offer, _take
-from test_voice_reply_probability import fragment
-from test_voice_session_regressions import make_agent
+from support.live_runtime import audio_message, make_live_agent, settle
 
+from behavior import create_behavior
+from behavior.models import AudioReady, RecognitionObserved, ReplySettings, Speak
+from channels.models import RoomTarget, SessionRef
+from context.models import ContextRevision
 from operations import load_voice_agent_settings
 from webui import config_editor
 
@@ -34,228 +33,65 @@ def test_force_keywords_load_and_are_editable_in_basic_config(monkeypatch):
     ("普通聊天", ["Ooptra", "机器人"], False),
     ("普通聊天", [" ", "..."], False),
 ])
-def test_mimo_keyword_overrides_zero_probability_after_asr(tmp_path, monkeypatch, text, keywords, forced):
-    async def run():
-        agent = make_agent(tmp_path, backend="mimo_cascade", reply_cooldown_ms=0)
-        await establish_room(agent)
-        agent.settings.reply_probability_percent = 0
-        agent.settings.force_reply_keywords = keywords
-        calls = []
-
-        async def asr(*args):
-            calls.append("asr")
-            return text
-
-        async def chat(*args, **kwargs):
-            calls.append("chat")
-            return "answer"
-
-        async def tts(*args):
-            calls.append("tts")
-            return b"\x01\x00" * 32, 24000
-
-        monkeypatch.setattr(agent.backend, "asr", asr)
-        monkeypatch.setattr(agent.backend, "chat", chat)
-        monkeypatch.setattr(agent.backend, "tts", tts)
-        monkeypatch.setattr(random, "random", lambda: pytest.fail("zero probability or keyword hit needs no draw"))
-        _offer(agent, b"human speech")
-        await agent._run_selected_reply(await _take(agent))
-        assert calls == (["asr", "chat", "tts"] if forced else ["asr"])
-        assert bool(agent.duplex.audio) is forced
-        assert agent.last_user_text == text
-        assert [r["role"] for r in agent.memory.recent()] == (["user", "assistant"] if forced else ["user"])
-        await agent.backend.aclose()
-
-    asyncio.run(run())
-
-
-def test_live_keyword_after_turn_complete_restores_only_the_original_reply(tmp_path):
-    async def run():
-        agent = make_agent(tmp_path)
-        agent.settings.reply_probability_percent = 0
-        agent.settings.force_reply_keywords = ["ooptra"]
-        await establish_room(agent)
-        await agent._wire_live()
-        await fragment(agent.backend, b"original", complete=True)
-        await agent.backend._handle_server_msg({"serverContent": {"inputTranscription": {"text": "Ooptra"}}})
-        assert agent.duplex.audio == [b"original"]
-        assert not agent._reply_generating and not agent.status()["speaking"]
-        await fragment(agent.backend, b"unrelated", text="unrelated reply", complete=True)
-        assert agent.duplex.audio == [b"original"]
-        assert agent.turns == 1
-        await agent.backend.aclose()
-
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize("boundary", ["voice", "expiry", "reset", "next_model"])
-def test_live_ambiguous_late_keyword_cannot_force_a_new_reply(tmp_path, monkeypatch, boundary):
-    import time
-
-    async def run():
-        agent = make_agent(tmp_path)
-        agent.settings.reply_probability_percent = 0
-        agent.settings.force_reply_keywords = ["ooptra"]
-        await establish_room(agent)
-        await agent._wire_live()
-        await fragment(agent.backend, b"old", complete=True)
-        if boundary == "voice":
-            async def noop(*args):
-                pass
-            monkeypatch.setattr(agent.backend, "start_session", noop)
-            monkeypatch.setattr(agent.backend, "_send", noop)
-            await agent.backend.push_audio(b"\x00\x20" * 320)
-        elif boundary == "expiry":
-            # Advance the clock past the already established deadline.
-            now = time.monotonic()
-            monkeypatch.setattr(time, "monotonic", lambda: now + 10)
-        elif boundary == "reset":
-            await agent.backend._reset_session()
-        else:
-            await fragment(agent.backend, b"new-start")
-        await agent.backend._handle_server_msg({"serverContent": {"inputTranscription": {"text": "Ooptra"}}})
-        await fragment(agent.backend, b"new-end", complete=True)
-        assert not agent.duplex.audio
-        assert not agent._reply_generating
-        await agent.backend.aclose()
-
-    asyncio.run(run())
-
-
-def test_live_silent_pcm_keeps_completed_reply_available(tmp_path, monkeypatch):
-    async def run():
-        agent = make_agent(tmp_path)
-        agent.settings.reply_probability_percent = 0
-        agent.settings.force_reply_keywords = ["ooptra"]
-        await establish_room(agent)
-        await agent._wire_live()
-        await fragment(agent.backend, b"old", complete=True)
-        async def noop(*args):
-            pass
-        monkeypatch.setattr(agent.backend, "start_session", noop)
-        monkeypatch.setattr(agent.backend, "_send", noop)
-        await agent.backend.push_audio(b"\x00\x00" * 320)
-        await agent.backend._handle_server_msg({"serverContent": {"inputTranscription": {"text": "Ooptra"}}})
-        assert agent.duplex.audio == [b"old"]
-        await agent.backend.aclose()
-
-    asyncio.run(run())
-
-
-def test_live_reset_during_late_audio_restore_discards_remaining_audio_and_memory(tmp_path):
-    async def run():
-        agent = make_agent(tmp_path)
-        agent.settings.reply_probability_percent = 0
-        agent.settings.force_reply_keywords = ["ooptra"]
-        await establish_room(agent)
-        await agent._wire_live()
-        await fragment(agent.backend, b"first")
-        await fragment(agent.backend, b"second", text="old answer", complete=True)
-        delivered = []
-        async def reset_on_audio(pcm, rate):
-            delivered.append(pcm)
-            await agent.backend._reset_session()
-        agent.backend.set_audio_out(reset_on_audio)
-        await agent.backend._handle_server_msg({"serverContent": {"inputTranscription": {"text": "Ooptra"}}})
-        assert delivered == [b"first"]
-        assert all(row["role"] != "assistant" for row in agent.memory.recent())
-        assert not agent.backend.reply_active
-        await agent.backend.aclose()
-
-    asyncio.run(run())
-
-
-def test_live_late_keyword_replays_the_whole_buffered_reply(tmp_path):
-    async def run():
-        agent = make_agent(tmp_path)
-        agent.settings.reply_probability_percent = 0
-        agent.settings.force_reply_keywords = ["ooptra"]
-        await establish_room(agent)
-        await agent._wire_live()
-        await fragment(agent.backend, b"first")
-        await agent.backend._handle_server_msg({"serverContent": {"inputTranscription": {"text": "OOP-"}}})
-        await fragment(agent.backend, b"second")
-        assert not agent.duplex.audio
-        await agent.backend._handle_server_msg({"serverContent": {"inputTranscription": {"text": "ＴＲＡ，帮忙"}}})  # noqa: RUF001
-        await fragment(agent.backend, b"last", complete=True)
-        assert agent.duplex.audio == [b"first", b"second", b"last"]
-        assert agent.turns == 1
-        await fragment(agent.backend, b"unrelated", text="ordinary reply", complete=True)
-        assert agent.duplex.audio == [b"first", b"second", b"last"]
-        await agent.backend.aclose()
-
-    asyncio.run(run())
-
-
-def test_live_deferred_audio_budget_discards_whole_reply_and_resets_next_turn(tmp_path, monkeypatch):
-    from dialogue.models import LiveLimits
-
-
-    async def run():
-        agent = make_agent(tmp_path)
-        agent.backend.limits = LiveLimits(deferred_audio_bytes=4)
-        agent.settings.reply_probability_percent = 0
-        agent.settings.force_reply_keywords = ["human"]
-        await establish_room(agent)
-        await agent._wire_live()
-        await fragment(agent.backend, b"too much")
-        await fragment(agent.backend, b"tail", text="answer", complete=True)
-        assert not agent.duplex.audio, "a late keyword must not play a truncated reply"
-        await fragment(agent.backend, b"ok", text="answer", complete=True)
-        assert agent.duplex.audio == [b"ok"]
-        await agent.backend.aclose()
-
-    asyncio.run(run())
+def test_keyword_overrides_zero_probability_after_recognition(text, keywords, forced):
+    behavior = create_behavior(random_value=lambda: pytest.fail("zero probability needs no draw"))
+    session = SessionRef("r", "b", "s", RoomTarget("a", "b"))
+    behavior.start_session(session)
+    trigger = AudioReady("input", session, "u", ContextRevision())
+    permit = behavior.admit(trigger, 3)
+    result = behavior.decide(RecognitionObserved(trigger, permit, text, ContextRevision()),
+                             ReplySettings(probability=0, keywords=tuple(keywords)))
+    assert isinstance(result, Speak) is forced
 
 
 @pytest.mark.parametrize("sample,expected", [(0.2, True), (0.8, False)])
-def test_mimo_nonmatching_keyword_draws_once_after_asr(tmp_path, monkeypatch, sample, expected):
+def test_nonmatching_keyword_draws_once_for_the_same_trigger(sample, expected):
     draws = []
-
     def draw():
         draws.append(sample)
         return sample
-
-    monkeypatch.setattr(random, "random", draw)
-
-    async def run():
-        agent = make_agent(tmp_path, backend="mimo_cascade", reply_cooldown_ms=0)
-        await establish_room(agent)
-        agent.settings.reply_probability_percent = 30
-        agent.settings.force_reply_keywords = ["nickname"]
-        chatted = []
-
-        async def asr(*args):
-            return "ordinary question"
-
-        async def chat(*args, **kwargs):
-            chatted.append(True)
-            return ""
-
-        monkeypatch.setattr(agent.backend, "asr", asr)
-        monkeypatch.setattr(agent.backend, "chat", chat)
-        _offer(agent, b"speech")
-        await agent._run_selected_reply(await _take(agent))
-        assert draws == [sample]
-        assert bool(chatted) is expected
-        await agent.backend.aclose()
-
-    asyncio.run(run())
+    behavior = create_behavior(random_value=draw)
+    session = SessionRef("r", "b", "s", RoomTarget("a", "b"))
+    behavior.start_session(session)
+    trigger = AudioReady("input", session, "u", ContextRevision())
+    permit = behavior.admit(trigger, 3)
+    observed = RecognitionObserved(trigger, permit, "ordinary question", ContextRevision())
+    settings = ReplySettings(probability=30, keywords=("nickname",))
+    result = behavior.decide(observed, settings)
+    assert behavior.decide(observed, settings) == result
+    assert isinstance(result, Speak) is expected
+    assert draws == [sample]
 
 
-def test_live_keyword_edit_takes_effect_next_turn_without_partial_playback(tmp_path):
-    async def run():
-        agent = make_agent(tmp_path)
-        agent.settings.reply_probability_percent = 0
-        agent.settings.force_reply_keywords = []
-        await establish_room(agent)
-        await agent._wire_live()
-        await fragment(agent.backend, b"already discarded")
-        agent.settings.force_reply_keywords = ["human"]
-        await fragment(agent.backend, b"also discarded", text="reply", complete=True)
-        assert not agent.duplex.audio
-        await fragment(agent.backend, b"next whole reply", text="answer", complete=True)
-        assert agent.duplex.audio == [b"next whole reply"]
-        await agent.backend.aclose()
+def test_live_late_keyword_releases_all_buffered_frames_once(tmp_path):
+    async def scenario():
+        agent, playback, sockets = await make_live_agent(tmp_path, reply_probability_percent=0,
+                                                       force_reply_keywords=["ooptra"])
+        try:
+            await sockets[0].deliver(audio_message(b"\1\0"*240, text="answer"))
+            assert not playback.chunks
+            await sockets[0].deliver({"serverContent": {"inputTranscription": {"text": "ＯＯＰ－ＴＲＡ，帮忙"}}})  # noqa: RUF001 - deliberate normalization input
+            await sockets[0].deliver(audio_message(b"\2\0"*240, done=True))
+            assert await agent.wait_for_reply_end(1)
+            assert playback.chunks == [b"\1\0"*240, b"\2\0"*240]
+        finally:
+            await agent.stop()
+    asyncio.run(scenario())
 
-    asyncio.run(run())
+
+def test_rejected_live_turn_cannot_be_revived_by_editing_keywords(tmp_path):
+    async def scenario():
+        agent, playback, sockets = await make_live_agent(tmp_path, reply_probability_percent=0)
+        try:
+            await sockets[0].deliver(audio_message(text="discarded"))
+            agent.settings.force_reply_keywords = ["ooptra"]
+            await sockets[0].deliver({"serverContent": {"inputTranscription": {"text": "ooptra"}}})
+            await sockets[0].deliver({"serverContent": {"turnComplete": True}})
+            await settle()
+            assert playback.chunks == []
+            await sockets[0].deliver(audio_message(user_text="ooptra", text="next", done=True))
+            assert await agent.wait_for_reply_end(1)
+            assert playback.chunks
+        finally:
+            await agent.stop()
+    asyncio.run(scenario())

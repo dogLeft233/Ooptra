@@ -7,7 +7,8 @@ import sys
 from pathlib import Path
 
 MODULES = frozenset({"channels", "context", "behavior", "dialogue", "operations"})
-LEGACY = frozenset({"bridge", "onebot_v11", "oopz", "oopz_sdk", "voice_agent", "webui"})
+ADAPTERS = frozenset({"oopz_sdk", "webui"})
+RETIRED_NAMESPACES = frozenset({"bridge", "onebot_v11", "oopz", "voice_agent"})
 SUPPORT = frozenset({"app", "core"})
 PUBLIC = frozenset({"api", "models"})
 DEPENDENCIES = {
@@ -21,8 +22,14 @@ DEPENDENCIES = {
 IGNORED = frozenset({"__pycache__", ".pytest_cache", ".ruff_cache"})
 
 
-# 已迁出的真实实现不能重新长回旧目录；其余旧路径继续按切片迁移。
+# 已退休的实现和命名空间不提供迁移豁免。
 RETIRED_PATHS = {
+    "voice_agent": "app（装配）及五业务模块",
+    "bridge": "channels/_internal/adapters",
+    "oopz": "channels/_internal/adapters 与 operations 的配置能力",
+    "onebot_v11": "channels/_internal/adapters",
+    "webui/oopz_login.py": "channels 的平台登录能力",
+    "channels/_internal/legacy.py": "channels/_internal/adapters/voice.py",
     "voice_agent/backends": "dialogue",
     **{f"voice_agent/{name}.py": module for module, names in {
         "context": ("memory", "context_bridge"),
@@ -55,12 +62,12 @@ def check(root: Path) -> list[str]:
     source = root / "src"
     for retired, destination in RETIRED_PATHS.items():
         previous = source / retired
-        if previous.is_file() or (previous.is_dir() and any(previous.glob("*.py"))):
+        if previous.is_file() or (previous.is_dir() and any(previous.rglob("*.py"))):
             errors.append(f"src/{retired}: 实现已迁移至 {destination}，请通过公开接口扩展")
     for entry in sorted(source.iterdir()):
         if entry.name in IGNORED or entry.name.startswith("."):
             continue
-        if entry.is_dir() and entry.name not in MODULES | LEGACY | SUPPORT:
+        if entry.is_dir() and entry.name not in MODULES | ADAPTERS | SUPPORT:
             errors.append(f"src/{entry.name}: 未登记的一级目录，请按五模块归属组织")
         elif entry.is_file() and entry.suffix in {".py", ".pyi"} and entry.name != "__init__.py":
             errors.append(f"src/{entry.name}: 业务代码应放入所属模块")
@@ -112,6 +119,12 @@ def check(root: Path) -> list[str]:
                 continue
             destination = target[0]
             location = f"{relative}:{lineno}"
+            if destination in RETIRED_NAMESPACES:
+                errors.append(f"{location}: {destination} 已删除；通过 app 装配或五模块公开接口访问")
+            if in_source and destination == "oopz_sdk" and not (
+                owner == "channels" and relative.parts[2:4] == ("_internal", "adapters")
+            ):
+                errors.append(f"{location}: SDK 访问只允许渠道内部适配；通过 channels 公开接口访问")
             if destination in MODULES and destination != module_owner:
                 if any(part.startswith("_") or part == "*" for part in target[1:]):
                     errors.append(f"{location}: 跨模块通过 {destination}.api 或 models 访问")
@@ -127,15 +140,8 @@ def check(root: Path) -> list[str]:
             contract = len(relative.parts) == 3 and path.stem in PUBLIC
             if contract and destination == module_owner and "_internal" in target[1:]:
                 errors.append(f"{location}: api.py/models.py 应独立于内部实现")
-            if destination in LEGACY:
-                migration = relative.parts[2:] == ("_internal", "legacy.py")
-                sdk_adapter = (
-                    module_owner == "channels"
-                    and destination == "oopz_sdk"
-                    and relative.parts[2:4] == ("_internal", "adapters")
-                )
-                if not migration and not sdk_adapter:
-                    errors.append(f"{location}: 旧模块依赖应隔离到 _internal/legacy.py")
+            if destination == "webui":
+                errors.append(f"{location}: 业务模块不能依赖 HTTP 适配；由 app 装配公开端口")
     return sorted(set(errors))
 
 
@@ -144,7 +150,7 @@ def main() -> int:
     if errors:
         print("\n".join(errors))
         return 1
-    print("五模块目录与静态导入检查通过（旧模块保留迁移豁免）。")
+    print("五模块目录、公开接口、依赖方向与退休路径检查通过。")
     return 0
 
 

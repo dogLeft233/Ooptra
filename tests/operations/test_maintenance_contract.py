@@ -3,7 +3,7 @@
 import pytest
 
 from operations import create_backup_store, create_maintenance
-from operations.models import UpdateTarget
+from operations.models import StoppedDeployment, UpdateTarget
 
 
 def test_update_target_retains_confirmed_channel_and_commit():
@@ -30,7 +30,7 @@ def test_public_archive_restores_real_data_and_configuration(tmp_path):
     assert "config.py" in archive.validate(receipt["id"], stage)
     memory.write_text("new history\n", encoding="utf-8")
     config.write_text("modified = True\n", encoding="utf-8")
-    archive.restore(receipt["id"])
+    archive.restore(archive.inspect(receipt["id"]), StoppedDeployment("isolated", 1, "test", "stopped"))
     assert memory.read_text(encoding="utf-8") == "original history\n"
     assert config.read_text(encoding="utf-8") == "WEBUI_CONFIG = {'enabled': True}\n"
 

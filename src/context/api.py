@@ -1,14 +1,36 @@
-"""已迁入上下文能力。未实现的事务台账和情境接口见模块 README。"""
+"""上下文公开接口：版本化情境、来源授权和事务历史/可靠投递。"""
 
+from __future__ import annotations
+
+from pathlib import Path
 from typing import Any, Protocol
 
-from context.models import ConfirmedTurn, RecordReceipt
+from channels.models import RoomTarget
+from context.models import (
+    BindingRequest,
+    ConfirmedTurn,
+    ContextRequest,
+    ContextRevision,
+    DeliveryStatus,
+    LegacyExport,
+    Observation,
+    OutputRecord,
+    PollRequest,
+    PollResult,
+    PreparedContext,
+    RecallRequest,
+    RecordReceipt,
+    RememberRequest,
+    RpcReceipt,
+    RpcResolution,
+    SituationSnapshot,
+)
 
 
 class ConversationHistory(Protocol):
-    """同步 JSONL 历史；阻塞磁盘操作须由异步调用者按需交给线程。
+    """同步 SQLite 历史视图；阻塞磁盘操作可由异步调用者交给线程。
 
-    返回独立字典，不暴露存储句柄。不是跨历史与 AstrBot outbox 的事务。
+    返回独立字典；生产输出应通过 ContextService.record_output 共同提交 outbox。
     """
 
     @property
@@ -51,3 +73,51 @@ class SourceBridge(Protocol):
     def record_turn(self, user_text: str, reply_text: str, *, speaker: str, interrupted: bool = False) -> None: ...
     async def poll(self, *, wait: float = 20.0, client_id: str = "") -> list[dict]: ...
     def resolve(self, request_id: str, result: dict) -> bool: ...
+    async def poll_request(self, request: PollRequest) -> PollResult: ...
+    def resolve_receipt(self, receipt: RpcReceipt) -> RpcResolution: ...
+    async def bindings(self, request: BindingRequest) -> dict[str, Any]: ...
+    async def close(self) -> None: ...
+
+
+class ContextService(Protocol):
+    """权威台账与情境入口。
+
+    observe/record_output 是有限同步本地事务；耗时调用可交线程，调用方需在原
+    事件循环有序提交观察。prepare_context 捕获不可变原来源，不隐式切换来源。
+    同 action/input ID 异内容报 ValueError；关闭后不接收新提交，已提交记录可恢复。
+    tools 返回本次准备绑定端口，写工具必须使用 context 签发的有效授权。
+    """
+
+    @property
+    def history(self) -> ConversationHistory: ...
+    @property
+    def bridge(self) -> SourceBridge: ...
+
+    def observe(self, observation: Observation) -> ContextRevision: ...
+    def snapshot(self, scope: RoomTarget) -> SituationSnapshot: ...
+    async def prepare_context(self, request: ContextRequest) -> PreparedContext: ...
+    def record_output(self, record: OutputRecord) -> RecordReceipt: ...
+    def delivery(self, delivery_id: str) -> DeliveryStatus: ...
+    async def recall(self, request: RecallRequest) -> dict[str, Any]: ...
+    async def remember(self, request: RememberRequest) -> dict[str, Any]: ...
+    def tools(self, prepared: PreparedContext) -> ContextTools: ...
+    async def export_legacy(self, directory: Path) -> LegacyExport: ...
+    async def close(self) -> None: ...
+
+
+class ContextTools(Protocol):
+    """只绑定一个准备结果的模型工具端口，不暴露底层 SourceBridge。"""
+
+    @property
+    def active(self) -> bool: ...
+    @property
+    def persona(self) -> str: ...
+    @property
+    def context(self) -> dict[str, Any]: ...
+    @property
+    def history(self) -> list[dict[str, str]]: ...
+    @property
+    def session_id(self) -> str: ...
+    async def recall(self, request: RecallRequest) -> dict[str, Any]: ...
+    async def remember(self, request: RememberRequest) -> dict[str, Any]: ...
+    async def tool(self, name: str, args: Any, *, speaker: str = "") -> dict[str, Any]: ...

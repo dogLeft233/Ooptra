@@ -69,18 +69,19 @@ def test_cancelled_remember_preserves_original_request_for_retry(tmp_path):
 
 
 def test_disk_failure_does_not_publish_or_confirm_queued_turn(tmp_path, monkeypatch):
-    import os
+    import sqlite3
 
     import pytest
 
     async def run():
         bridge = create_context_bridge(outbox_path=tmp_path / "outbox.json")
         await prepare_source(bridge, {"ok": True, "provider": "memory_companion"})
-        def disk_full(*_args):
+        def disk_full(*_args, **_kwargs):
             raise OSError("disk full")
-        monkeypatch.setattr(os, "replace", disk_full)
-        with pytest.raises(OSError, match="disk full"):
-            bridge.record_turn("question", "answer", speaker="u")
+        with monkeypatch.context() as fault:
+            fault.setattr(sqlite3, "connect", disk_full)
+            with pytest.raises(OSError, match="disk full"):
+                bridge.record_turn("question", "answer", speaker="u")
         assert await bridge.poll(wait=0) == []
         assert bridge.history == []
         assert bridge.status()["pending_writes"] == 0

@@ -117,7 +117,7 @@ def apply_settings(target: Any, fresh: Any) -> list[str]:
     """把 ``fresh`` 的字段**就地**写回 ``target``，返回变化的字段名。
 
     就地写回是刻意的：``runtime.agent_settings is agent.settings is
-    backend.settings`` 是同一个对象，改一处三处同时可见，不必重建 VoiceAgent。
+    backend.settings`` 是同一个对象，改一处三处同时可见，不必重建 VoiceCoordinator。
     """
     changed: list[str] = []
     for item in dataclasses.fields(target):

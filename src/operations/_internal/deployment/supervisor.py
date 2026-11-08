@@ -7,10 +7,20 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from urllib.request import ProxyHandler, Request, build_opener
 
 from operations._internal.backups.storage import BackupStore, atomic_json
+from operations._internal.mutation import ACTIVE_PHASES
+from operations.models import StoppedDeployment, ValidatedRestore
+
+from .jobs import transition
+
+
+class OwnedProcess(subprocess.Popen[bytes]):
+    """监督器创建的真实句柄保留本次启动标记，PID复用不能重用身份。"""
+    ooptra_start_marker: str
 
 
 class ProcessSupervisor:
@@ -25,7 +35,9 @@ class ProcessSupervisor:
             self.checkout = checkout
 
     def spawn(self, root, python, marker="", browser_path=""):
-        env = dict(os.environ, OOPTRA_MANAGED="1", OOPTRA_UPDATE_ID=marker)
+        start_marker = uuid.uuid4().hex
+        env = dict(os.environ, OOPTRA_MANAGED="1", OOPTRA_UPDATE_ID=marker,
+                   OOPTRA_PROCESS_MARKER=start_marker)
         if browser_path:
             env["PLAYWRIGHT_BROWSERS_PATH"] = browser_path
         executable = python
@@ -40,7 +52,9 @@ class ProcessSupervisor:
                     raise RuntimeError("虚拟环境的基础 Python 已不可用")
                 env["__PYVENV_LAUNCHER__"] = python
                 executable = str(base)
-        return subprocess.Popen([executable, str(root / "main.py")], cwd=root, env=env, stdin=subprocess.PIPE)
+        process = OwnedProcess([executable, str(root / "main.py")], cwd=root, env=env, stdin=subprocess.PIPE)
+        process.ooptra_start_marker = start_marker
+        return process
 
 
     def stop_owned(self, process):
@@ -61,7 +75,7 @@ class ProcessSupervisor:
                 process.wait(timeout=5)
 
 
-    def runtime_health(self, status, *, expected_pid=None, update_id=None, expected_python=None):
+    def runtime_health(self, status, *, expected_pid=None, update_id=None, expected_python=None, expected_marker=None):
         """Local startup and supervision gate a switch; remote links only describe degradation."""
         status = status if isinstance(status, dict) else {}
         actual = status.get("process")
@@ -76,11 +90,16 @@ class ProcessSupervisor:
             # A venv's Python can link to the same base as another environment.
             # Preserve the invoked path instead of resolving those links away.
             process_ok = process_ok and isinstance(executable, str) and bool(executable) and os.path.normcase(os.path.abspath(executable)) == os.path.normcase(os.path.abspath(expected_python))
+        if expected_marker is not None:
+            process_ok = process_ok and actual.get('start_marker') == expected_marker
         bridge = status.get("bridge")
         bridge = bridge if isinstance(bridge, dict) else {}
         runtime = bridge.get("runtime")
         runtime = runtime if isinstance(runtime, dict) else {}
-        local_ready = actual.get("bootstrap_ready") is True and runtime.get("supervisor_alive") is True
+        waiting_commit = bool(update_id and actual.get('update_id') == update_id
+            and actual.get('candidate_waiting_commit') is True)
+        local_ready = actual.get('bootstrap_ready') is True and (
+            runtime.get('supervisor_alive') is True or waiting_commit)
         detail = "服务已响应，本地启动和桥接监督已就绪" if process_ok and local_ready else (
             "本地启动尚未完成或桥接监督未运行" if process_ok else "服务未响应或进程身份不匹配")
         process_ok = process_ok and local_ready
@@ -107,7 +126,8 @@ class ProcessSupervisor:
                     request.add_header("Authorization", "Bearer " + job["health_token"])
                 with build_opener(ProxyHandler({})).open(request, timeout=2) as response:
                     status = json.load(response)
-                health = self.runtime_health(status, expected_pid=process.pid, update_id=job["id"], expected_python=job.get("health_python"))
+                health = self.runtime_health(status, expected_pid=process.pid, update_id=job["id"], expected_python=job.get("health_python"),
+                                              expected_marker=getattr(process, "ooptra_start_marker", None))
                 if health["process_ok"]:
                     return True
             except (OSError, ValueError, KeyError):
@@ -123,25 +143,42 @@ class ProcessSupervisor:
             raise RuntimeError("无法切换代码")
 
 
-    def switch(self, root: Path, job: dict):
+    def confirm_stopped(self, process, job: dict) -> StoppedDeployment:
+        if (process.poll() is None or process.pid != job.get('service_pid')
+                or not isinstance(getattr(process, 'ooptra_start_marker', None), str)
+                or not process.ooptra_start_marker
+                or process.ooptra_start_marker != job.get('service_start_marker')
+                or job.get('phase') != 'awaiting_exit' or not job.get('handoff_token')):
+            raise ValueError('原受管进程尚未退出或身份/交接不匹配，拒绝切换')
+        return StoppedDeployment(job['id'], process.pid, process.ooptra_start_marker,
+                                 job['handoff_token'])
+
+    def switch(self, root: Path, job: dict, stopped: StoppedDeployment | None = None):
+        if (not isinstance(stopped, StoppedDeployment) or stopped.job_id != job.get('id')
+                or stopped.pid != job.get('service_pid')
+                or stopped.start_marker != job.get('service_start_marker')
+                or stopped.handoff_token != job.get('handoff_token')
+                or job.get('phase') != 'awaiting_exit' or job.get('schema') != 2):
+            raise ValueError('维护切换需要确认原进程已退出的交接凭据')
         store = BackupStore(root)
-        job_file = root / "data/maintenance/job.json"
 
         def phase(name, detail):
             job.update(phase=name, detail=detail, updated_at=time.time())
-            atomic_json(job_file, job)
+            transition(root, job, role="supervisor", now=time.time())
 
         replacement = None
         switched = False
         safety = None
+        safety_reference = None
         original_endpoint = {k: job[k] for k in ("health_host", "health_port", "health_token") if k in job}
         try:
             phase("switching", "服务已停止，创建最终数据快照并切换")
             # Capture writes made while dependencies were being prepared, after DB close.
             safety = store.create()["id"]
+            safety_reference = store.inspect(safety)
             job["safety_backup_id"] = safety
             if job["action"] == "restore":
-                store.restore(job["backup_id"])
+                store.restore(ValidatedRestore(job["backup_id"], job["backup_fingerprint"]), stopped)
                 if job.get("restore_endpoint"):
                     job.update(job["restore_endpoint"])
                 python = job["old_python"]
@@ -171,8 +208,8 @@ class ProcessSupervisor:
             try:
                 if switched:
                     self.checkout(root, job["old_sha"])
-                if safety:
-                    store.restore(safety)
+                if safety_reference is not None:
+                    store.restore(safety_reference, stopped)
                 job.update(original_endpoint)
                 replacement = self.spawn(root, job["old_python"], job["id"], job.get("old_browser_path", ""))
                 job["health_python"] = job["old_python"]
@@ -193,9 +230,9 @@ class ProcessSupervisor:
         job_file = root / "data/maintenance/job.json"
         try:
             abandoned = json.loads(job_file.read_text(encoding="utf-8"))
-            if (isinstance(abandoned, dict) and isinstance(abandoned.get("phase"), str)
-                    and abandoned["phase"] in {"preparing", "awaiting_restart", "switching", "checking", "rolling_back"}):
-                abandoned.update(phase="failed", detail="启动器维护任务被中断；请核对版本与数据，必要时用安全备份恢复", updated_at=time.time())
+            if (isinstance(abandoned, dict) and isinstance(abandoned.get('phase'), str)
+                    and abandoned.get('phase') in ACTIVE_PHASES):
+                abandoned.update(phase='interrupted', detail='启动器维护任务被中断；业务保持受限，请核对版本与数据并显式恢复', updated_at=time.time())
                 atomic_json(job_file, abandoned)
         except (OSError, ValueError):
             pass
@@ -218,9 +255,13 @@ class ProcessSupervisor:
                     job = json.loads(job_file.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
                     return code
-                if not isinstance(job, dict) or job.get("phase") != "awaiting_restart" or job.get("service_pid") != process.pid:
+                if not isinstance(job, dict) or job.get('service_pid') != process.pid:
                     return code
-                process = self.switch(root, job)
+                try:
+                    stopped = self.confirm_stopped(process, job)
+                except ValueError:
+                    return code or 1
+                process = self.switch(root, job, stopped)
                 if process is None:
                     return 1
         except KeyboardInterrupt:

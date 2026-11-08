@@ -300,7 +300,7 @@ def test_old_bot_join_cannot_activate_a_new_binding(tmp_path) -> None:
     async def run() -> None:
         agent = make_agent(tmp_path)
         entered, release = asyncio.Event(), asyncio.Event()
-        old_voice = agent._bot.voice
+        old_voice = agent.test_platform.voice
 
         async def join(**kwargs):
             entered.set()
@@ -311,7 +311,7 @@ def test_old_bot_join_cannot_activate_a_new_binding(tmp_path) -> None:
         task = asyncio.create_task(agent.join("a", "old"))
         await asyncio.wait_for(entered.wait(), 1)
         replacement = make_agent(tmp_path / "other")
-        agent.bind_bot(replacement._bot)
+        agent.bind_bot(replacement.test_platform)
         release.set()
         with pytest.raises(RuntimeError, match="superseded"):
             await task
@@ -415,7 +415,7 @@ def test_rebinding_cannot_reuse_transport_before_old_push_drains(tmp_path) -> No
         )
         await asyncio.wait_for(entered.wait(), 1)
         # 不同 SDK 对象可能仍包着同一个物理 transport，不能仅换 ID 就复用。
-        replacement = SimpleNamespace(voice=agent._bot.voice)
+        replacement = SimpleNamespace(voice=agent.test_platform.voice)
         agent.bind_bot(replacement)
         switch = asyncio.create_task(agent.join("a", "new"))
         try:
@@ -444,4 +444,46 @@ def test_programming_error_is_not_disguised_as_a_transport_failure() -> None:
         assert channel.snapshot().state is RoomState.UNCERTAIN
         assert channel.outcome("bug").reason == "internal_error"
 
+    asyncio.run(run())
+
+
+def test_output_control_external_failure_has_a_queryable_terminal():
+    from channels.models import SetOutput
+    class FailingOutput(Transport):
+        async def apply_output(self, volume, muted):
+            raise OSError("external output failure")
+    async def run():
+        channel = create_channel(FailingOutput())
+        joined = await channel.execute(JoinRoom("join", RoomTarget("a", "c"), 0))
+        result = await channel.execute(SetOutput("volume", joined.session, 50))
+        assert result.status == "failed" and result.reason == "transport_failed"
+        assert channel.outcome("volume") == result
+        assert channel.snapshot().state is RoomState.JOINED
+    asyncio.run(run())
+
+
+def test_cancelling_output_control_does_not_leave_the_actual_room():
+    from channels.models import SetOutput
+    class SlowOutput(Transport):
+        def __init__(self):
+            self.entered = asyncio.Event()
+            self.leaves = 0
+        async def apply_output(self, volume, muted):
+            self.entered.set()
+            await asyncio.Event().wait()
+        async def leave(self):
+            self.leaves += 1
+    async def run():
+        transport = SlowOutput()
+        channel = create_channel(transport)
+        joined = await channel.execute(JoinRoom("join", RoomTarget("a", "c"), 0))
+        task = asyncio.create_task(channel.execute(SetOutput("volume", joined.session, 50)))
+        await transport.entered.wait()
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        assert channel.outcome("volume").status == "cancelled"
+        assert channel.snapshot().state is RoomState.JOINED
+        assert channel.snapshot().session == joined.session
+        assert transport.leaves == 0
     asyncio.run(run())

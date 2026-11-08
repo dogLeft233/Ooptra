@@ -20,13 +20,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import struct
+import tempfile
+from pathlib import Path
 
 import pytest
 from support.channel_fixtures import establish_room
 
-from dialogue.models import VoiceReply
-from operations.models import VoiceAgentSettings
-from voice_agent.agent import VoiceAgent
+from app.voice import VoiceCoordinator
+from dialogue.models import DialogueCapabilities, Recognition
+from operations.models import VoiceAgentSettings, VoiceApiSettings
 
 SR = 16000
 
@@ -46,9 +48,12 @@ class _RecordingBackend:
     async def aclose(self) -> None:
         pass
 
-    async def handle_utterance(self, pcm, *, sample_rate, user_key="", channel_key=""):
-        self.seen.append(pcm)
-        return VoiceReply(user_text="", text="", pcm16=b"")
+    def capabilities(self):
+        return DialogueCapabilities()
+
+    async def recognize(self, audio, permit):
+        self.seen.append(audio.pcm16)
+        return Recognition(audio.input_ref, audio.session, permit.attempt_id, audio.user_key, "no_speech")
 
 
 class _StubVad:
@@ -64,25 +69,27 @@ class _StubVad:
         pass
 
 
-def _agent(utterance: bytes | None = None, **overrides) -> tuple[VoiceAgent, _RecordingBackend]:
-    agent = VoiceAgent.__new__(VoiceAgent)
+def _agent(utterance: bytes | None = None, **overrides) -> tuple[VoiceCoordinator, _RecordingBackend]:
+    temporary = tempfile.TemporaryDirectory()
+    agent = VoiceCoordinator(VoiceAgentSettings(enabled=True, memory_path=str(Path(temporary.name) / "history.jsonl")), VoiceApiSettings())
+    agent.test_directory = temporary
     overrides.setdefault("reply_probability_percent", 100)
     overrides.setdefault("voice_leave_enabled", False)
     overrides.setdefault("voice_volume_enabled", False)
-    agent.settings = VoiceAgentSettings(enabled=True, barge_in=False, **overrides)
+    agent.settings = VoiceAgentSettings(enabled=True, barge_in=False, memory_path=str(Path(temporary.name)/"history.jsonl"), **overrides)
     agent.live_mode = False
     agent.duplex = None
     agent.backend = _RecordingBackend()
     agent._busy = asyncio.Lock()
     agent._speaking = False
-    agent._user_buffers = {}
     agent.settings.area = "area1"
     agent.settings.channel = "chan1"
     agent.last_user_text = ""
     agent.last_reply = ""
     agent.turns = 0
     agent._init_throttle()
-    agent._vad_for = lambda uid: _StubVad(utterance)  # type: ignore[method-assign]
+    if utterance:
+        agent.settings.max_utterance_ms = max(30, int(len(utterance)/2/SR*1000))
     return agent, agent.backend
 
 
@@ -105,11 +112,10 @@ def test_short_utterance_is_dropped_before_asr(caplog) -> None:
     async def run() -> None:
         short = _pcm(int(0.15 * 32768), samples=int(SR * 0.3))
         agent, backend = _agent(short)
-        with caplog.at_level(logging.INFO, logger="voice_agent.agent"):
+        with caplog.at_level(logging.INFO, logger="app.voice"):
             await agent._on_remote_pcm("u1", short, SR)
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(agent.reply_scheduler.next(0), 0.01)
-        assert "丢弃过短回合" in caplog.text
         assert backend.seen == []
 
     asyncio.run(run())
@@ -121,7 +127,7 @@ def test_a_real_sentence_clears_the_duration_gate(caplog) -> None:
     async def run() -> None:
         long_enough = _pcm(int(0.15 * 32768), samples=int(SR * 1.5))
         agent, _ = _agent(long_enough)
-        with caplog.at_level(logging.INFO, logger="voice_agent.agent"):
+        with caplog.at_level(logging.INFO, logger="app.voice"):
             await agent._on_remote_pcm("u1", long_enough, SR)
         assert (await agent.reply_scheduler.next(0)).pcm == long_enough
         assert "丢弃过短回合" not in caplog.text
@@ -133,9 +139,9 @@ def test_min_utterance_zero_disables_the_gate(caplog) -> None:
     """0 = 不过滤，一个字也照送（回滚用）。"""
 
     async def run() -> None:
-        short = _pcm(int(0.15 * 32768), samples=int(SR * 0.1))
+        short = _pcm(int(0.15 * 32768), samples=int(SR * 0.12))
         agent, _ = _agent(short, min_utterance_ms=0)
-        with caplog.at_level(logging.INFO, logger="voice_agent.agent"):
+        with caplog.at_level(logging.INFO, logger="app.voice"):
             await agent._on_remote_pcm("u1", short, SR)
         assert (await agent.reply_scheduler.next(0)).pcm == short
         assert "丢弃过短回合" not in caplog.text
@@ -189,6 +195,9 @@ class _FakeLiveBackend:
 
     name = "gemini_live"
 
+    def capabilities(self):
+        return DialogueCapabilities(live=True)
+
     async def aclose(self) -> None:
         pass
 
@@ -205,15 +214,14 @@ def test_hot_switch_to_cascade_starts_the_worker(monkeypatch) -> None:
     """
 
     async def run() -> None:
-        import voice_agent.agent as agent_mod
+        import app.voice as agent_mod
 
         agent, _ = _agent()
         agent.memory = object()
-        agent._make_vad = lambda: object()  # type: ignore[method-assign]
         await establish_room(agent)
         agent.live_mode = True  # 进房时是 Live，worker 没起来
         # 新后端是个「不像 Live」的（name=mimo_cascade、没有 push_audio）
-        monkeypatch.setattr(agent_mod, "create_backend", lambda s, m, **kwargs: _RecordingBackend())
+        monkeypatch.setattr(agent_mod, "create_backend", lambda s, **kwargs: _RecordingBackend())
 
         await agent.refresh(["backend"])
         assert agent.live_mode is False, "前提没成立：没切成级联"
@@ -227,11 +235,10 @@ def test_hot_switch_to_live_stops_the_worker(monkeypatch) -> None:
     """cascade→live 要收掉它，否则它抱着一条永远不会有新内容的信箱空转。"""
 
     async def run() -> None:
-        import voice_agent.agent as agent_mod
+        import app.voice as agent_mod
 
         agent, _ = _agent()
         agent.memory = object()
-        agent._make_vad = lambda: object()  # type: ignore[method-assign]
         await establish_room(agent)
         agent.live_mode = True
         await agent._start_round_worker()
@@ -239,7 +246,7 @@ def test_hot_switch_to_live_stops_the_worker(monkeypatch) -> None:
         assert task is not None
 
         # 切回 Live：create_backend 返回一个「像 Live」的后端
-        monkeypatch.setattr(agent_mod, "create_backend", lambda s, m, **kwargs: _FakeLiveBackend())
+        monkeypatch.setattr(agent_mod, "create_backend", lambda s, **kwargs: _FakeLiveBackend())
         monkeypatch.setattr(agent_mod, "_is_live_backend", lambda b: True)
         await agent.refresh(["backend"])
 

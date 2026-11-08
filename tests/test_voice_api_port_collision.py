@@ -15,8 +15,8 @@ import socket
 
 import pytest
 
+from app.http import VoiceApiServer, _same_bind_target
 from operations.models import VoiceApiSettings
-from voice_agent.api import VoiceApiServer, _same_bind_target
 
 
 class _FakeRuntime:

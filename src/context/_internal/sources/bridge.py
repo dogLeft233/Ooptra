@@ -7,21 +7,26 @@ import contextlib
 import copy
 import json
 import logging
-import os
 import time
 import uuid
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from context._internal.memory.ledger import ContextLedger
+
+from context.models import BindingRequest, PollRequest, PollResult, RpcReceipt, RpcResolution
 
 logger = logging.getLogger(__name__)
 class ContextBridge:
-    def __init__(self, *, timeout: float = 4.0, outbox_path: Path | None = None) -> None:
+    def __init__(self, *, timeout: float = 4.0, ledger: ContextLedger, owns_ledger: bool = False) -> None:
+        self._ledger = ledger
+        self._owns_ledger = owns_ledger
+        self._closed = False
+        self._resolved: set[str] = set()
         self.timeout = timeout
-        self.path = outbox_path
         self.session_id = uuid.uuid4().hex
         self._room: dict[str, str] = {}
         self._context: dict[str, Any] = {}
-        self._history: list[dict[str, str]] = []
         self._pending: dict[str, tuple[dict, asyncio.Future]] = {}
         self._outbox: dict[str, dict] = {}
         self._leased: dict[str, float] = {}
@@ -31,24 +36,7 @@ class ContextBridge:
         self._state = "offline"
         self._error = ""
         self._last_write = ""
-        if self.path and self.path.exists():
-            try:
-                if self.path.stat().st_size > 4 * 1024 * 1024:
-                    raise ValueError("Outbox exceeds size limit")
-                rows = json.loads(self.path.read_text(encoding="utf-8"))
-                if not isinstance(rows, list) or len(rows) > 128:
-                    raise ValueError("Invalid voice outbox")
-                for row in rows:
-                    if not isinstance(row, dict) or row.get("operation") not in {"commit", "remember"}:
-                        raise ValueError("Invalid voice outbox event")
-                    if (not isinstance(row.get("request_id"), str) or not row["request_id"]
-                            or row["request_id"] in self._outbox
-                            or not isinstance(row.get("session_id"), str)
-                            or not all(isinstance(row.get(key), dict) for key in ("room", "scope", "payload"))):
-                        raise ValueError("Invalid voice outbox fields")
-                    self._outbox[row["request_id"]] = copy.deepcopy(row)
-            except (OSError, ValueError, KeyError) as exc:
-                raise ValueError("语音记忆待写队列读取失败，请检查本地文件；未启动写入") from exc
+        self._outbox = ledger.ready()
 
     @property
     def context(self) -> dict[str, Any]:
@@ -58,7 +46,10 @@ class ContextBridge:
     @property
     def history(self) -> list[dict[str, str]]:
         """当前来源近期历史的独立快照。"""
-        return copy.deepcopy(self._history)
+        if not self.active:
+            return []
+        return [{"role": row.role, "content": row.content} for row in self._ledger.scoped_history(
+            room=json.dumps(self._room, ensure_ascii=False, sort_keys=True, separators=(",", ":")), source=self.session_id, limit=12)]
 
     @property
     def connected(self) -> bool:
@@ -92,7 +83,6 @@ class ContextBridge:
     def clear(self) -> None:
         self.session_id = uuid.uuid4().hex
         self._context = {}
-        self._history.clear()
         for request_id, (event, future) in list(self._pending.items()):
             if event["operation"] == "bindings":
                 continue
@@ -124,7 +114,7 @@ class ContextBridge:
                 "created_at": time.time(), "payload": copy.deepcopy(payload)}
 
     async def request(self, operation: str, payload: dict) -> dict:
-        if not self.connected or len(self._pending) >= 16:
+        if self._closed or not self.connected or len(self._pending) >= 16:
             return {"ok": False, "error": "AstrBot 桥接离线或忙碌"}
         if operation == "remember" and self._write_count() >= 128:
             return {"ok": False, "error": "语音记忆待写队列已满，请等待已有目标写回后再试"}
@@ -193,30 +183,18 @@ class ContextBridge:
         event = self._event("commit", {"user_text": user_text[:4000],
                             "reply_text": "" if interrupted else reply_text[:4000],
                             "speaker": speaker, "interrupted": interrupted})
-        self._outbox[event["request_id"]] = event
-        try:
-            self._persist()
-        except OSError:
-            self._outbox.pop(event["request_id"], None)
-            raise
-        self._history.append({"role": "user", "content": user_text[:2000]})
-        if event["payload"]["reply_text"]:
-            self._history.append({"role": "assistant", "content": reply_text[:2000]})
-        self._history = self._history[-12:]
-        self._wake.set()
+        from context.models import ConfirmedTurn
+        receipt = self._ledger.commit("bridge:" + event["request_id"], event,
+            ConfirmedTurn(user_text, "" if interrupted else reply_text,
+                          "interrupted" if interrupted else "completed" if reply_text.strip() else "silent", speaker,
+                          self._room.get("channel", "")),
+            room=json.dumps(self._room, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            session=self.session_id, source=self.session_id, event=event)
+        if receipt.delivery_admission == "accepted":
+            self.publish_committed()
 
-    def _persist(self) -> None:
-        if self.path is None:
-            return
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.path.with_suffix(".tmp")
-            temporary.write_text(json.dumps(list(self._outbox.values()), ensure_ascii=False),
-                                 encoding="utf-8")
-            os.replace(temporary, self.path)
-        except OSError:
-            self._error = "语音记忆队列落盘失败"
-            raise
+    def _persist(self, terminal: tuple[str, dict] | None = None) -> None:
+        self._ledger.replace_pending(self._outbox, terminal)
 
     async def poll(self, *, wait: float = 20.0, client_id: str = "") -> list[dict]:
         if client_id and self.peer_id and self.peer_id != client_id and self.connected:
@@ -226,6 +204,8 @@ class ContextBridge:
         self._last_poll = time.monotonic()
         deadline = time.monotonic() + min(20, max(0, wait))
         while True:
+            if self._closed:
+                return []
             now = time.monotonic()
             events = list({event["request_id"]: event for event in
                            [item[0] for item in self._pending.values()] + list(self._outbox.values())}.values())
@@ -235,7 +215,7 @@ class ContextBridge:
             if ready:
                 for event in ready:
                     self._leased[event["request_id"]] = now
-                return copy.deepcopy(ready)
+                return [self._ledger.delivery_view(event) for event in ready]
             if now >= deadline:
                 return []
             self._wake.clear()
@@ -248,12 +228,13 @@ class ContextBridge:
             # Explicit writes are persisted before the worker can receive them.
             # Complete the local waiter independently of later durable retries.
             if result.get("retry") is True:
+                self._persist((request_id, result))
                 pending[1].set_result({**copy.deepcopy(result), "queued": True, "request_id": request_id})
                 self._error = str(result.get("error") or "记忆写入待重试")[:200]
                 return True
             event = self._outbox.pop(request_id)
             try:
-                self._persist()
+                self._persist((request_id, result))
             except OSError:
                 self._outbox[request_id] = event
                 raise
@@ -264,11 +245,12 @@ class ContextBridge:
         if request_id in self._outbox:
             self._last_write = str(result.get("state") or "captured") if result.get("ok") is True else "failed"
             if result.get("retry") is True:
+                self._persist((request_id, result))
                 self._error = str(result.get("error") or "记忆写入待重试")[:200]
                 return True
             event = self._outbox.pop(request_id)
             try:
-                self._persist()
+                self._persist((request_id, result))
             except OSError:
                 self._outbox[request_id] = event
                 raise
@@ -287,3 +269,52 @@ class ContextBridge:
             result = self._retry_write(item[0], result)
         item[1].set_result(copy.deepcopy(result))
         return True
+
+    def publish_committed(self) -> None:
+        """Publish only after the ledger transaction has committed."""
+        if self._closed:
+            return
+        self._outbox = self._ledger.ready()
+        self._wake.set()
+
+    async def close(self) -> None:
+        self._closed = True
+        self.clear()
+        for _, future in self._pending.values():
+            if not future.done():
+                future.set_result({"ok": False, "error": "上下文已关闭"})
+        self._pending.clear()
+        self._wake.set()
+        if self._owns_ledger:
+            self._ledger.close()
+
+    async def poll_request(self, request: PollRequest) -> PollResult:
+        if self._closed:
+            return PollResult("closed")
+        try:
+            events = await self.poll(wait=request.wait, client_id=request.client_id)
+        except ValueError:
+            return PollResult("peer_conflict")
+        return PollResult("events" if events else "closed" if self._closed else "timeout",
+                          tuple(json.dumps(event, ensure_ascii=False) for event in events))
+
+    def resolve_receipt(self, receipt: RpcReceipt) -> RpcResolution:
+        if self._closed or not self.peer_id or receipt.client_id != self.peer_id:
+            return RpcResolution("rejected")
+        if receipt.request_id in self._resolved:
+            return RpcResolution("duplicate")
+        if self._ledger.delivery(receipt.request_id).state in {"confirmed", "failed"}:
+            return RpcResolution("duplicate")
+        result = json.loads(receipt.result_json)
+        if not isinstance(result, dict) or type(result.get("ok")) is not bool:
+            return RpcResolution("rejected")
+        if not self.resolve(receipt.request_id, result):
+            return RpcResolution("unknown")
+        if result.get("retry") is not True:
+            self._resolved.add(receipt.request_id)
+            if len(self._resolved) > 2048:
+                self._resolved.pop()
+        return RpcResolution("accepted")
+
+    async def bindings(self, request: BindingRequest) -> dict:
+        return await self.request("bindings", json.loads(request.payload_json))
