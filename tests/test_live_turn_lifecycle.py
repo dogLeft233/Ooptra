@@ -23,11 +23,12 @@ from typing import Any
 
 import pytest
 from support.channel_fixtures import establish_room
+from support.dialogue_fixtures import gemini_backend as GeminiLiveBackend
 
+from dialogue import adapt_websocket as _AiohttpWs
+from operations import load_voice_agent_settings
+from operations.models import VoiceAgentSettings
 from voice_agent.agent import VoiceAgent
-from voice_agent.backends.gemini_live import LANGUAGE_GUARD, GeminiLiveBackend
-from voice_agent.settings import VoiceAgentSettings, load_voice_agent_settings
-from voice_agent.ws_transport import _AiohttpWs
 
 # 16k / mono / 16bit 的 20ms 远端音频帧
 FRAME = b"\x00\x01" * 320
@@ -139,9 +140,7 @@ async def _make_agent(*, live: bool = True) -> tuple[VoiceAgent, FakeDuplex, Fak
     agent.settings.listen_only_uids = []
     agent._bot = None
     agent._speaking = False
-    agent._barge_in_armed = True
     agent._live_output_lock = asyncio.Lock()
-    agent._barge_in_speech_ms = {}
     agent._user_buffers = {"u1": _StubVad()}
     agent._vad = None
     agent._task = None
@@ -360,9 +359,9 @@ def opened(monkeypatch: pytest.MonkeyPatch) -> list[FakeLiveWs]:
         created.append(ws)
         return ws
 
-    import voice_agent.ws_transport as transport
+    from support import dialogue_fixtures as transport
 
-    monkeypatch.setattr(transport, "open_live_ws", fake_open)
+    monkeypatch.setattr(transport, "live_connector", fake_open)
     return created
 
 
@@ -435,8 +434,8 @@ def test_setup_appends_the_language_guard(opened: list[FakeLiveWs]) -> None:
         text = opened[0].sent[0]["setup"]["system_instruction"]["parts"][0]["text"]
 
         assert "用中文回答。你是测试人格。" in text, "人格本身不能被吞掉"
-        assert LANGUAGE_GUARD in text, "语言约束没有下发"
-        assert text.index(LANGUAGE_GUARD) > text.index("测试人格"), (
+        assert "你一律只用中文普通话回答" in text, "语言约束没有下发"
+        assert text.index("你一律只用中文普通话回答") > text.index("测试人格"), (
             "语言约束必须追加在人格之后（收尾位置权重更高）"
         )
         await backend.aclose()
@@ -451,7 +450,7 @@ def test_language_guard_survives_an_empty_persona(opened: list[FakeLiveWs]) -> N
         backend = _backend("")
         await backend.start_session()
         text = opened[0].sent[0]["setup"]["system_instruction"]["parts"][0]["text"]
-        assert LANGUAGE_GUARD in text
+        assert "你一律只用中文普通话回答" in text
         await backend.aclose()
 
     asyncio.run(run())
@@ -528,12 +527,14 @@ def test_aiohttp_close_logs_reason(caplog: pytest.LogCaptureFixture) -> None:
             ]
         )
         adapted = _AiohttpWs(inner, None)
-        with caplog.at_level("INFO", logger="voice_agent.ws_transport"):
+        with caplog.at_level("INFO", logger="dialogue._internal.ws_transport"):
             got = [chunk async for chunk in adapted]
 
         assert got == ["hello"], "关闭前收到的数据不能丢"
         assert "close_code=1000" in caplog.text, "断线日志里没有 close_code"
-        assert "connection reset by peer" in caplog.text, "断线日志里没有底层异常"
+        assert "exception_type=RuntimeError" in caplog.text
+        assert "connection reset by peer" not in caplog.text
+        assert "server said bye" not in caplog.text
 
     asyncio.run(run())
 
@@ -553,7 +554,7 @@ def test_session_lifecycle_messages_are_logged(caplog: pytest.LogCaptureFixture)
 
     async def run() -> None:
         backend = _backend()
-        with caplog.at_level("INFO", logger="voice_agent.backends.gemini_live"):
+        with caplog.at_level("INFO", logger="dialogue._internal.live.gemini_live"):
             await backend._handle_server_msg(
                 {"sessionResumptionUpdate": {"newHandle": "h1", "resumable": True}}
             )
@@ -574,12 +575,12 @@ def test_heartbeat_messages_do_not_flood_the_log(caplog: pytest.LogCaptureFixtur
 
     async def run() -> None:
         backend = _backend()
-        with caplog.at_level("INFO", logger="voice_agent.backends.gemini_live"):
+        with caplog.at_level("INFO", logger="dialogue._internal.live.gemini_live"):
             await backend._handle_server_msg({})
             await backend._handle_server_msg({"serverContent": {}})
             await backend._handle_server_msg({"voiceActivity": {"type": "ACTIVITY_START"}})
             await backend._handle_server_msg({"voiceActivity": {"type": "ACTIVITY_END"}})
-        assert "未处理" not in caplog.text, f"心跳消息进了日志：{caplog.text}"
+        assert "dialogue.live.unhandled" not in caplog.text, f"心跳消息进了日志：{caplog.text}"
         await backend.aclose()
 
     asyncio.run(run())

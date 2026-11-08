@@ -10,9 +10,10 @@ from test_gemini_session_lifecycle import FakeLiveWs
 from test_voice_announcements import AnnouncementDuplex
 from test_voice_operations import make_agent
 
-from voice_agent.backends import create_backend
-from voice_agent.settings import load_voice_agent_settings
-from voice_agent.voice_control import VoiceControlDecision
+from behavior import create_reply_policy
+from behavior.models import VoiceControlDecision
+from dialogue import create_gemini_backend
+from operations import load_voice_agent_settings
 from webui import config_editor
 
 
@@ -329,7 +330,7 @@ def test_short_voice_control_preserves_normal_reply_length_filter(
 
 @pytest.mark.parametrize("state", ["disabled", "manual", "announcement", "unknown"])
 def test_live_rejects_disabled_non_voice_and_unknown_control_calls(tmp_path, monkeypatch, state):
-    from voice_agent.backends.gemini_live import GeminiLiveBackend
+    from support.dialogue_fixtures import gemini_backend as GeminiLiveBackend
 
     async def run():
         agent = make_agent(tmp_path)
@@ -352,7 +353,6 @@ def test_live_rejects_disabled_non_voice_and_unknown_control_calls(tmp_path, mon
 
 
 def test_gemini_live_tool_intent_really_says_farewell_and_leaves(tmp_path, monkeypatch):
-    from voice_agent import ws_transport
 
     sockets = []
     class SpeakingWs(FakeLiveWs):
@@ -369,7 +369,6 @@ def test_gemini_live_tool_intent_really_says_farewell_and_leaves(tmp_path, monke
         ws = SpeakingWs()
         sockets.append(ws)
         return ws
-    monkeypatch.setattr(ws_transport, "open_live_ws", open_ws)
     async def run():
         agent = make_agent(tmp_path)
         agent.settings.voice_volume_enabled = False
@@ -377,7 +376,7 @@ def test_gemini_live_tool_intent_really_says_farewell_and_leaves(tmp_path, monke
         agent.settings.gemini_api_key = "test"
         agent.settings.voice_leave_enabled = True
         agent.settings.reply_probability_percent = 0
-        agent.backend = create_backend(agent.settings, agent.memory)
+        agent.backend = create_gemini_backend(agent.settings, agent.memory, reply_policy=create_reply_policy(), connector=open_ws)
         agent.live_mode = True
         duplex = DepartureDuplex()
         agent.duplex = duplex
@@ -402,21 +401,19 @@ def test_gemini_live_tool_intent_really_says_farewell_and_leaves(tmp_path, monke
 
 
 def test_live_failed_departure_reconnects_and_rebinds_control_callback(tmp_path, monkeypatch):
-    from voice_agent import ws_transport
 
     sockets = []
     async def open_ws(*args, **kwargs):
         ws = FakeLiveWs()
         sockets.append(ws)
         return ws
-    monkeypatch.setattr(ws_transport, "open_live_ws", open_ws)
     async def run():
         agent = make_agent(tmp_path)
         agent.settings.voice_volume_enabled = False
         agent.settings.backend = "gemini_live"
         agent.settings.gemini_api_key = "test"
         agent.settings.voice_leave_enabled = True
-        agent.backend = create_backend(agent.settings, agent.memory)
+        agent.backend = create_gemini_backend(agent.settings, agent.memory, reply_policy=create_reply_policy(), connector=open_ws)
         agent.live_mode = True
         await agent.join("a", "c")
         async def announce(*args, **kwargs):

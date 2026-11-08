@@ -4,10 +4,10 @@ import asyncio
 import json
 
 import pytest
+from support.dialogue_fixtures import gemini_backend as GeminiLiveBackend
 from test_voice_operations import make_agent
 
-from voice_agent import voice_control
-from voice_agent.backends.gemini_live import GeminiLiveBackend
+from behavior import models as voice_control
 
 
 @pytest.mark.parametrize("raw", [
@@ -95,9 +95,11 @@ def test_mimo_volume_intent_is_independent_of_reply_probability_and_leave_switch
         monkeypatch.setattr(agent.backend, "_http", http)
         agent.backend.asr, agent.backend.tts = asr, tts
         reply = await agent.backend.handle_utterance(b"audio", sample_rate=16000)
-        assert reply.raw.get("voice_control") == expected
+        actual = ("leave" if reply.control.leave else "volume") if reply.control else None
+        assert actual == expected
         if expected:
-            assert reply.raw["volume_command"] == raw
+            assert reply.control is not None
+            assert reply.control.volume == voice_control.parse_volume_command(raw)
         assert not reply.pcm16 and not reply.text
         assert len(requests) == 1
         instructions = requests[0]["messages"][0]["content"]
@@ -126,7 +128,8 @@ def test_live_volume_tool_executes_real_callback_and_reuses_actual_result(tmp_pa
         agent.settings.voice_leave_enabled = False
         backend = GeminiLiveBackend(agent.settings, agent.memory)
         state, sent = {"volume": 50}, []
-        async def apply(raw):
+        async def apply(command):
+            assert command == voice_control.VolumeCommand("increase")
             state["volume"] += 10
             return {"ok": True, "volume": state["volume"], "muted": False,
                     "saved": True, "message": "已保存"}

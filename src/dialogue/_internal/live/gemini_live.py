@@ -24,15 +24,15 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 
-from behavior import create_reply_policy
-from voice_agent.backends.base import VoiceBackend, VoiceReply
-from voice_agent.context_bridge import MEMORY_RULES, memory_tools
-from voice_agent.observation import DecisionTrace, VoiceObservation
-from voice_agent.vad import EnergyVad, VadvConfig
+from behavior.models import VolumeCommand
+from channels.models import VadvConfig
+from core.audio import pcm16_rms
+from dialogue._internal.memory_tools import MEMORY_RULES, memory_tools
+from dialogue._internal.observation import DecisionTrace, VoiceObservation
+from dialogue.api import HistoryReader, VoiceBackend
+from dialogue.models import DialogueCapabilities, GeneratedTurn, LiveLimits, VoiceReply
 
 logger = logging.getLogger(__name__)
-_MAX_DEFERRED_AUDIO_BYTES = 4 * 1024 * 1024
-_LATE_TRANSCRIPTION_SECONDS = 2.0
 
 
 @dataclass
@@ -150,14 +150,18 @@ class GeminiLiveBackend(VoiceBackend):
     #: 会话意外断开后，后台重连前的等待秒数
     reconnect_delay: float = 1.0
 
-    def __init__(self, settings, memory) -> None:
+    def capabilities(self) -> DialogueCapabilities:
+        return DialogueCapabilities(live=True, fixed_speech=False)
+
+    def __init__(self, settings, memory, *, reply_policy, **options) -> None:
         self.settings = settings
-        self.memory = memory
-        self.observation = VoiceObservation(self.name)
+        self._observation = VoiceObservation(self.name)
         self._decision_trace: DecisionTrace | None = None
         self._audio_started: float | None = None
         self._input_started: float | None = None
-        self._conversation = create_reply_policy()
+        self._conversation = reply_policy
+        self.limits = options.get("limits") or LiveLimits()
+        self._connector = options.get("connector")
         self._input_speakers: set[str] = set()
         self._turn_user_key = ""
         self._connection_state = "idle"
@@ -169,9 +173,10 @@ class GeminiLiveBackend(VoiceBackend):
         self._audio_out: AudioOutHandler | None = None
         self._text_out: Callable[[str], Awaitable[None] | None] | None = None
         self._turn_out: TurnOutHandler | None = None
+        self._generated_out: Callable[[GeneratedTurn], Awaitable[None] | None] | None = None
         self._reply_out = None
         self._voice_leave_out: Callable[[], bool] | None = None
-        self._voice_volume_out: Callable[[dict], Awaitable[dict]] | None = None
+        self._voice_volume_out: Callable[[VolumeCommand], Awaitable[dict]] | None = None
         self._control_results: dict[str, dict] = {}
         self._control_lock = asyncio.Lock()
         self.reply_active = False
@@ -200,13 +205,19 @@ class GeminiLiveBackend(VoiceBackend):
         self._memory_lock = asyncio.Lock()
         self._memory_results: dict[str, dict] = {}
         self._memory_jobs: dict[str, asyncio.Task] = {}
-        self._bridge_output_failed = False
         self._in_sample = int(getattr(settings, "sample_rate_in", 16000) or 16000)
         self._out_sample = int(getattr(settings, "sample_rate_out", 24000) or 24000)
 
     # ------------------------------------------------------------------
     # 生命周期 / 回调
     # ------------------------------------------------------------------
+
+    @property
+    def observation(self) -> VoiceObservation:
+        return self._observation
+
+    def bind_history(self, reader: HistoryReader) -> None:
+        """Live 不读取本地历史；来源上下文通过 MemoryTools 单独绑定。"""
 
     def set_audio_out(self, handler: AudioOutHandler | None) -> None:
         self._audio_out = handler
@@ -257,13 +268,27 @@ class GeminiLiveBackend(VoiceBackend):
     def set_voice_leave_out(self, handler: Callable[[], bool] | None) -> None:
         self._voice_leave_out = handler
 
-    def set_voice_volume_out(self, handler: Callable[[dict], Awaitable[dict]] | None) -> None:
+    def set_voice_volume_out(self, handler: Callable[[VolumeCommand], Awaitable[dict]] | None) -> None:
         self._voice_volume_out = handler
 
     def _set_reply_active(self, active: bool) -> None:
         self.reply_active = active
         if self._reply_out is not None:
             self._reply_out(active)
+
+    def set_generated_out(self, handler: Callable[[GeneratedTurn], Awaitable[None] | None] | None) -> None:
+        """注册回合证据接收者；回调返回前不清理转写，不自动写任何权威历史。
+
+        selected 只表示生成被策略选中；应用必须另核对渠道输出和会话后再提交。
+        关闭/换轮丢弃暂存输出也会交付用户观察，internal 标识内部生成。
+        """
+        self._generated_out = handler
+
+    async def _emit_generated(self, result: GeneratedTurn) -> None:
+        if self._generated_out is not None:
+            pending = self._generated_out(result)
+            if asyncio.iscoroutine(pending):
+                await pending
 
     def set_turn_out(self, handler: TurnOutHandler | None) -> None:
         """注册「一个回合结束了」的回调（``interrupted=True`` 表示被抢话打断）。
@@ -295,8 +320,8 @@ class GeminiLiveBackend(VoiceBackend):
             await self._start_session_locked()
 
     async def _start_session_locked(self) -> None:
-        from voice_agent.settings import resolve_agent_proxy_url
-        from voice_agent.ws_transport import open_live_ws
+        from dialogue._internal.proxy import resolve_agent_proxy_url
+        from dialogue._internal.ws_transport import open_live_ws
 
         endpoint = str(
             getattr(self.settings, "gemini_base_url", "") or DEFAULT_LIVE_WS
@@ -315,7 +340,7 @@ class GeminiLiveBackend(VoiceBackend):
         self._ready.clear()
         proxy = resolve_agent_proxy_url(getattr(self.settings, "proxy", "") or "")
 
-        ws = await open_live_ws(url, proxy=proxy)
+        ws = await (self._connector or open_live_ws)(url, proxy=proxy)
         self._ws = ws
         self._session_task = asyncio.create_task(
             self._session_loop(), name="gemini-live-session"
@@ -352,7 +377,6 @@ class GeminiLiveBackend(VoiceBackend):
         self._memory_tasks.clear()
         self._memory_results.clear()
         self._memory_jobs.clear()
-        self._bridge_output_failed = False
         self._finish_observed_turn("interrupted")
         self._conversation.clear()
         self._control_results.clear()
@@ -369,7 +393,7 @@ class GeminiLiveBackend(VoiceBackend):
         self._force_reply = False
         self._explicit_turn = False
         had_reply = self._completed_reply is not None or self._turn_keywords is not None
-        self._discard_completed_reply()
+        await self._discard_completed_reply()
         self._keyword_quarantine = had_reply
         self._between_turns = True
         self._clear_deferred_reply()
@@ -459,7 +483,7 @@ class GeminiLiveBackend(VoiceBackend):
         await ws.send(json.dumps(payload, ensure_ascii=False))
 
     async def _send_setup(self) -> None:
-        from voice_agent.voice_control import (
+        from dialogue._internal.controls import (
             LEAVE_INTENT_DESCRIPTION,
             VOLUME_INTENT_DESCRIPTION,
             live_leave_tool,
@@ -519,11 +543,11 @@ class GeminiLiveBackend(VoiceBackend):
         """
         if not pcm16 or self._closed or self._connection_state == "failed":
             return
-        self._expire_completed_reply()
+        await self._expire_completed_reply()
         if ((self._between_turns or self._completed_reply is not None)
-                and EnergyVad._rms(pcm16) >= VadvConfig().energy_threshold):
+                and pcm16_rms(pcm16) >= VadvConfig().energy_threshold):
             if self._completed_reply is not None:
-                self._discard_completed_reply()
+                await self._discard_completed_reply()
                 self._keyword_quarantine = True
             self._between_turns = False
         if not self.session_active:
@@ -533,7 +557,7 @@ class GeminiLiveBackend(VoiceBackend):
             else:
                 self._schedule_reconnect()
                 return
-        if EnergyVad._rms(pcm16) >= VadvConfig().energy_threshold:
+        if pcm16_rms(pcm16) >= VadvConfig().energy_threshold:
             self._observe_turn()
             if self._input_started is None:
                 self._input_started = time.monotonic()
@@ -549,7 +573,7 @@ class GeminiLiveBackend(VoiceBackend):
         try:
             await self._send(payload)
         except Exception as exc:
-            logger.warning("live audio push failed (%s); scheduling reconnect", exc)
+            logger.warning("live audio push failed (%s); scheduling reconnect", type(exc).__name__)
             self._finish_observed_turn("error")
             await self._reset_session()
             self._schedule_reconnect()
@@ -619,21 +643,17 @@ class GeminiLiveBackend(VoiceBackend):
         self._deferred_audio_bytes = 0
         self._deferred_audio_overflow = False
 
-    def _discard_completed_reply(self) -> None:
+    async def _discard_completed_reply(self) -> None:
         pending, self._completed_reply = self._completed_reply, None
         self._policy_generation += 1
         if pending is not None and pending.user_text:
-            if self.context_bridge is not None:
-                self.context_bridge.record_turn(pending.user_text, "", speaker=pending.user_key)
-            try:
-                self.memory.append("user", pending.user_text, user_key="live")
-            except Exception:
-                logger.debug("memory write failed", exc_info=True)
+            await self._emit_generated(GeneratedTurn(user_text=pending.user_text,
+                                                     user_key=pending.user_key))
 
-    def _expire_completed_reply(self) -> None:
+    async def _expire_completed_reply(self) -> None:
         pending = self._completed_reply
         if pending is not None and time.monotonic() >= pending.deadline:
-            self._discard_completed_reply()
+            await self._discard_completed_reply()
             self._keyword_quarantine = True
 
     async def _restore_completed_reply(self, text: str) -> None:
@@ -664,20 +684,13 @@ class GeminiLiveBackend(VoiceBackend):
                     await result
             if generation != self._policy_generation:
                 return
-            try:
-                if pending.user_text:
-                    self.memory.append("user", pending.user_text, user_key="live")
-                if pending.reply_text:
-                    self.memory.append("assistant", pending.reply_text, user_key="live")
-            except Exception:
-                logger.debug("memory write failed", exc_info=True)
             if pending.reply_text and self._text_out is not None:
                 result = self._text_out(pending.reply_text)
                 if asyncio.iscoroutine(result):
                     await result
-            if self.context_bridge is not None and generation == self._policy_generation:
-                self.context_bridge.record_turn(pending.user_text,
-                    "" if self._bridge_output_failed else pending.reply_text, speaker=pending.user_key)
+            if generation == self._policy_generation:
+                await self._emit_generated(GeneratedTurn(
+                    pending.user_text, pending.reply_text, pending.user_key, selected=True))
         finally:
             if generation == self._policy_generation:
                 self._set_reply_active(False)
@@ -691,7 +704,7 @@ class GeminiLiveBackend(VoiceBackend):
 
     async def _execute_control_call(self, call: dict) -> dict:
         """Keep model tool requests outside internal turns and return actual application results."""
-        from voice_agent.voice_control import parse_volume_command
+        from behavior.models import parse_volume_command
 
         if call.get("name") == "leave_voice_room":
             accepted = (
@@ -709,10 +722,7 @@ class GeminiLiveBackend(VoiceBackend):
             command = parse_volume_command(call.get("args"))
             if command is None:
                 raise ValueError("Missing volume command")
-            validated: dict[str, str | int] = {"action": command.action}
-            if command.value is not None:
-                validated["value"] = command.value
-            result = await self._voice_volume_out(validated)
+            result = await self._voice_volume_out(command)
             if not isinstance(result, dict) or type(result.get("ok")) is not bool:
                 raise ValueError("Invalid application control result")
             return result
@@ -825,8 +835,8 @@ class GeminiLiveBackend(VoiceBackend):
             if not interesting:
                 return
             logger.info(
-                "Live 服务端消息（当前未处理）：%s",
-                {k: str(v)[:160] for k, v in interesting.items()},
+                "event=dialogue.live.unhandled fields=%s",
+                sorted(interesting),
             )
             return
 
@@ -834,10 +844,10 @@ class GeminiLiveBackend(VoiceBackend):
         input_tr = server.get("inputTranscription") or {}
         output_tr = server.get("outputTranscription") or {}
         turn = server.get("modelTurn") or {}
-        self._expire_completed_reply()
+        await self._expire_completed_reply()
         if turn or output_tr.get("text"):
             if self._completed_reply is not None:
-                self._discard_completed_reply()
+                await self._discard_completed_reply()
                 self._keyword_quarantine = True
             self._between_turns = False
         elif input_tr.get("text") and self._between_turns:
@@ -912,7 +922,7 @@ class GeminiLiveBackend(VoiceBackend):
             if self._reply_allowed is False:
                 if self._turn_keywords and not self._deferred_audio_overflow:
                     self._deferred_audio_bytes += len(pcm)
-                    if self._deferred_audio_bytes > _MAX_DEFERRED_AUDIO_BYTES:
+                    if self._deferred_audio_bytes > self.limits.deferred_audio_bytes:
                         self._deferred_audio.clear()
                         self._deferred_audio_overflow = True
                         logger.warning("关键词等待音频超出缓存上限，跳过整轮回复")
@@ -933,21 +943,20 @@ class GeminiLiveBackend(VoiceBackend):
                 self._completed_reply = _CompletedReply(
                     list(self._deferred_audio), self._turn_keywords,
                     self._last_user_text, self._last_reply,
-                    time.monotonic() + _LATE_TRANSCRIPTION_SECONDS,
+                    time.monotonic() + self.limits.late_transcription_seconds,
                     self._turn_user_key if len(self._input_speakers) == 1 else "",
                 )
-            # 转写落日志：语言乱切换这类问题**只能**从这里看出来（模型到底听到了
-            # 什么、又用什么语言回答）。记忆里本来就存了这两段文本，日志不增加暴露。
+            # 仅记录回合元数据；转写/回复草稿通过生成结果交应用，不进入日志。
             if self._last_user_text or self._last_reply:
                 logger.info(
-                    "Live 回合：用户=%r 回复=%r%s",
-                    self._last_user_text[:80],
-                    self._last_reply[:80],
+                    "event=dialogue.live.generated input_chars=%s output_chars=%s state=%s",
+                    len(self._last_user_text),
+                    len(self._last_reply),
                     "（未播放）" if self._reply_allowed is False
                     else "（被抢话打断）" if server.get("interrupted") else "",
                 )
             # 回合边界：先通知上层（它据此把「正在说话」落回 False、结束一次轮次），
-            # 再写记忆。被抢话时上层还要就地丢掉本地已排期的音频。
+            # 再交付生成证据。被抢话时上层还要丢掉本地已排期的音频。
             turn_handler = self._turn_out
             if turn_handler is not None and self._reply_allowed is not False:
                 try:
@@ -956,23 +965,15 @@ class GeminiLiveBackend(VoiceBackend):
                         await result
                 except Exception:
                     logger.debug("turn out handler failed", exc_info=True)
-            if self._last_user_text or self._last_reply:
-                try:
-                    if self._last_user_text and not self._announcement and not keep_pending:
-                        self.memory.append("user", self._last_user_text, user_key="live")
-                    if self._last_reply and self._reply_allowed is not False:
-                        self.memory.append("assistant", self._last_reply, user_key="live")
-                except Exception:
-                    logger.debug("memory write failed", exc_info=True)
             text_handler = self._text_out
-            if (self.context_bridge is not None and not self._announcement
-                    and not self._explicit_turn and not keep_pending):
+            if not keep_pending:
                 speaker = next(iter(self._input_speakers)) if len(self._input_speakers) == 1 else ""
-                self.context_bridge.record_turn(self._last_user_text,
-                    self._last_reply if self._reply_allowed is not False
-                    and not self._bridge_output_failed else "", speaker=speaker,
-                    interrupted=bool(server.get("interrupted")))
-            self._bridge_output_failed = False
+                await self._emit_generated(GeneratedTurn(
+                    self._last_user_text, self._last_reply, speaker,
+                    selected=self._reply_allowed is not False,
+                    interrupted=bool(server.get("interrupted")),
+                    internal=self._announcement or self._explicit_turn,
+                ))
             if text_handler is not None and self._last_reply and self._reply_allowed is not False:
                 result = text_handler(self._last_reply)
                 if asyncio.iscoroutine(result):
@@ -1016,7 +1017,7 @@ class GeminiLiveBackend(VoiceBackend):
         if not self.session_active:
             await self.start_session()
         payload = {"realtimeInput": {"text": text}}
-        self._discard_completed_reply()
+        await self._discard_completed_reply()
         self._between_turns = False
         self._set_reply_active(True)
         self._force_reply = True
@@ -1025,7 +1026,7 @@ class GeminiLiveBackend(VoiceBackend):
             try:
                 await self._send(payload)
             except Exception as exc:
-                logger.warning("live speak failed (%s); reconnecting once", exc)
+                logger.warning("live speak failed (%s); reconnecting once", type(exc).__name__)
                 await self._reset_session()
                 await self.start_session()
                 self._force_reply = True
@@ -1039,11 +1040,11 @@ class GeminiLiveBackend(VoiceBackend):
             raise
 
     async def speak_announcement(self, kind: str, template: str) -> None:
-        from voice_agent.announcements import announcement_instruction
+        from dialogue._internal.announcements import announcement_instruction
 
         if not self.session_active:
             await self.start_session()
-        self._discard_completed_reply()
+        await self._discard_completed_reply()
         self._between_turns = False
         self._last_user_text = ""
         self._last_reply = ""

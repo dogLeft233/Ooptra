@@ -35,7 +35,7 @@ known-first-party = [
 [tool.pyright]
 typeCheckingMode = "standard"
 # 解析边界逐模块收紧；新边界完成类型化后加入此列表。
-strict = ["src/voice_agent/voice_control.py"]
+strict = ["src/behavior/models.py"]
 pythonVersion = "3.10"
 include = ["main.py", "src"]
 exclude = ["**/__pycache__", "src/oopz_sdk"]

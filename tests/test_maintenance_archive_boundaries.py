@@ -5,7 +5,7 @@ import tarfile
 
 import pytest
 
-from webui import maintenance
+from tests.support.maintenance_harness import maintenance
 
 
 @pytest.mark.parametrize("modern_filters", [True, False])

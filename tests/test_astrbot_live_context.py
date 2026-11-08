@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 
-from voice_agent.backends.gemini_live import GeminiLiveBackend
-from voice_agent.context_bridge import ContextBridge
-from voice_agent.settings import VoiceAgentSettings
+from support.dialogue_fixtures import gemini_backend as GeminiLiveBackend
+
+from context import create_context_bridge as ContextBridge
+from operations.models import VoiceAgentSettings
+from tests.support.context_fixtures import prepare_source
 
 
 class Memory:
@@ -17,7 +19,7 @@ def test_live_setup_uses_astrbot_persona_and_retains_existing_voice_tools():
     async def run():
         bridge = ContextBridge()
         await bridge.poll(wait=0)
-        bridge.context = {"ok": True, "persona": "QQ persona", "provider": "memory_companion"}
+        await prepare_source(bridge, {"ok": True, "persona": "QQ persona", "provider": "memory_companion"})
         backend = GeminiLiveBackend(VoiceAgentSettings(persona="local"), Memory())
         backend.context_bridge = bridge
         sent = []
@@ -38,7 +40,7 @@ def test_memory_rpc_does_not_block_live_receiver_and_repeated_tool_id_is_dedupli
     async def run():
         bridge = ContextBridge(timeout=1)
         await bridge.poll(wait=0)
-        bridge.context = {"ok": True, "provider": "memory_companion"}
+        await prepare_source(bridge, {"ok": True, "provider": "memory_companion"})
         backend = GeminiLiveBackend(VoiceAgentSettings(reply_probability_percent=100), Memory())
         backend.context_bridge = bridge
         backend.note_input_speaker("user-a")
@@ -62,32 +64,37 @@ def test_memory_rpc_does_not_block_live_receiver_and_repeated_tool_id_is_dedupli
         await backend._handle_server_msg({"toolCall": {"functionCalls": [call]}})
         await asyncio.gather(*backend._memory_tasks)
         assert len(sent) == 2
-        assert not bridge.pending
+        assert bridge.status()["pending_requests"] == 0
         assert sent[-1]["toolResponse"]["functionResponses"][0]["response"]["ok"] is True
     asyncio.run(run())
 
 
-def test_live_commit_omits_announcement_and_unplayed_reply():
+def test_live_emits_evidence_without_committing_unplayed_reply():
     async def run():
         bridge = ContextBridge()
         await bridge.poll(wait=0)
-        bridge.context = {"ok": True, "umo": "qq:GroupMessage:123"}
+        await prepare_source(bridge, {"ok": True, "umo": "qq:GroupMessage:123"})
         backend = GeminiLiveBackend(VoiceAgentSettings(reply_probability_percent=0), Memory())
         backend.context_bridge = bridge
+        results = []
+        backend.set_generated_out(results.append)
         backend.note_input_speaker("u")
         await backend._handle_server_msg({"serverContent": {
             "inputTranscription": {"text": "hello"},
             "outputTranscription": {"text": "not played"}, "turnComplete": True}})
-        turn = next(iter(bridge.outbox.values()))["payload"]
-        assert turn["user_text"] == "hello"
-        assert turn["reply_text"] == ""
-        assert turn["speaker"] == "u"
+        turn = results[0]
+        assert turn.user_text == "hello"
+        assert turn.text == "not played"
+        assert turn.selected is False
+        assert turn.user_key == "u"
+        assert bridge.status()["pending_writes"] == 0
         backend._announcement = True
         backend._last_user_text = "internal instruction"
         backend._last_reply = "announcement"
         await backend._handle_server_msg({"serverContent": {"turnComplete": True}})
-        assert len(bridge.outbox) == 1
-        assert "internal instruction" not in json.dumps(list(bridge.outbox.values()))
+        assert results[-1].internal is True
+        assert bridge.status()["pending_writes"] == 0
+        assert "internal instruction" not in json.dumps(bridge.history)
     asyncio.run(run())
 
 
@@ -95,7 +102,7 @@ def test_live_tool_cancellation_prevents_queued_memory_write():
     async def run():
         bridge = ContextBridge(timeout=1)
         await bridge.poll(wait=0)
-        bridge.context = {"ok": True, "provider": "memory_companion"}
+        await prepare_source(bridge, {"ok": True, "provider": "memory_companion"})
         backend = GeminiLiveBackend(VoiceAgentSettings(), Memory())
         backend.context_bridge = bridge
         calls = []
@@ -111,7 +118,7 @@ def test_live_tool_cancellation_prevents_queued_memory_write():
         await backend._handle_server_msg({"toolCallCancellation": {"ids": ["cancelled"]}})
         backend._memory_lock.release()
         await asyncio.gather(*backend._memory_tasks, return_exceptions=True)
-        assert not bridge.pending
-        assert not bridge.outbox
+        assert bridge.status()["pending_requests"] == 0
+        assert bridge.status()["pending_writes"] == 0
         assert calls == []
     asyncio.run(run())

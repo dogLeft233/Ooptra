@@ -6,10 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from behavior import create_auto_visits as AutoVisitController
+from behavior import create_visit_store as AutoVisitStateStore
+from behavior import parse_auto_visit_config
 from channels import create_oopz_directory
-from voice_agent.auto_visit import AutoVisitController
-from voice_agent.auto_visit_settings import parse_auto_visit_config
-from voice_agent.auto_visit_state import AutoVisitStateStore
 
 
 class FakeClock:
@@ -87,7 +87,8 @@ class FakeAgent:
 
     def status(self):
         return {"joined": self.joined, "area": self.area, "channel": self.channel,
-                "join_source": self.source}
+                "join_source": self.source, "room_state": "joined" if self.joined else "idle",
+                "room_cleanup_pending": False}
 
     def is_auto_visit_current(self, visit_id):
         return self.joined and self.source == "auto" and self.visit == visit_id
@@ -145,7 +146,7 @@ def scenario(tmp_path, *, raw=None, chance=0.1):
     clock, rng, agent = FakeClock(), FakeRandom(chance), FakeAgent()
     store = AutoVisitStateStore(tmp_path / "visit.json")
     store.load()
-    ctrl = AutoVisitController(agent, config, store, clock=clock, rng=rng)
+    ctrl = AutoVisitController(agent, config, store, enabled=lambda: agent.settings.enabled, clock=clock, rng=rng)
     agent.callback = ctrl.on_operation
     ctrl.set_bot_ready(True)
     return ctrl, agent, clock, rng, store

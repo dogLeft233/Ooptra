@@ -11,21 +11,19 @@ import struct
 import wave
 from io import BytesIO
 
-from behavior import create_reply_policy
-from voice_agent.backends.base import (
-    VoiceBackend,
-    VoiceReply,
-    VoiceStreamError,
-    VoiceStreamInterrupted,
-)
-from voice_agent.context_bridge import MEMORY_RULES, memory_tools
-from voice_agent.observation import DecisionTrace, VoiceObservation
-from voice_agent.voice_control import (
+from behavior.models import VoiceControlDecision, parse_control_decision
+from dialogue._internal.controls import (
     CONTROL_DECISION_FORMAT,
     LEAVE_INTENT_DESCRIPTION,
     VOLUME_INTENT_DESCRIPTION,
-    VoiceControlDecision,
-    parse_control_decision,
+)
+from dialogue._internal.memory_tools import MEMORY_RULES, memory_tools
+from dialogue._internal.observation import DecisionTrace, VoiceObservation
+from dialogue.api import HistoryReader, VoiceBackend
+from dialogue.models import (
+    VoiceReply,
+    VoiceStreamError,
+    VoiceStreamInterrupted,
 )
 
 logger = logging.getLogger(__name__)
@@ -267,16 +265,24 @@ def _parse_decision_json(raw: str):
 class MimoCascadeBackend(VoiceBackend):
     name = "mimo_cascade"
 
-    def __init__(self, settings, memory) -> None:
+    def __init__(self, settings, memory, *, reply_policy, **options) -> None:
         self.settings = settings
-        self.memory = memory
-        self.observation = VoiceObservation(self.name)
+        self._history = memory
+        self._observation = VoiceObservation(self.name)
         self.intent_response_valid = True
-        self._conversation = create_reply_policy()
+        self._conversation = reply_policy
         self._session = None  # aiohttp.ClientSession，懒加载
+        self._generation_lock = asyncio.Lock()
+
+    @property
+    def observation(self) -> VoiceObservation:
+        return self._observation
+
+    def bind_history(self, reader: HistoryReader) -> None:
+        self._history = reader
 
     def _proxy_url(self) -> str | None:
-        from voice_agent.settings import resolve_agent_proxy_url
+        from dialogue._internal.proxy import resolve_agent_proxy_url
 
         return resolve_agent_proxy_url(getattr(self.settings, "proxy", "") or "")
 
@@ -333,21 +339,28 @@ class MimoCascadeBackend(VoiceBackend):
         ) as resp:
             data = await resp.json(content_type=None)
             if resp.status >= 400:
-                raise RuntimeError(f"ASR failed HTTP {resp.status}: {data}")
+                raise RuntimeError(f"ASR failed HTTP {resp.status}")
         choices = data.get("choices") or []
         if not choices:
             return ""
         raw = str(((choices[0] or {}).get("message") or {}).get("content") or "")
         clean = sanitize_asr(raw)
         if clean != raw.strip():
-            logger.info("ASR 结果含控制标记，已丢弃：%r -> %r", raw[:80], clean[:80])
+            logger.info("event=dialogue.asr.sanitized input_chars=%s output_chars=%s", len(raw), len(clean))
         return clean
 
     async def chat(self, user_text: str, *, user_key: str = "", _with_intent: bool = False) -> str:
         bridge = self.context_bridge
-        shared = bridge is not None and bridge.context.get("ok") is True
+        source_context = bridge.context if bridge is not None else {}
+        source_session = bridge.session_id if bridge is not None else ""
+        shared = source_context.get("ok") is True
+        tools_available = shared and bool(source_context.get("provider"))
+
+        def check_source() -> None:
+            if shared and bridge is not None and bridge.session_id != source_session:
+                raise VoiceStreamInterrupted("Shared context source was replaced")
         history = (list(bridge.history) if shared and bridge is not None else
-                   self.memory.as_messages(user_key=user_key, limit=self.settings.memory_max_turns))
+                   self._history.as_messages(user_key=user_key, limit=self.settings.memory_max_turns))
         # 历史里存着净化之前的回复（emoji、星号动作、换行、超长），照样会带偏
         # 模型 —— 一并清掉。长度也要夹：只清不夹的话，模型照着历史里的长回复
         # 模仿，prompt 里那句「不超过 35 个字」永远追不回来。
@@ -364,8 +377,10 @@ class MimoCascadeBackend(VoiceBackend):
             {"role": "system", "content": self.effective_persona + VOICE_ROOM_RULES}
         ]
         messages.extend(history)
-        if bridge is not None and shared and bridge.active and bridge.context.get("provider"):
+        if bridge is not None and tools_available:
+            check_source()
             result = await bridge.tool("astrbot_recall", {"query": user_text})
+            check_source()
             messages[0]["content"] += MEMORY_RULES
             if result.get("ok") is True and result.get("context"):
                 messages.append({"role": "user", "content":
@@ -394,12 +409,14 @@ class MimoCascadeBackend(VoiceBackend):
         }
         if _with_intent:
             body["response_format"] = {"type": "json_object"}
-        if bridge is not None and shared and bridge.active and bridge.context.get("provider"):
+        if bridge is not None and tools_available:
             body["tools"] = [{"type": "function", "function": {
                 **tool, "parameters": {"type": "object", "properties": {
                     key: {"type": "string"} for key in tool["parameters"]["properties"]},
                     "required": tool["parameters"]["required"]}}} for tool in memory_tools()]
+        check_source()
         data = await self._chat_completion(body)
+        check_source()
         choices = data.get("choices") or []
         if not choices:
             return ""
@@ -422,12 +439,20 @@ class MimoCascadeBackend(VoiceBackend):
                     if call_id in tool_results:
                         result = tool_results[call_id]
                     else:
-                        result = await bridge.tool(function.get("name"), args,
-                                                    speaker=user_key.removeprefix("oopz:"))
+                        tool_name = function.get("name")
+                        if not isinstance(tool_name, str):
+                            result = {"ok": False, "error": "Invalid memory tool name"}
+                        else:
+                            check_source()
+                            result = await bridge.tool(tool_name, args,
+                                                        speaker=user_key.removeprefix("oopz:"))
+                            check_source()
                         tool_results[call_id] = result
                     messages.append({"role": "tool", "tool_call_id": call.get("id", ""),
                                      "content": json.dumps(result, ensure_ascii=False)})
+                check_source()
                 data = await self._chat_completion(body, stage="Memory tool follow-up")
+                check_source()
                 choices = data.get("choices") or []
                 if not choices:
                     return ""
@@ -439,15 +464,13 @@ class MimoCascadeBackend(VoiceBackend):
         clean = clamp_reply(sanitize_for_tts(raw))
         if looks_like_reasoning_leak(clean):
             # 弃用整轮：说英文内心独白比不说话更糟（用户已经在房里喊「说中文」了）
-            logger.warning("LLM 把内心独白当正文吐出来了，本轮不说：%r", raw[:120])
+            logger.warning("event=dialogue.text.rejected reason=reasoning_leak input_chars=%s", len(raw))
             return ""
         if clean != raw.strip():
             logger.info(
-                "LLM 回复已净化：%d 字 -> %d 字（%r -> %r）",
+                "event=dialogue.text.sanitized input_chars=%s output_chars=%s",
                 len(raw),
                 len(clean),
-                raw[:80],
-                clean[:80],
             )
         return clean
 
@@ -508,8 +531,7 @@ class MimoCascadeBackend(VoiceBackend):
             url, headers=self._headers(), json=body, proxy=self._proxy_url()
         ) as resp:
             if resp.status >= 400:
-                raw = await resp.text()
-                raise RuntimeError(f"TTS failed HTTP {resp.status}: {raw}")
+                raise RuntimeError(f"TTS failed HTTP {resp.status}")
             async for line in resp.content:
                 if not line:
                     continue
@@ -536,7 +558,7 @@ class MimoCascadeBackend(VoiceBackend):
         return pcm, self.settings.sample_rate_out
 
     async def rewrite_announcement(self, kind: str, template: str) -> str:
-        from voice_agent.announcements import announcement_instruction, clean_announcement
+        from dialogue._internal.announcements import announcement_instruction, clean_announcement
 
         # Deliberately independent of memory.as_messages(): a visit must not
         # introduce either another room's history or fake human utterances.
@@ -564,6 +586,12 @@ class MimoCascadeBackend(VoiceBackend):
         user_key: str = "",
         channel_key: str = "",
     ) -> VoiceReply:
+        async with self._generation_lock:
+            return await self._generate_utterance(
+                pcm16, sample_rate=sample_rate, user_key=user_key, channel_key=channel_key)
+
+    async def _generate_utterance(self, pcm16: bytes, *, sample_rate: int,
+                                  user_key: str, channel_key: str) -> VoiceReply:
         trace = DecisionTrace(self.observation)
         try:
             return await self._decide_utterance(pcm16, sample_rate, user_key, channel_key, trace)
@@ -642,36 +670,22 @@ class MimoCascadeBackend(VoiceBackend):
                     trace.reason, trace.outcome = "error", "error"
                     logger.warning("语音控制意图识别失败，本轮不执行控制", exc_info=True)
             if control.leave or control.volume is not None:
-                self.memory.append("user", text, user_key=user_key, channel_key=channel_key)
                 if ((control.leave and not self.settings.voice_leave_enabled)
                         or (control.volume is not None and not self.settings.voice_volume_enabled)):
                     # A disabled control is never converted into a spoken promise.
                     trace.reason, trace.outcome = "control_disabled", "skipped"
                     return VoiceReply(user_text=text, user_key=user_key)
                 trace.reason, trace.outcome = "control", "control"
-                if control.leave:
-                    raw = {"voice_control": "leave"}
-                else:
-                    volume = control.volume
-                    assert volume is not None  # The decision above contains exactly one control.
-                    command: dict[str, str | int] = {"action": volume.action}
-                    if volume.value is not None:
-                        command["value"] = volume.value
-                    raw = {"voice_control": "volume", "volume_command": command}
-                return VoiceReply(user_text=text, user_key=user_key, raw=raw)
+                return VoiceReply(user_text=text, user_key=user_key, control=control)
         if not selected or failed:
-            if not short:
-                self.memory.append("user", text, user_key=user_key, channel_key=channel_key)
             return VoiceReply(user_text=text, user_key=user_key)
         if needs_chat:
             with trace.measure("chat"):
                 reply_text = await self.chat(text, user_key=user_key)
-        # Read old history first; store this turn only after completing the model request.
-        self.memory.append("user", text, user_key=user_key, channel_key=channel_key)
+        # 权威历史由应用根据真实渠道执行结果提交；这里仅返回生成证据。
         if not reply_text.strip():
             trace.reason = "empty"
             return VoiceReply(user_text=text, user_key=user_key)
-        self.memory.append("assistant", reply_text, user_key=user_key, channel_key=channel_key)
         with trace.measure("tts"):
             pcm_out, rate_out = await self.tts(reply_text)
             pcm_out = resample_pcm16(pcm_out, rate_out, self.settings.sample_rate_out)
@@ -681,7 +695,7 @@ class MimoCascadeBackend(VoiceBackend):
             trace.outcome = "replied"
         return VoiceReply(user_text=text, text=reply_text, pcm16=pcm_out,
                           sample_rate=self.settings.sample_rate_out,
-                          user_key=user_key, raw={"stored": True})
+                          user_key=user_key)
 
     async def aclose(self) -> None:
         self._conversation.clear()

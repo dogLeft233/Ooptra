@@ -9,7 +9,7 @@ from test_round_throttle import _offer, _take
 from test_voice_reply_probability import fragment
 from test_voice_session_regressions import make_agent
 
-from voice_agent.settings import load_voice_agent_settings
+from operations import load_voice_agent_settings
 from webui import config_editor
 
 
@@ -59,7 +59,7 @@ def test_mimo_keyword_overrides_zero_probability_after_asr(tmp_path, monkeypatch
         monkeypatch.setattr(agent.backend, "tts", tts)
         monkeypatch.setattr(random, "random", lambda: pytest.fail("zero probability or keyword hit needs no draw"))
         _offer(agent, b"human speech")
-        await agent._throttled_round(_take(agent))
+        await agent._run_selected_reply(await _take(agent))
         assert calls == (["asr", "chat", "tts"] if forced else ["asr"])
         assert bool(agent.duplex.audio) is forced
         assert agent.last_user_text == text
@@ -90,7 +90,7 @@ def test_live_keyword_after_turn_complete_restores_only_the_original_reply(tmp_p
 
 @pytest.mark.parametrize("boundary", ["voice", "expiry", "reset", "next_model"])
 def test_live_ambiguous_late_keyword_cannot_force_a_new_reply(tmp_path, monkeypatch, boundary):
-    from voice_agent.backends import gemini_live
+    import time
 
     async def run():
         agent = make_agent(tmp_path)
@@ -106,10 +106,9 @@ def test_live_ambiguous_late_keyword_cannot_force_a_new_reply(tmp_path, monkeypa
             monkeypatch.setattr(agent.backend, "_send", noop)
             await agent.backend.push_audio(b"\x00\x20" * 320)
         elif boundary == "expiry":
-            monkeypatch.setattr(gemini_live, "_LATE_TRANSCRIPTION_SECONDS", 0)
             # Advance the clock past the already established deadline.
-            now = gemini_live.time.monotonic()
-            monkeypatch.setattr(gemini_live.time, "monotonic", lambda: now + 10)
+            now = time.monotonic()
+            monkeypatch.setattr(time, "monotonic", lambda: now + 10)
         elif boundary == "reset":
             await agent.backend._reset_session()
         else:
@@ -189,12 +188,12 @@ def test_live_late_keyword_replays_the_whole_buffered_reply(tmp_path):
 
 
 def test_live_deferred_audio_budget_discards_whole_reply_and_resets_next_turn(tmp_path, monkeypatch):
-    from voice_agent.backends import gemini_live
+    from dialogue.models import LiveLimits
 
-    monkeypatch.setattr(gemini_live, "_MAX_DEFERRED_AUDIO_BYTES", 4)
 
     async def run():
         agent = make_agent(tmp_path)
+        agent.backend.limits = LiveLimits(deferred_audio_bytes=4)
         agent.settings.reply_probability_percent = 0
         agent.settings.force_reply_keywords = ["human"]
         await establish_room(agent)
@@ -236,7 +235,7 @@ def test_mimo_nonmatching_keyword_draws_once_after_asr(tmp_path, monkeypatch, sa
         monkeypatch.setattr(agent.backend, "asr", asr)
         monkeypatch.setattr(agent.backend, "chat", chat)
         _offer(agent, b"speech")
-        await agent._throttled_round(_take(agent))
+        await agent._run_selected_reply(await _take(agent))
         assert draws == [sample]
         assert bool(chatted) is expected
         await agent.backend.aclose()

@@ -16,30 +16,42 @@ import random
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
-from behavior import create_cascade_attempts
+from behavior import (
+    create_barge_in_gate,
+    create_cascade_attempts,
+    create_reply_policy,
+    create_reply_scheduler,
+)
 from behavior.api import CascadeAttempts
-from behavior.models import AttemptRejected
-from channels import create_oopz_channel, create_oopz_directory
-from channels.api import Channel, PlatformDirectory
-from channels.models import JoinRoom, LeaveRoom, RoomTarget, SessionRef
-from voice_agent.backends import create_backend
-from voice_agent.backends.base import (
+from behavior.models import (
+    VOICE_CONTROL_MIN_MS,
+    AttemptRejected,
+    ScheduledReply,
+    SpeechActivity,
+    VolumeCommand,
+    resolve_volume_command,
+)
+from channels import create_duplex as VoiceDuplex
+from channels import create_oopz_channel, create_oopz_directory, create_vad
+from channels import create_output_controls as VoiceOutputControls
+from channels.api import Channel, Duplex, OutputControls, PlatformDirectory, VoiceActivityDetector
+from channels.models import JoinRoom, LeaveRoom, RoomTarget, SessionRef, VadvConfig
+from channels.models import RoomOperation as VoiceOperation
+from context import create_context_bridge, create_memory
+from context.api import SourceBridge
+from context.models import ConfirmedTurn
+from core.audio import pcm16_rms
+from dialogue import create_backend
+from dialogue.api import (
     ConnectionReporter,
     SessionStarter,
     StreamingUtterance,
-    VoiceStreamInterrupted,
 )
-from voice_agent.context_bridge import ContextBridge
-from voice_agent.duplex import VoiceDuplex
-from voice_agent.memory import MemoryStore
-from voice_agent.operations import VoiceOperation
-from voice_agent.output_controls import VoiceOutputControls
-from voice_agent.settings import VoiceAgentSettings, VoiceApiSettings
-from voice_agent.vad import EnergyVad, VadvConfig
-from voice_agent.voice_control import VOICE_CONTROL_MIN_MS
+from dialogue.models import GeneratedTurn, VoiceStreamInterrupted
+from operations.models import VoiceAgentSettings, VoiceApiSettings
 
 logger = logging.getLogger(__name__)
 
@@ -137,31 +149,30 @@ class VoiceAgent:
         self.settings = settings
         self.api_settings = api_settings
         self._bot = bot
-        self.memory = MemoryStore(settings.memory_path, settings.memory_max_turns)
+        self.memory = create_memory(settings.memory_path, settings.memory_max_turns)
         self.memory.set_persona(settings.persona)
-        self.backend = create_backend(settings, self.memory)
-        self.context_bridge = ContextBridge(
+        self.backend = create_backend(settings, self.memory, reply_policy=create_reply_policy())
+        self.context_bridge = create_context_bridge(
             outbox_path=Path(self.memory.path).with_name("astrbot_voice_outbox.json"))
         self.backend.context_bridge = self.context_bridge
         self.live_mode = _is_live_backend(self.backend)
-        self.duplex: VoiceDuplex | None = None
+        self.duplex: Duplex | None = None
         self.output_controls = VoiceOutputControls(settings, lambda: self.duplex, lambda: self._joined)
         #: 正在收尾的旧 duplex。bind_bot 是同步上下文，close() 只能交给事件循环；
         #: 留引用是为了有地方 await，也避免「Task exception was never retrieved」。
         self._duplex_close_tasks: set[asyncio.Task] = set()
         self._vad = self._make_vad()
-        self._user_buffers: dict[str, EnergyVad] = {}
+        self._user_buffers: dict[str, VoiceActivityDetector] = {}
         self._task: asyncio.Task | None = None
         self._busy = asyncio.Lock()
         self._stream_reply_task: asyncio.Task | None = None
         self._speaking = False
         # Live 模式的抢话闸门：一次「模型出声」最多只打断一次。见 _on_remote_pcm。
-        self._barge_in_armed = True
+        self._barge_gate = create_barge_in_gate()
         self._discard_live_audio = False
         self._live_output_lock = asyncio.Lock()
         #: uid -> 本回合内该用户**连续说话**的累计毫秒数（说话一断就清零）。
         #: 累计到 settings.barge_in_hold_ms 才认作真的抢话，见 _barge_in_reached。
-        self._barge_in_speech_ms: dict[str, float] = {}
         self._init_operations()
         self.last_reply = ""
         self.last_user_text = ""
@@ -217,6 +228,8 @@ class VoiceAgent:
         self._voice_suspended = False
         self._reply_generating = False
         self._reply_tasks: set[asyncio.Task] = set()
+        self._completion_tasks: set[asyncio.Task] = set()
+        self._playback_epoch = 0
         self._announcement_task: asyncio.Task | None = None
         self._announcement_cancel_requests: set[asyncio.Task] = set()
         self._announcement_active = False
@@ -233,9 +246,9 @@ class VoiceAgent:
             self._init_operations()
         self._ensure_context_bridge()
 
-    def _ensure_context_bridge(self) -> ContextBridge:
+    def _ensure_context_bridge(self) -> SourceBridge:
         if not hasattr(self, "context_bridge"):
-            self.context_bridge = ContextBridge()
+            self.context_bridge = create_context_bridge()
             self.backend.context_bridge = self.context_bridge
         return self.context_bridge
 
@@ -284,7 +297,7 @@ class VoiceAgent:
                     if not self._joined or self._bot is not bot:
                         return
                     import config as runtime_config
-                    from voice_agent.auto_visit_settings import (
+                    from behavior import (
                         effective_area,
                         parse_auto_visit_config,
                     )
@@ -348,7 +361,7 @@ class VoiceAgent:
         if not self.is_auto_visit_current(expected_visit_id):
             return False
         self._retiring_visit_id = expected_visit_id
-        self._pending = None
+        self.reply_scheduler.reset()
         return True
 
     async def _cancel_announcement(self) -> None:
@@ -382,22 +395,8 @@ class VoiceAgent:
                 break
 
     def _init_throttle(self) -> None:
-        """级联模式的回合节流状态。
-
-        单独成方法是为了让测试在 ``VoiceAgent.__new__`` 之后补一句就拿到完整
-        状态 —— 否则每个测试 helper 都得把 ``__init__`` 的字段再抄一遍。
-
-        * ``_pending``：**单槽**信箱。以前是一句一个 ``create_task``、在 ``_busy``
-          锁外面无上限排队，用户说得比 bot 回得快时队列只增不减。这里只留
-          **最新**的一条：用户已经说下一句了，再回上一句没有意义。
-          元素 = ``(uid, pcm, sample_rate, 入槽时的 monotonic 时刻)``
-        * ``_cooldown_until``：冷却截止时刻。到点之前不开新一轮。
-        * ``_barged_in``：本回合是否被抢话打断 —— 打断了就不该让抢话的人再等冷却。
-        """
-        self._pending: tuple[str, bytes, int, float] | None = None
-        self._pending_event = asyncio.Event()
+        self.reply_scheduler = create_reply_scheduler()
         self._round_task: asyncio.Task | None = None
-        self._cooldown_until = 0.0
         self._barged_in = False
 
     # ------------------------------------------------------------------
@@ -480,7 +479,7 @@ class VoiceAgent:
         self._duplex_close_tasks.add(task)
         task.add_done_callback(self._duplex_close_tasks.discard)
 
-    def bind_duplex(self, duplex: VoiceDuplex) -> None:
+    def bind_duplex(self, duplex: Duplex) -> None:
         self.duplex = duplex
         self._ensure_output_controls().attach(duplex)
         duplex.set_remote_pcm_handler(self._on_remote_pcm)
@@ -534,8 +533,8 @@ class VoiceAgent:
             except Exception as exc:
                 logger.warning("语音会话重连失败：%s", exc)
 
-    def _make_vad(self) -> EnergyVad:
-        return EnergyVad(
+    def _make_vad(self) -> VoiceActivityDetector:
+        return create_vad(
             VadvConfig(
                 sample_rate=self.settings.sample_rate_in,
                 silence_ms=self.settings.silence_ms,
@@ -567,9 +566,9 @@ class VoiceAgent:
             notes.append(await self._apply_output_volume())
 
         if _MEMORY_FIELDS & changed_set:
-            self.memory = MemoryStore(self.settings.memory_path, self.settings.memory_max_turns)
+            self.memory = create_memory(self.settings.memory_path, self.settings.memory_max_turns)
             self.memory.set_persona(self.settings.persona)
-            self.backend.memory = self.memory
+            self.backend.bind_history(self.memory)
             notes.append("记忆存储已重建")
 
         if _VAD_FIELDS & changed_set:
@@ -583,7 +582,7 @@ class VoiceAgent:
         if "backend" in changed_set:
             self._operation_epoch += 1
             await self.backend.aclose()
-            self.backend = create_backend(self.settings, self.memory)
+            self.backend = create_backend(self.settings, self.memory, reply_policy=create_reply_policy())
             self.backend.context_bridge = self.context_bridge
             self.live_mode = _is_live_backend(self.backend)
             # 信箱消费端必须跟着模式走：live→cascade 不拉起它，句子进了信箱
@@ -629,7 +628,7 @@ class VoiceAgent:
         await self._ensure_output_controls().sync_volume(unmute=True)
         return f"语音音量已设为 {self.settings.output_volume}%"
 
-    def _ensure_output_controls(self) -> VoiceOutputControls:
+    def _ensure_output_controls(self) -> OutputControls:
         if not hasattr(self, "output_controls"):
             self.output_controls = VoiceOutputControls(self.settings, lambda: self.duplex, lambda: self._joined)
         return self.output_controls
@@ -645,7 +644,7 @@ class VoiceAgent:
         return await self._ensure_output_controls().set(volume=volume, muted=muted)
 
     async def apply_voice_volume(self, raw: Any) -> dict[str, Any]:
-        from voice_agent.voice_control import parse_volume_command
+        from behavior.models import parse_volume_command
 
         if (not self.settings.enabled or not self.settings.voice_volume_enabled or not self._joined
                 or not self._connection_ready or self._voice_suspended or self._announcement_active
@@ -657,7 +656,11 @@ class VoiceAgent:
                 raise ValueError("缺少音量控制指令")
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
-        result = await self._ensure_output_controls().command(command)
+        return await self._apply_volume_command(command)
+
+    async def _apply_volume_command(self, command: VolumeCommand) -> dict[str, Any]:
+        result = await self._ensure_output_controls().adjust(
+            lambda current: resolve_volume_command(command, current))
         self.last_reply = result.get("message") or "语音输出调整失败：" + result.get("error", "")
         logger.info("语音输出控制：%s → %s", command.action, self.last_reply)
         return result
@@ -797,13 +800,19 @@ class VoiceAgent:
         epoch = self._operation_epoch
         channels = self.channels
         session = channels.snapshot().session
+        source_session = self._ensure_context_bridge().session_id
 
         def current() -> bool:
             return (epoch == self._operation_epoch and channels is self.channels
-                    and channels.snapshot().session == session)
+                    and channels.snapshot().session == session
+                    and self.context_bridge.session_id == source_session)
 
         # 每回合只报一次推流失败：失败通常整回合都失败，逐分片刷屏反而盖住线索
         push_failed = False
+        turn_failed = False
+        turn_interrupted = False
+        audio_bytes = 0
+        audio_rate = self.settings.sample_rate_out
 
         async def on_audio(pcm: bytes, rate: int) -> None:
             if not current():
@@ -814,7 +823,7 @@ class VoiceAgent:
             # 以前在这里 turns += 1，一次回复实测 13 个分片就虚增 13 轮；
             # 而 _speaking 置 True 后没有任何地方回落，导致下面 _on_remote_pcm
             # 的抢话分支被每个分片各触发一次。回合边界一律由 on_turn_end 负责。
-            nonlocal push_failed
+            nonlocal push_failed, turn_failed, audio_bytes, audio_rate
             async with self._live_output_lock:
                 if not current() or self._discard_live_audio:
                     return
@@ -824,7 +833,7 @@ class VoiceAgent:
             # 返回值 {ok: False, error: "not joined"} 被丢弃），日志里只有
             # 「模型出了回合」，排查时完全看不出音频根本没进房间。
             if isinstance(result, dict) and result.get("ok") is False:
-                self.backend._bridge_output_failed = True
+                turn_failed = True
                 if self._announcement_active and self._announcement_collecting:
                     self._announcement_error = result.get("error") or "audio push failed"
                 if not push_failed:
@@ -834,6 +843,8 @@ class VoiceAgent:
                         result.get("error") or result,
                     )
             else:
+                audio_bytes += len(pcm)
+                audio_rate = rate
                 push_failed = False
                 if self._announcement_active and self._announcement_collecting and pcm:
                     self._announcement_audio += len(pcm)
@@ -847,9 +858,10 @@ class VoiceAgent:
 
         async def on_turn_end(interrupted: bool) -> None:
             """一个回合结束（说完了，或被抢话打断）。"""
-            nonlocal push_failed
+            nonlocal push_failed, turn_interrupted
             if not current():
                 return
+            turn_interrupted = turn_interrupted or interrupted or self._discard_live_audio
             self._reply_generating = False
             if self._announcement_active and self._announcement_collecting:
                 from voice_agent.announcements import clean_announcement
@@ -863,11 +875,75 @@ class VoiceAgent:
             self._rearm_barge_in()
             # 失败计数按回合清零：下一回合若还坏，还能再报一条
             push_failed = False
+            if interrupted:
+                self._playback_epoch += 1
             if interrupted and self.duplex is not None:
                 # 服务端自己判定用户抢话：模型已经停口，但本地排期的分片还在播，
                 # 必须就地清掉，否则「模型不说了、喇叭还在说」直到缓冲播完。
                 with contextlib.suppress(Exception):
                     await self.duplex.stop_tts()
+
+        async def on_generated(result: GeneratedTurn) -> None:
+            nonlocal turn_failed, turn_interrupted, audio_bytes
+            if not current():
+                return
+            failed, emitted, discarded = turn_failed, audio_bytes, turn_interrupted
+            turn_failed, audio_bytes, turn_interrupted = False, 0, False
+            if result.internal and self._announcement_active:
+                return
+            playback_epoch, finished_rate = self._playback_epoch, audio_rate
+
+            async def complete() -> None:
+                confirmation: Literal["completed", "silent", "interrupted", "failed", "unknown"] = "silent"
+                output = ""
+                if result.interrupted or discarded or self._discard_live_audio:
+                    confirmation = "interrupted"
+                elif result.selected and emitted and not failed and not self.output_muted:
+                    finish = await self._push_room_pcm(session, b"", finished_rate, finish=True)
+                    if finish.get("ok"):
+                        drained = await duplex.wait_tts_complete(30)
+                        if playback_epoch != self._playback_epoch:
+                            confirmation = "interrupted"
+                        elif drained.get("ok") and current() and not self.output_muted:
+                            confirmation = "completed" if result.text else "unknown"
+                            output = result.text
+                        else:
+                            confirmation = "failed"
+                    else:
+                        confirmation = "failed"
+                elif failed:
+                    confirmation = "failed"
+                if current():
+                    await self._record_output(
+                        "" if result.internal else result.user_text, output,
+                        "api" if result.internal else result.user_key,
+                        session, confirmation,
+                    )
+
+            if not emitted or result.interrupted or discarded or failed:
+                await complete()
+                return
+            # 播放确认由应用任务拥有，不占用模型接收循环。满载时明确降级，
+            # 不把缺少确认的草稿写成回复；停止/切房通过 _reply_tasks 统一取消回收。
+            if len(self._completion_tasks) >= 8:
+                logger.warning("event=voice.history.capacity_rejected session_id=%s", session.session_id if session else "")
+                return
+            task = asyncio.create_task(complete(), name="voice-output-confirmation")
+            self._reply_tasks.add(task)
+            self._completion_tasks.add(task)
+
+            def observed(done: asyncio.Task) -> None:
+                self._reply_tasks.discard(done)
+                self._completion_tasks.discard(done)
+                if not done.cancelled() and done.exception() is not None:
+                    logger.error("event=voice.history.commit_failed session_id=%s", session.session_id if session else "",
+                                 exc_info=done.exception())
+
+            task.add_done_callback(observed)
+
+        setter_generated = getattr(self.backend, "set_generated_out", None)
+        if setter_generated is not None:
+            setter_generated(on_generated)
 
         setter_audio = getattr(self.backend, "set_audio_out", None)
         if setter_audio:
@@ -891,18 +967,16 @@ class VoiceAgent:
             setter_control(lambda: current() and self.request_voice_leave())
         setter_volume = getattr(self.backend, "set_voice_volume_out", None)
         if setter_volume is not None:
-            async def on_volume(command: dict[str, Any]) -> dict[str, Any]:
+            async def on_volume(command: VolumeCommand) -> dict[str, Any]:
                 if not current():
                     return {"ok": False, "error": "语音会话已变化"}
-                return await self.apply_voice_volume(command)
+                return await self._apply_volume_command(command)
             setter_volume(on_volume)
 
     async def _start_round_worker(self) -> None:
         """拉起信箱消费端。重复进房时先收掉旧的，避免两个 worker 抢同一条。"""
         await self._stop_round_worker()
-        self._pending = None
-        self._cooldown_until = 0.0
-        self._pending_event.clear()
+        self.reply_scheduler.reset()
         self._round_task = asyncio.create_task(self._round_worker())
 
     async def _stop_round_worker(self) -> None:
@@ -912,9 +986,7 @@ class VoiceAgent:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
-        self._pending = None
-        self._cooldown_until = 0.0
-        self._pending_event.clear()
+        self.reply_scheduler.reset()
 
     async def leave(self, *, source: str = "manual", expected_visit_id: str | None = None,
                     expected_operation_epoch: int | None = None) -> dict[str, Any]:
@@ -993,6 +1065,8 @@ class VoiceAgent:
             "mode": "live" if self.live_mode else "cascade",
             "joined": self._joined,
             "room_state": self.channels.snapshot().state.value,
+            "room_cleanup_pending": bool(getattr(self, "_retired_channels", [])),
+            "pending_output_confirmations": len(getattr(self, "_completion_tasks", set())),
             "join_source": getattr(self, "_join_source", ""),
             "area": self._area,
             "channel": self._channel,
@@ -1012,6 +1086,7 @@ class VoiceAgent:
 
         async def wait() -> bool:
             while (self._reply_generating or self._speaking or self._busy.locked()
+                   or bool(self._completion_tasks)
                    or bool(getattr(self.backend, "reply_active", False))):
                 await asyncio.sleep(0.02)
             if self.duplex is not None:
@@ -1063,7 +1138,8 @@ class VoiceAgent:
 
     async def speak_announcement(self, kind: str, template: str, *, expected_visit_id: str | None = None,
                                  timeout: float = 20.0) -> dict[str, Any]:
-        from voice_agent.announcements import announcement_instruction, run_announcement
+        from dialogue import announcement_instruction
+        from voice_agent.announcements import run_announcement
 
         self._ensure_operations()
         try:
@@ -1105,10 +1181,10 @@ class VoiceAgent:
     # 音频进出
     # ------------------------------------------------------------------
 
-    def _vad_for(self, uid: str) -> EnergyVad:
+    def _vad_for(self, uid: str) -> VoiceActivityDetector:
         vad = self._user_buffers.get(uid)
         if vad is None:
-            vad = EnergyVad(
+            vad = create_vad(
                 VadvConfig(
                     sample_rate=self.settings.sample_rate_in,
                     silence_ms=self.settings.silence_ms,
@@ -1158,13 +1234,12 @@ class VoiceAgent:
             # 30ms 静音，听感是「能听见但听不清」（2.0.3 修的就是这个）。
             if (
                 self.settings.barge_in
-                and self._speaking
-                and self._barge_in_armed
+                and (self._speaking or bool(self._completion_tasks))
                 and self._barge_in_reached(uid, pcm, sample_rate)
             ):
-                self._barge_in_armed = False
                 # 服务端 NO_INTERRUPTION 会继续生成旧回合；直到回合边界都丢弃。
                 self._discard_live_audio = True
+                self._playback_epoch += 1
                 interrupt = getattr(self.backend, "interrupt", None)
                 if interrupt is not None:
                     await interrupt()
@@ -1177,7 +1252,7 @@ class VoiceAgent:
             push = getattr(self.backend, "push_audio", None)
             if push is not None:
                 note_speaker = getattr(self.backend, "note_input_speaker", None)
-                if note_speaker is not None and EnergyVad._rms(pcm) >= _MIN_UTTERANCE_RMS:
+                if note_speaker is not None and pcm16_rms(pcm) >= _MIN_UTTERANCE_RMS:
                     note_speaker(uid)
                 await push(pcm, sample_rate)
             return
@@ -1200,7 +1275,7 @@ class VoiceAgent:
             # 1 秒窗）：真说话 RMS 0.03~0.22，会误触发 VAD 的带在 0.012~0.02。
             # 取 0.02 正好卡在两者之间。若哪天发现真说话被丢掉，日志里会打出
             # 每次丢弃的 RMS，按它调这个常量即可。
-            energy = EnergyVad._rms(utterance)
+            energy = pcm16_rms(utterance)
             if energy < _MIN_UTTERANCE_RMS:
                 logger.info(
                     "丢弃疑似噪声回合：RMS=%.4f（%.1fs 音频，阈值 %.3f）",
@@ -1229,91 +1304,46 @@ class VoiceAgent:
             self._offer_utterance(uid, utterance, sample_rate)
 
     def _offer_utterance(self, uid: str, pcm: bytes, sample_rate: int) -> None:
-        """把切出来的一句放进**单槽**信箱，由 ``_round_worker`` 串行消费。
+        self.reply_scheduler.offer(uid, pcm, sample_rate)
 
-        槽里已经有东西时**丢掉旧的那条**而不是排队：用户既然已经说了下一句，
-        再回上一句只会驴唇不对马嘴，而且会把延迟越堆越高。
-        """
-        if self._pending is not None:
-            logger.info(
-                "丢弃积压回合：用户已经说下一句了（丢掉已等 %.1fs 的那条）",
-                time.monotonic() - self._pending[3],
-            )
-        self._pending = (uid, pcm, sample_rate, time.monotonic())
-        self._pending_event.set()
+    def _reply_cooldown(self) -> float:
+        return max(0, int(getattr(self.settings, "reply_cooldown_ms", 0) or 0)) / 1000.0
 
     async def _round_worker(self) -> None:
-        """单槽信箱的消费端：并行度恒为 1，且每回合之间夹一段冷却。"""
         task = asyncio.current_task()
-        # Python 3.10 wait_for can consume cancellation as a backend query
-        # completes. A detached worker must still stop before waiting again.
         while self._round_task is task:
-            await self._pending_event.wait()
-            self._pending_event.clear()
-            item, self._pending = self._pending, None
-            if item is None:
-                continue
-            await self._throttled_round(item)
+            item = await self.reply_scheduler.next(self._reply_cooldown())
+            if self._round_task is not task:
+                return
+            await self._run_selected_reply(item)
 
-    async def _throttled_round(self, item: tuple[str, bytes, int, float]) -> None:
-        """一个回合的节流外壳：等冷却 → 换成最新的一条 → 过陈旧闸门 → 处理。"""
-        cooldown = max(0, int(getattr(self.settings, "reply_cooldown_ms", 0) or 0)) / 1000.0
-        remaining = self._cooldown_until - time.monotonic()
-        if remaining > 0:
-            await asyncio.sleep(remaining)
-            # 冷却这段时间里用户很可能又说了 —— 只回最新的那句
-            if self._pending is not None:
-                logger.info("冷却期内用户又说了，改回最新的一条")
-                item, self._pending = self._pending, None
-                self._pending_event.clear()
-
-        uid, pcm, sample_rate, offered_at = item
-        waited = time.monotonic() - offered_at
-        if waited > cooldown + _STALE_ROUND_SEC:
-            # 等到现在还没轮到，说明用户早说别的去了
-            logger.info("丢弃过期回合：已等待 %.1fs，用户早说别的了", waited)
-            return
-
+    async def _run_selected_reply(self, item: ScheduledReply) -> None:
         self._barged_in = False
-        await self._handle_utterance(uid, pcm, sample_rate)
-        # 被抢话 = bot 没把话说完，此时再让抢话的人等冷却就本末倒置了。
-        self._cooldown_until = 0.0 if self._barged_in else time.monotonic() + cooldown
+        try:
+            await self._handle_utterance(item.user_key, item.pcm, item.sample_rate)
+        finally:
+            self.reply_scheduler.finish(item, cooldown=self._reply_cooldown(), interrupted=self._barged_in)
+
+    def _ensure_barge_gate(self):
+        if not hasattr(self, "_barge_gate"):
+            self._barge_gate = create_barge_in_gate()
+        return self._barge_gate
 
     def _rearm_barge_in(self) -> None:
-        """允许下一回合再抢话一次，并清掉上一回合累计的连续说话时长。
-
-        累计值必须跟着闸门一起复位：否则某人上回合说了 3 秒，这回合 bot 一开口，
-        残留的 3 秒会立刻满足门限，等于门限形同虚设。
-        """
-        self._barge_in_armed = True
+        self._ensure_barge_gate().rearm()
         self._discard_live_audio = False
-        self._barge_in_speech_ms.clear()
 
     def _barge_in_reached(self, uid: str, pcm: bytes, sample_rate: int) -> bool:
-        """某人是否已经**连续说话**够久，久到该把发言权让给他。
-
-        只在 ``_speaking``（模型正在出声）时被调用 —— 累计的是「盖过 bot 说话的
-        时长」。不这么限定的话，房间里持续的背景聊天会在 bot 一开口时立刻满足
-        门限，那正是要避免的。
-
-        ``barge_in_hold_ms`` 为 0 时退化成旧行为（第一帧就打断），
-        留这个取值是为了出问题时能在 WebUI 里一键回到原状。
-        """
-        hold_ms = int(getattr(self.settings, "barge_in_hold_ms", 0) or 0)
-        if hold_ms <= 0:
-            return True
         rate = int(sample_rate or self.settings.sample_rate_in) or 16000
-        frame_ms = len(pcm) / 2 / rate * 1000.0
-        if EnergyVad._rms(pcm) >= _BARGE_IN_ENERGY:
-            self._barge_in_speech_ms[uid] = self._barge_in_speech_ms.get(uid, 0.0) + frame_ms
-        else:
-            # 说话一断就清零：门限衡量的是**连续**说多久，不是累计说了多少
-            self._barge_in_speech_ms[uid] = 0.0
-        return self._barge_in_speech_ms[uid] >= hold_ms
+        return self._ensure_barge_gate().observe(
+            SpeechActivity(uid, pcm16_rms(pcm) >= _BARGE_IN_ENERGY,
+                           len(pcm) / 2 / rate * 1000),
+            hold_ms=int(getattr(self.settings, "barge_in_hold_ms", 0) or 0),
+        )
 
     async def _interrupt_speaking(self) -> None:
         self._speaking = False
-        # 记下来：本回合是被抢话打断的，结束时不计冷却（见 _throttled_round）。
+        # 记下来：本回合是被抢话打断的，结束时不计冷却（见行为调度器）。
         self._barged_in = True
         stream_task = getattr(self, "_stream_reply_task", None)
         if stream_task is not None and not stream_task.done():
@@ -1338,9 +1368,26 @@ class VoiceAgent:
     def _cascade_limit_reached(self) -> bool:
         return not self.live_mode and self._ensure_attempt_budget().exhausted(self.settings.cascade_turn_limit)
 
+    async def _record_output(self, user_text: str, reply_text: str, uid: str,
+                             session: SessionRef | None, confirmation: Literal["completed", "silent", "interrupted", "failed", "unknown"]) -> None:
+        if session is None or self.channels.snapshot().session != session:
+            return
+        # 记录绑定产生它的会话；不把迟到输出归入新房间或新 AstrBot 来源。
+        key = uid if uid.startswith("oopz:") or uid == "api" else f"oopz:{uid}"
+        turn = ConfirmedTurn(user_text, reply_text if confirmation == "completed" else "",
+                             confirmation, user_key=key,
+                             channel_key=f"{session.room_target.area}/{session.room_target.channel}")
+        bridge = self._ensure_context_bridge()
+        bridge.record_turn(turn.user_text, turn.reply_text, speaker=uid,
+                           interrupted=confirmation in {"interrupted", "failed", "unknown"})
+        memory = getattr(self, "memory", None)
+        if memory is not None:
+            await asyncio.to_thread(memory.record, turn)
+
     async def _handle_utterance_reply(self, uid: str, pcm: bytes, sample_rate: int) -> None:
         session = self.channels.snapshot().session
-        self._ensure_context_bridge()
+        bridge = self._ensure_context_bridge()
+        source_session, epoch = bridge.session_id, self._operation_epoch
         if not pcm or getattr(self, "_announcement_active", False):
             return
         async with self._busy:
@@ -1368,23 +1415,31 @@ class VoiceAgent:
                 self.last_reply = f"[error] {exc}"
                 return
 
+            if (epoch != self._operation_epoch or self.channels.snapshot().session != session
+                    or bridge.session_id != source_session):
+                return
+
             # 级联这条链路以前**一句话都不记**（mimo_cascade 整份文件只有一条
             # debug），出问题只能靠 WebUI 的 last_user_text/last_reply 两个字段猜，
             # 看不到识别历史、也看不出 VAD 是不是把句子切碎了。音频时长放在这里
             # 就是为了这个：识别结果正常但时长只有 0.3 秒，那是 VAD 在切句，不是
             # 模型听不懂。
             logger.info(
-                "ASR 回合：用户=%r（%.1fs 音频）回复=%r",
-                reply.user_text or "",
+                "event=voice.asr.completed input_chars=%d audio_seconds=%.1f reply_chars=%d",
+                len(reply.user_text or ""),
                 len(pcm) / 2 / max(1, sample_rate),
-                reply.text or "",
+                len(reply.text or ""),
             )
+            if epoch != self._operation_epoch or self.context_bridge.session_id != source_session:
+                return
             self.last_user_text = reply.user_text or self.last_user_text
-            if reply.raw.get("voice_control") == "leave":
+            if reply.control is not None and reply.control.leave:
+                await self._record_output(reply.user_text, "", uid, session, "silent")
                 self.request_voice_leave()
                 return
-            if reply.raw.get("voice_control") == "volume":
-                result = await self.apply_voice_volume(reply.raw.get("volume_command"))
+            if reply.control is not None and reply.control.volume is not None:
+                await self._record_output(reply.user_text, "", uid, session, "silent")
+                result = await self._apply_volume_command(reply.control.volume)
                 if not self.output_muted:
                     await self.speak_text(result.get("message") or "语音输出调整失败，请查看控制台。")
                 return
@@ -1425,16 +1480,23 @@ class VoiceAgent:
                             push_failed = False
                         await asyncio.sleep(0.02)
                     if self._speaking:
-                        await self._push_room_pcm(session, b"", reply.sample_rate, finish=True)
+                        result = await self._push_room_pcm(session, b"", reply.sample_rate, finish=True)
+                        delivery_failed = delivery_failed or not result.get("ok")
+                        if not delivery_failed:
+                            drained = await self.duplex.wait_tts_complete(30)
+                            delivery_failed = not drained.get("ok")
                 finally:
                     self._speaking = False
-            self.context_bridge.record_turn(reply.user_text or "",
-                reply.text if reply.pcm16 and not delivery_failed else "",
-                speaker=uid, interrupted=interrupted)
+            confirmation = ("interrupted" if interrupted else "failed" if delivery_failed
+                            else "completed" if reply.pcm16 and self.duplex is not None
+                            and reply.text and not self.output_muted else "silent")
+            if epoch == self._operation_epoch and bridge.session_id == source_session:
+                await self._record_output(reply.user_text or "", reply.text, uid, session, confirmation)
 
     async def _handle_streamed_reply(self, uid: str, pcm: bytes, sample_rate: int) -> None:
         session = self.channels.snapshot().session
         backend, duplex, epoch = self.backend, self.duplex, self._operation_epoch
+        source_session = self._ensure_context_bridge().session_id
         assert isinstance(backend, StreamingUtterance)
         sent = False
         failed = False
@@ -1475,12 +1537,16 @@ class VoiceAgent:
             finally:
                 if self._stream_reply_task is stream_task:
                     self._stream_reply_task = None
+            if epoch != self._operation_epoch or self.context_bridge.session_id != source_session:
+                return
             self.last_user_text = reply.user_text or self.last_user_text
-            if reply.raw.get("voice_control") == "leave":
+            if reply.control is not None and reply.control.leave:
+                await self._record_output(reply.user_text, "", uid, session, "silent")
                 self.request_voice_leave()
                 return
-            if reply.raw.get("voice_control") == "volume":
-                result = await self.apply_voice_volume(reply.raw.get("volume_command"))
+            if reply.control is not None and reply.control.volume is not None:
+                await self._record_output(reply.user_text, "", uid, session, "silent")
+                result = await self._apply_volume_command(reply.control.volume)
                 if not self.output_muted:
                     await self.speak_text(result.get("message") or "语音输出调整失败")
                 return
@@ -1494,10 +1560,9 @@ class VoiceAgent:
                 result = await duplex.wait_tts_complete(30)
                 if not result.get("ok"):
                     raise RuntimeError("语音播放未正常完成")
-            self.context_bridge.record_turn(
-                reply.user_text, reply.text if sent else "", speaker=uid,
-                interrupted=self._barged_in,
-            )
+            confirmation = ("completed" if sent and reply.text and not self.output_muted else "silent")
+            if epoch == self._operation_epoch and self.context_bridge.session_id == source_session:
+                await self._record_output(reply.user_text, reply.text, uid, session, confirmation)
             logger.info("流式语音回合完成：已输出音频=%s", sent)
         except VoiceStreamInterrupted:
             failed = True
@@ -1552,12 +1617,6 @@ class VoiceAgent:
             speak = getattr(self.backend, "speak_text", None)
             if speak is not None:
                 await speak(text)
-                self.memory.append(
-                    "assistant",
-                    text,
-                    user_key="api",
-                    channel_key=f"{self._area}/{self._channel}",
-                )
                 self.last_reply = text
                 # 轮次不在这里计：模型出声后会推 turnComplete，由 on_turn_end 计一次。
                 # 这里也 +1 的话，一次 /voice/speak 会被记成两轮。
@@ -1565,29 +1624,35 @@ class VoiceAgent:
 
         if not hasattr(self.backend, "tts"):
             return {"ok": False, "error": "backend does not support tts"}
-        self.memory.append(
-            "assistant",
-            text,
-            user_key="api",
-            channel_key=f"{self._area}/{self._channel}",
-        )
+        duplex, epoch = self.duplex, self._operation_epoch
         pcm, rate = await self.backend.tts(text)  # type: ignore[attr-defined]
-        if self.duplex is not None and pcm:
-            self._speaking = True
-            try:
-                chunk = int(self.settings.sample_rate_out * 0.04) * 2
-                for i in range(0, len(pcm), chunk):
-                    if not self._speaking:
-                        break
-                    await self._push_room_pcm(session, pcm[i : i + chunk], rate, finish=False)
-                    await asyncio.sleep(0.02)
-                if self._speaking:
-                    await self._push_room_pcm(session, b"", rate, finish=True)
-            finally:
+        if not pcm or duplex is None or self.output_muted:
+            return {"ok": False, "error": "没有可播放的音频输出"}
+        self._speaking = True
+        try:
+            chunk = max(2, int(rate * 0.04) * 2)
+            for offset in range(0, len(pcm), chunk):
+                if (not self._speaking or epoch != self._operation_epoch
+                        or duplex is not self.duplex):
+                    return {"ok": False, "error": "语音输出已取消"}
+                pushed = await self._push_room_pcm(session, pcm[offset:offset + chunk], rate)
+                if not pushed.get("ok"):
+                    return {"ok": False, "error": "语音音频推送失败"}
+                await asyncio.sleep(0.02)
+            finished = await self._push_room_pcm(session, b"", rate, finish=True)
+            if not finished.get("ok"):
+                return {"ok": False, "error": "语音音频收尾失败"}
+            drained = await duplex.wait_tts_complete(30)
+            if (not drained.get("ok") or epoch != self._operation_epoch
+                    or duplex is not self.duplex):
+                return {"ok": False, "error": "语音播放未正常完成"}
+            await self._record_output("", text, "api", session, "completed")
+        finally:
+            if epoch == self._operation_epoch:
                 self._speaking = False
         self.last_reply = text
         self.turns += 1
-        return {"ok": True, "chars": len(text), "pcm_bytes": len(pcm or b""), "mode": "cascade"}
+        return {"ok": True, "chars": len(text), "pcm_bytes": len(pcm), "mode": "cascade"}
 
     async def refresh_astrbot_context(self) -> dict[str, Any]:
         self._ensure_operations()

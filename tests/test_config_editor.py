@@ -1,3 +1,4 @@
+
 """config.py 就地改写的纯逻辑测试：不启动服务，也不需要 config.py 真的存在。"""
 
 from __future__ import annotations
@@ -6,6 +7,7 @@ import ast
 
 import pytest
 
+from operations import patch_config_text, validate_config_text
 from webui import config_editor as editor
 
 SAMPLE = '''\
@@ -69,7 +71,7 @@ def test_normalize_rejects_empty_change_set():
 
 
 def test_patched_text_preserves_comments_and_untouched_keys():
-    patched = editor._patched_text(SAMPLE, {"oopz": {"proxy": "direct"}})
+    patched = patch_config_text(SAMPLE, {"oopz": {"proxy": "direct"}}, sources=editor.GROUP_SOURCES, filename=editor.CONFIG_PATH)
     assert "这是一条必须保留的注释" in patched
     assert '"ws_reverse_url": "ws://127.0.0.1:6200/ws"' in patched
     ast.parse(patched)
@@ -82,13 +84,13 @@ def test_patched_text_preserves_comments_and_untouched_keys():
 
 
 def test_patched_text_only_touches_target():
-    patched = editor._patched_text(SAMPLE, {"onebot": {"ws_reverse_url": "ws://x/ws"}})
+    patched = patch_config_text(SAMPLE, {"onebot": {"ws_reverse_url": "ws://x/ws"}}, sources=editor.GROUP_SOURCES, filename=editor.CONFIG_PATH)
     assert '"ws_reverse_url": "ws://x/ws"' in patched
     assert '"proxy": ""' in patched
 
 
 def test_patched_text_inserts_missing_field():
-    patched = editor._patched_text(SAMPLE, {"oopz": {"default_area": "A1"}})
+    patched = patch_config_text(SAMPLE, {"oopz": {"default_area": "A1"}}, sources=editor.GROUP_SOURCES, filename=editor.CONFIG_PATH)
     namespace: dict[str, object] = {}
     exec(compile(patched, "<patched>", "exec"), namespace)
     oopz = namespace["OOPZ_CONFIG"]
@@ -99,11 +101,11 @@ def test_patched_text_inserts_missing_field():
 
 def test_validate_text_rejects_broken_syntax():
     with pytest.raises(RuntimeError):
-        editor._validate_text("OOPZ_CONFIG = {")
+        validate_config_text("OOPZ_CONFIG = {")
 
 
 def test_validate_text_accepts_good_syntax():
-    editor._validate_text(SAMPLE)
+    validate_config_text(SAMPLE)
 
 
 def test_field_specs_are_well_formed():
@@ -159,7 +161,7 @@ VOICE_AGENT_CONFIG = {
 
 
 def test_patched_text_updates_nested_value():
-    patched = editor._patched_text(NESTED_SAMPLE, {"voice": {"gemini.voice": "Kore"}})
+    patched = patch_config_text(NESTED_SAMPLE, {"voice": {"gemini.voice": "Kore"}}, sources=editor.GROUP_SOURCES, filename=editor.CONFIG_PATH)
     namespace: dict[str, object] = {}
     exec(compile(patched, "<patched>", "exec"), namespace)
     voice = namespace["VOICE_AGENT_CONFIG"]
@@ -171,9 +173,9 @@ def test_patched_text_updates_nested_value():
 
 def test_patched_text_creates_missing_nested_dict():
     text = 'VOICE_AGENT_CONFIG = {\n    "backend": "gemini_live",\n}\n'
-    patched = editor._patched_text(
+    patched = patch_config_text(
         text, {"voice": {"gemini.voice": "Aoede", "gemini.model": "gemini-2.0-flash-live-001"}}
-    )
+    , sources=editor.GROUP_SOURCES, filename=editor.CONFIG_PATH)
     namespace: dict[str, object] = {}
     exec(compile(patched, "<patched>", "exec"), namespace)
     voice = namespace["VOICE_AGENT_CONFIG"]
@@ -184,9 +186,9 @@ def test_patched_text_creates_missing_nested_dict():
 
 
 def test_patched_text_nested_and_flat_mixed():
-    patched = editor._patched_text(
+    patched = patch_config_text(
         NESTED_SAMPLE, {"voice": {"proxy": "clash", "gemini.voice": "Fenrir"}}
-    )
+    , sources=editor.GROUP_SOURCES, filename=editor.CONFIG_PATH)
     namespace: dict[str, object] = {}
     exec(compile(patched, "<patched>", "exec"), namespace)
     voice = namespace["VOICE_AGENT_CONFIG"]
@@ -206,7 +208,7 @@ def test_patched_text_nested_preserves_comments():
         "    },\n"
         "}\n"
     )
-    patched = editor._patched_text(text, {"voice": {"gemini.voice": "Kore"}})
+    patched = patch_config_text(text, {"voice": {"gemini.voice": "Kore"}}, sources=editor.GROUP_SOURCES, filename=editor.CONFIG_PATH)
     assert "# 总开关注释" in patched
     assert "# 或 GEMINI_API_KEY" in patched
     namespace: dict[str, object] = {}
@@ -261,9 +263,9 @@ def test_model_vendor_fields_cover_url_key_model_voice():
     'OOPZ_CONFIG = {"备注": "测试", "proxy": ("direct")}\n',
 ])
 def test_missing_fields_preserve_valid_dictionary_syntax(source):
-    patched = editor._patched_text(source, {"oopz": {
+    patched = patch_config_text(source, {"oopz": {
         "default_area": "area", "default_channel": "channel",
-    }})
+    }}, sources=editor.GROUP_SOURCES, filename=editor.CONFIG_PATH)
     namespace = {}
     exec(compile(patched, "<patched>", "exec"), namespace)
     assert namespace["OOPZ_CONFIG"]["default_area"] == "area"
@@ -276,7 +278,7 @@ def test_missing_fields_preserve_valid_dictionary_syntax(source):
 
 def test_missing_nested_field_preserves_existing_expression():
     source = ('DEFAULT = "Puck"\nVOICE_AGENT_CONFIG = {"gemini": {"voice": DEFAULT}}\n')
-    patched = editor._patched_text(source, {"voice": {"gemini.model": "model"}})
+    patched = patch_config_text(source, {"voice": {"gemini.model": "model"}}, sources=editor.GROUP_SOURCES, filename=editor.CONFIG_PATH)
     namespace = {}
     exec(compile(patched, "<patched>", "exec"), namespace)
     assert namespace["VOICE_AGENT_CONFIG"]["gemini"] == {"voice": "Puck", "model": "model"}
@@ -292,7 +294,7 @@ def test_missing_nested_field_preserves_parenthesized_value_and_outer_fields():
         '    "proxy": "direct",\n'
         '}\n'
     )
-    patched = editor._patched_text(source, {"voice": {"gemini.model": "model"}})
+    patched = patch_config_text(source, {"voice": {"gemini.model": "model"}}, sources=editor.GROUP_SOURCES, filename=editor.CONFIG_PATH)
     namespace = {}
     exec(compile(patched, "<patched>", "exec"), namespace)
     assert namespace["VOICE_AGENT_CONFIG"] == {
@@ -305,9 +307,9 @@ def test_missing_nested_field_preserves_parenthesized_value_and_outer_fields():
 def test_missing_nested_dict_preserves_expressions_and_comments():
     source = ('DEFAULT = "personality"\nVOICE_AGENT_CONFIG = {\n'
               '    "persona": DEFAULT,  # keep persona\n}\n')
-    patched = editor._patched_text(source, {"voice": {
+    patched = patch_config_text(source, {"voice": {
         "gemini.voice": "Kore", "gemini.model": "model", "proxy": "direct",
-    }})
+    }}, sources=editor.GROUP_SOURCES, filename=editor.CONFIG_PATH)
     namespace = {}
     exec(compile(patched, "<patched>", "exec"), namespace)
     assert namespace["VOICE_AGENT_CONFIG"] == {
@@ -320,4 +322,4 @@ def test_missing_nested_dict_preserves_expressions_and_comments():
 def test_nested_expression_is_rejected_without_rewriting_unrelated_values():
     source = 'DEFAULT = {"voice": "Puck"}\nVOICE_AGENT_CONFIG = {"gemini": DEFAULT}\n'
     with pytest.raises(RuntimeError, match="gemini"):
-        editor._patched_text(source, {"voice": {"gemini.voice": "Kore"}})
+        patch_config_text(source, {"voice": {"gemini.voice": "Kore"}}, sources=editor.GROUP_SOURCES, filename=editor.CONFIG_PATH)

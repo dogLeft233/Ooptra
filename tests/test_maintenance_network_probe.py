@@ -5,8 +5,8 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from webui import maintenance_network as network
-from webui.maintenance import MaintenanceService, mount_maintenance_routes
+from tests.support.maintenance_harness import MaintenanceService, mount_maintenance_routes
+from tests.support.maintenance_harness import maintenance_network as network
 
 
 def test_probe_checks_actual_git_ref_without_fetch_or_saving(tmp_path):
@@ -84,7 +84,7 @@ def test_mirror_fetch_honors_the_proxy_used_by_probe(tmp_path):
 
 
 def test_probe_route_json_origin_and_does_not_modify_settings(tmp_path, monkeypatch):
-    from webui import maintenance
+    from tests.support.maintenance_harness import maintenance
     seen = []
 
     def probe(mirror, channel, run):

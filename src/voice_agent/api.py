@@ -16,7 +16,7 @@ import logging
 
 from aiohttp import web
 
-from voice_agent.settings import VoiceApiSettings
+from operations.models import VoiceApiSettings
 from webui.voice_routes import build_voice_routes
 
 logger = logging.getLogger(__name__)

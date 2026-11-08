@@ -271,7 +271,7 @@ def validate_config_text(text: str, *, filename: str = "config.py") -> None:
     """求值部署方可信的配置代码；不用于校验不可信上传脚本。"""
     namespace: dict[str, Any] = {}
     try:
-        # config.py 是纯字面量数据，且本函数就是它的写入方，求值等同于 import 该文件。
+        # 沿用可信部署配置的求值规则；此处不是不可信脚本的安全验证器。
         exec(compile(text, filename, "exec"), namespace)
     except Exception as exc:
         raise RuntimeError(f"新配置无法求值，已取消保存: {exc}") from exc

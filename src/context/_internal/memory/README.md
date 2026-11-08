@@ -1,6 +1,6 @@
 # 历史与可靠投递台账
 
-状态：目标内部子模块，尚无 Python 实现。入口见 [上下文管理](../../README.md)。把历史记录、幂等键和 outbox 收敛在一个提交边界，隐藏存储及恢复；来源选择和 HTTP 租约不在这里。
+状态：部分迁移。[jsonl.py](jsonl.py) 已拥有原 JSONL 历史，公开 `ConversationHistory.record(ConfirmedTurn)` 一次文件写入提交输入和确认输出；它没有跨调用幂等或与 AstrBot outbox 的共同事务。下文 SQLite 台账仍是目标设计。入口见 [上下文管理](../../README.md)。把历史记录、幂等键和 outbox 收敛在一个提交边界，隐藏存储及恢复；来源选择和 HTTP 租约不在这里。
 
 ## 类型与提交边界
 
@@ -40,6 +40,6 @@
 
 ## 证据、切片与验证
 
-当前 `MemoryStore.append/recent` 和 `ContextBridge.record_turn/_persist/resolve` 分开维护历史与投递；`_persist` 捕获 OSError 后仅记错误，尚不满足目标失败回执。现有测试入口：`tests/test_memory_recent.py`、`tests/test_astrbot_context_bridge.py`。先迁移 record/delivery 和恢复，再接新 prepare；明确迁移旧后端写入方后再删除旧接口。
+当前 JSONL 历史和 sources 的 outbox 仍分开维护。sources 已改为落盘失败抛出 OSError 并回滚内存入队，写请求先落盘再投递；完整历史/幂等键/投递共同事务尚待实现。现有测试入口：`tests/test_memory_recent.py`、`tests/test_astrbot_context_bridge.py`。先迁移 record/delivery 和恢复，再接新 prepare；明确迁移旧后端写入方后再删除旧接口。
 
 目标公开行为测试：提交故障不成功、重试同键不重复、同键异载荷冲突、部分播放不写全文、切来源后原队列目标不变、逐目标重试、坏旧文件不静默丢失、重启恢复。变化场景：替换事务存储只改本子模块及导入适配，不改行为/生成；这是设计分析，当前未验证新数据库实现。

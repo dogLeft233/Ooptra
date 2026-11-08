@@ -68,7 +68,7 @@ def test_mimo_followups_bypass_zero_probability_until_room_changes(tmp_path, mon
 
 
 def test_live_window_requires_unambiguous_input_speaker(tmp_path):
-    from voice_agent.backends.gemini_live import GeminiLiveBackend
+    from support.dialogue_fixtures import gemini_backend as GeminiLiveBackend
 
     async def run():
         agent = make_agent(tmp_path)
@@ -96,7 +96,7 @@ def test_live_window_requires_unambiguous_input_speaker(tmp_path):
 
 
 def test_live_reconnect_retries_are_bounded_and_close_stops_them(tmp_path, monkeypatch):
-    from voice_agent.backends.gemini_live import GeminiLiveBackend
+    from support.dialogue_fixtures import gemini_backend as GeminiLiveBackend
 
     async def run():
         agent = make_agent(tmp_path)
@@ -120,7 +120,7 @@ def test_live_reconnect_retries_are_bounded_and_close_stops_them(tmp_path, monke
 
 
 def test_live_mixed_speaker_late_keyword_never_opens_member_window(tmp_path):
-    from voice_agent.backends.gemini_live import GeminiLiveBackend
+    from support.dialogue_fixtures import gemini_backend as GeminiLiveBackend
 
     async def run():
         agent = make_agent(tmp_path)
@@ -138,7 +138,7 @@ def test_live_mixed_speaker_late_keyword_never_opens_member_window(tmp_path):
 
 
 def test_live_failed_connection_audio_does_not_restart_for_every_frame(tmp_path, monkeypatch):
-    from voice_agent.backends.gemini_live import GeminiLiveBackend
+    from support.dialogue_fixtures import gemini_backend as GeminiLiveBackend
 
     async def run():
         agent = make_agent(tmp_path)

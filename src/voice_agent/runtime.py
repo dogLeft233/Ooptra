@@ -8,16 +8,15 @@ from pathlib import Path
 from typing import Any
 
 import config as runtime_config
+from behavior import create_auto_visits as AutoVisitController
+from behavior import create_visit_store as AutoVisitStateStore
+from behavior import parse_auto_visit_config
 from core.paths import project_path
-from operations import create_configuration
+from operations import apply_settings, create_configuration, load_voice_agent_settings
 from operations.api import Configuration
 from operations.models import OutputVolume
 from voice_agent.agent import VoiceAgent
 from voice_agent.api import VoiceApiServer
-from voice_agent.auto_visit import AutoVisitController
-from voice_agent.auto_visit_settings import parse_auto_visit_config
-from voice_agent.auto_visit_state import AutoVisitStateStore
-from voice_agent.settings import apply_settings, load_voice_agent_settings
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +35,8 @@ class VoiceRuntime:
         self.api = VoiceApiServer(self, self.api_settings)
         self.auto_visit = AutoVisitController(
             self.agent, parse_auto_visit_config(getattr(runtime_config, "VOICE_AUTO_VISIT_CONFIG", None)),
-            AutoVisitStateStore(state_path or project_path("data", "voice_auto_visit.json")))
+            AutoVisitStateStore(state_path or project_path("data", "voice_auto_visit.json")),
+            enabled=lambda: self.agent_settings.enabled)
         self.agent.set_operation_callback(self.auto_visit.on_operation)
         self._bound_bot: Any = None
         self._started = False

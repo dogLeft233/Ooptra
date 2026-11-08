@@ -7,9 +7,9 @@ import pytest
 from support.channel_fixtures import establish_room
 from test_voice_session_regressions import make_agent
 
+from channels import create_duplex as VoiceDuplex
+from dialogue import open_live_ws
 from oopz_sdk.services.voice import Voice
-from voice_agent.duplex import VoiceDuplex
-from voice_agent.ws_transport import open_live_ws
 
 
 def test_remote_pcm_wakes_owner_loop_from_real_thread():

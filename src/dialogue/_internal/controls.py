@@ -1,7 +1,5 @@
 """Instructions shared by cascade intent detection and Live function calling."""
 
-from dataclasses import dataclass
-from typing import Literal, cast
 
 VOICE_CONTROL_MIN_MS = 250
 
@@ -39,79 +37,6 @@ CONTROL_DECISION_FORMAT = (
     '无指令输出{"leave": false, "volume": null}；退房输出{"leave": true, "volume": null}。'
     "leave和volume不得同时请求；同时出现不同控制要求或不确定时均不执行。"
 )
-
-
-VolumeAction = Literal["increase", "decrease", "set", "mute", "restore"]
-
-
-def _parse_volume_action(raw: object) -> VolumeAction:
-    if not isinstance(raw, str):
-        raise ValueError("Invalid voice volume action")
-    match raw:
-        case "increase" | "decrease" | "set" | "mute" | "restore":
-            return raw
-        case _:
-            raise ValueError("Invalid voice volume action")
-
-
-def _command_fields(raw: object) -> dict[object, object]:
-    if not isinstance(raw, dict):
-        raise ValueError("Voice control input must be an object")
-    # isinstance 已证明是字典；键和值仍是不可信 object，随后逐字段解析。
-    return cast("dict[object, object]", raw)
-
-
-@dataclass(frozen=True)
-class VolumeCommand:
-    action: VolumeAction
-    value: int | None = None
-
-    def __post_init__(self) -> None:
-        action = _parse_volume_action(self.action)
-        if action == "set":
-            if type(self.value) is not int or not 10 <= self.value <= 100:
-                raise ValueError("Volume must be an integer between 10 and 100")
-        elif self.value is not None:
-            raise ValueError("Only set accepts a volume value")
-
-
-@dataclass(frozen=True)
-class VoiceControlDecision:
-    leave: bool = False
-    volume: VolumeCommand | None = None
-
-    def __post_init__(self) -> None:
-        if type(self.leave) is not bool:
-            raise ValueError("Leave must be a boolean")
-        if self.volume is not None and type(self.volume) is not VolumeCommand:
-            raise ValueError("Volume must be a parsed command")
-        if self.leave and self.volume is not None:
-            raise ValueError("Ambiguous voice control decision")
-
-
-def parse_volume_command(raw: object) -> VolumeCommand | None:
-    """保留解析结果；外部值既不强制转换，也不裁剪到合法范围。"""
-    if raw is None:
-        return None
-    fields = _command_fields(raw)
-    action = _parse_volume_action(fields.get("action"))
-    if action == "set":
-        value = fields.get("value")
-        if set(fields) != {"action", "value"} or type(value) is not int:
-            raise ValueError("Volume must be an integer between 10 and 100")
-        return VolumeCommand(action, value)
-    if set(fields) != {"action"}:
-        raise ValueError("Invalid voice volume action or unexpected value")
-    return VolumeCommand(action)
-
-
-def parse_control_decision(raw: object) -> VoiceControlDecision:
-    fields = _command_fields(raw)
-    leave = fields.get("leave")
-    if type(leave) is not bool or not set(fields) <= {"leave", "volume"}:
-        raise ValueError("Invalid voice control decision")
-    volume = parse_volume_command(fields.get("volume"))
-    return VoiceControlDecision(leave=leave, volume=volume)
 
 
 def live_leave_tool() -> dict[str, object]:

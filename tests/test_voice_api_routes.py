@@ -21,8 +21,8 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from operations.models import VoiceApiSettings
 from voice_agent.api import VoiceApiServer
-from voice_agent.settings import VoiceApiSettings
 from webui.voice_routes import build_voice_routes, mount_voice_routes
 
 # ----------------------------------------------------------------------
@@ -334,7 +334,7 @@ def test_route_handlers_follow_runtime_agent_swap() -> None:
 
 def test_persona_save_persists_before_applying_and_survives_settings_reload(monkeypatch, tmp_path):
     import config
-    from voice_agent.settings import load_voice_agent_settings
+    from operations import load_voice_agent_settings
     from webui import config_editor
     path = tmp_path / "config.py"
     path.write_text('VOICE_AGENT_CONFIG = {"persona": "original"}\n', encoding="utf-8")

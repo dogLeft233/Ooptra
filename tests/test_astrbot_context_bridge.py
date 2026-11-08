@@ -3,22 +3,24 @@ from __future__ import annotations
 import asyncio
 import json
 
-from voice_agent.context_bridge import ContextBridge
+from context import create_context_bridge as ContextBridge
+from tests.support.context_fixtures import prepare_source
 
 
 def test_persona_only_sources_do_not_queue_memory_writes():
-    bridge = ContextBridge()
-    bridge.context = {"ok": True, "umo": "Bot:GroupMessage:123", "memory_scopes": [], "provider": ""}
-    bridge.record_turn("hello", "hi", speaker="user")
-    assert not bridge.outbox
+    async def run():
+        bridge = ContextBridge()
+        await prepare_source(bridge, {"ok": True, "umo": "Bot:GroupMessage:123", "memory_scopes": [], "provider": ""})
+        bridge.record_turn("hello", "hi", speaker="user")
+        assert bridge.status()["pending_writes"] == 0
+    asyncio.run(run())
 
 
 def test_partial_explicit_remember_retries_durably_with_same_request_id(tmp_path):
     async def run():
         path = tmp_path / "outbox.json"
         bridge = ContextBridge(outbox_path=path)
-        bridge.context = {"ok": True, "provider": "memory_companion"}
-        await bridge.poll(wait=0)
+        await prepare_source(bridge, {"ok": True, "provider": "memory_companion"})
         task = asyncio.create_task(bridge.tool("astrbot_remember", {"content": "shared fact"}))
         await asyncio.sleep(0)
         event = (await bridge.poll(wait=0))[0]
@@ -30,27 +32,31 @@ def test_partial_explicit_remember_retries_durably_with_same_request_id(tmp_path
         assert retry["request_id"] == event["request_id"]
         assert retry["operation"] == "remember"
         restored.resolve(retry["request_id"], {"ok": True, "state": "stored"})
-        assert not restored.outbox
+        assert restored.status()["pending_writes"] == 0
     asyncio.run(run())
 
 
 def test_pending_remember_reserves_retry_capacity_before_any_target_is_written():
     async def run():
         bridge = ContextBridge()
-        bridge.context = {"ok": True, "provider": "memory_companion"}
-        await bridge.poll(wait=0)
-        bridge.outbox = {str(n): {} for n in range(127)}
+        await prepare_source(bridge, {"ok": True, "provider": "memory_companion"})
+        for n in range(127):
+            bridge.record_turn(f"turn {n}", "reply", speaker="user")
         first = asyncio.create_task(bridge.tool("astrbot_remember", {"content": "first"}))
         await asyncio.sleep(0)
         rejected = await bridge.tool("astrbot_remember", {"content": "second"})
         assert rejected["ok"] is False
-        assert len(bridge.pending) == 1
+        assert bridge.status()["pending_requests"] == 1
         bridge.record_turn("ordinary turn", "reply", speaker="user")
-        assert len(bridge.outbox) == 127
-        request_id = next(iter(bridge.pending))
-        bridge.resolve(request_id, {"ok": False, "retry": True})
+        assert bridge.status()["pending_writes"] == 128
+        # Drain the first 127 leased commits to reach the explicit write.
+        events = []
+        for _ in range(16):
+            events.extend(await bridge.poll(wait=0))
+        explicit = next(event for event in events if event["operation"] == "remember")
+        bridge.resolve(explicit["request_id"], {"ok": False, "retry": True})
         assert (await first)["queued"] is True
-        assert len(bridge.outbox) == 128
+        assert bridge.status()["pending_writes"] == 128
     asyncio.run(run())
 
 
@@ -58,12 +64,12 @@ def test_outbox_preserves_all_selected_memory_scopes_and_partial_retry(tmp_path)
     async def run():
         bridge = ContextBridge(outbox_path=tmp_path / "outbox.json")
         scopes = [{"umo": "Bot:GroupMessage:123"}, {"umo": "Bot:FriendMessage:456"}]
-        bridge.context = {"ok": True, "umo": scopes[0]["umo"], "memory_scopes": scopes,
-                          "memory_route_id": "original-rule", "provider": "memory_companion"}
+        await prepare_source(bridge, {"ok": True, "umo": scopes[0]["umo"], "memory_scopes": scopes,
+                          "memory_route_id": "original-rule", "provider": "memory_companion"})
         bridge.record_turn("shared fact", "okay", speaker="user")
         event = (await bridge.poll(wait=0))[0]
         assert event["scope"]["memory_scopes"] == scopes
-        bridge.context = {"ok": True, "umo": "Other:GroupMessage:999"}
+        bridge.clear()
         assert bridge.resolve(event["request_id"], {"ok": False, "retry": True,
             "targets": [{"umo": scopes[0]["umo"], "ok": True}, {"umo": scopes[1]["umo"], "ok": False}]})
         restored = ContextBridge(outbox_path=tmp_path / "outbox.json")
@@ -101,8 +107,7 @@ def test_outbox_survives_restart_and_acknowledges_only_matching_request(tmp_path
     async def run():
         path = tmp_path / "outbox.json"
         bridge = ContextBridge(outbox_path=path)
-        bridge.context = {"ok": True, "group_id": "123", "umo": "qq:GroupMessage:123"}
-        bridge.room = {"area": "a", "channel": "c"}
+        await prepare_source(bridge, {"ok": True, "group_id": "123", "umo": "qq:GroupMessage:123"})
         bridge.record_turn("hello", "hi", speaker="oopz-user", interrupted=False)
         restored = ContextBridge(outbox_path=path)
         event = (await restored.poll(wait=0))[0]
@@ -118,7 +123,6 @@ def test_outbox_survives_restart_and_acknowledges_only_matching_request(tmp_path
 def test_offline_scope_never_uses_last_rooms_persona():
     async def run():
         bridge = ContextBridge(timeout=0.01)
-        bridge.context = {"ok": True, "persona": "old"}
         await bridge.prepare("other", "room")
         assert bridge.persona == ""
         assert not bridge.active
@@ -127,12 +131,14 @@ def test_offline_scope_never_uses_last_rooms_persona():
 
 
 def test_interrupted_reply_is_not_written_as_complete_assistant_turn():
-    bridge = ContextBridge()
-    bridge.context = {"ok": True, "umo": "qq:GroupMessage:123"}
-    bridge.record_turn("question", "unfinished", speaker="", interrupted=True)
-    event = next(iter(bridge.outbox.values()))
-    assert event["payload"]["reply_text"] == ""
-    assert event["payload"]["interrupted"] is True
+    async def run():
+        bridge = ContextBridge()
+        await prepare_source(bridge, {"ok": True, "umo": "qq:GroupMessage:123"})
+        bridge.record_turn("question", "unfinished", speaker="", interrupted=True)
+        event = (await bridge.poll(wait=0))[0]
+        assert event["payload"]["reply_text"] == ""
+        assert event["payload"]["interrupted"] is True
+    asyncio.run(run())
 
 
 def test_binding_management_survives_voice_room_switch():
@@ -142,7 +148,6 @@ def test_binding_management_survives_voice_room_switch():
         task = asyncio.create_task(bridge.request("bindings", {"action": "save"}))
         await asyncio.sleep(0)
         event = (await bridge.poll(wait=0))[0]
-        bridge._leased[event["request_id"]] -= 9
         assert await bridge.poll(wait=0) == [], "slow configuration writes must not be delivered twice"
         bridge.clear()
         assert bridge.resolve(event["request_id"], {"ok": True, "bindings": []})

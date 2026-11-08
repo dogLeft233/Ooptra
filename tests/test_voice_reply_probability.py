@@ -10,7 +10,7 @@ from test_gemini_session_lifecycle import FakeLiveWs
 from test_round_throttle import _offer, _take
 from test_voice_session_regressions import make_agent
 
-from voice_agent.settings import load_voice_agent_settings
+from operations import load_voice_agent_settings
 from webui import config_editor
 
 
@@ -63,7 +63,7 @@ def test_cascade_decides_before_asr(percent, draws, expected, monkeypatch, tmp_p
         monkeypatch.setattr(agent.backend, "asr", asr)
         for pcm in (b"first", b"second"):
             _offer(agent, pcm)
-            await agent._throttled_round(_take(agent))
+            await agent._run_selected_reply(await _take(agent))
         assert seen == expected
         await agent.backend.aclose()
 
@@ -72,12 +72,16 @@ def test_cascade_decides_before_asr(percent, draws, expected, monkeypatch, tmp_p
 
 @pytest.mark.parametrize("retry", [False, True])
 def test_cancelled_explicit_send_does_not_force_the_next_automatic_reply(tmp_path, monkeypatch, retry):
-    from voice_agent import ws_transport
+    from dialogue import create_gemini_backend
+    from voice_agent import agent as agent_module
 
     async def open_ws(*args, **kwargs):
         return FakeLiveWs()
 
-    monkeypatch.setattr(ws_transport, "open_live_ws", open_ws)
+    def create_backend(settings, memory, *, reply_policy):
+        return create_gemini_backend(settings, memory, reply_policy=reply_policy, connector=open_ws)
+
+    monkeypatch.setattr(agent_module, "create_backend", create_backend)
 
     async def run():
         agent = make_agent(tmp_path)
@@ -175,7 +179,8 @@ def test_live_uses_one_probability_draw_per_turn_and_hot_changes_apply_next_turn
 @pytest.mark.parametrize("operation", ["manual", "announcement"])
 @pytest.mark.parametrize("retry", [False, True])
 def test_live_explicit_speech_bypasses_zero_probability(tmp_path, monkeypatch, operation, retry):
-    from voice_agent import ws_transport
+    from dialogue import create_gemini_backend
+    from voice_agent import agent as agent_module
 
     sockets = []
 
@@ -184,7 +189,10 @@ def test_live_explicit_speech_bypasses_zero_probability(tmp_path, monkeypatch, o
         sockets.append(ws)
         return ws
 
-    monkeypatch.setattr(ws_transport, "open_live_ws", open_ws)
+    def create_backend(settings, memory, *, reply_policy):
+        return create_gemini_backend(settings, memory, reply_policy=reply_policy, connector=open_ws)
+
+    monkeypatch.setattr(agent_module, "create_backend", create_backend)
 
     async def run():
         agent = make_agent(tmp_path)

@@ -18,16 +18,15 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from support.dialogue_fixtures import gemini_backend as GeminiLiveBackend
 
-from voice_agent.backends import gemini_live as gemini_module
-from voice_agent.backends.gemini_live import (
-    DEFAULT_LIVE_WS,
-    GeminiLiveBackend,
+from dialogue import (
     build_live_url,
     live_url_has_key,
 )
-from voice_agent.settings import VoiceAgentSettings
+from operations.models import VoiceAgentSettings
 
+DEFAULT_LIVE_WS = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 ENDPOINT = DEFAULT_LIVE_WS
 WITH_KEY = f"{ENDPOINT}?key=old-key"
 
@@ -140,9 +139,9 @@ def _capture_open(monkeypatch: pytest.MonkeyPatch, urls: list[str]) -> None:
         urls.append(url)
         raise Stop("captured")
 
-    import voice_agent.ws_transport as transport
+    from support import dialogue_fixtures as transport
 
-    monkeypatch.setattr(transport, "open_live_ws", fake_open)
+    monkeypatch.setattr(transport, "live_connector", fake_open)
 
 
 def test_start_session_sends_single_key_when_base_url_has_one(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -187,4 +186,4 @@ def test_start_session_without_any_key_raises_before_connecting(
 
 def test_default_endpoint_constant_is_the_one_settings_ships() -> None:
     """两处默认值不能漂移：settings 的默认 base_url 必须就是本模块的端点常量。"""
-    assert VoiceAgentSettings().gemini_base_url == gemini_module.DEFAULT_LIVE_WS
+    assert VoiceAgentSettings().gemini_base_url == build_live_url("", "")

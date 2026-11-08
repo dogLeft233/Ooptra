@@ -18,10 +18,11 @@ class VoiceDuplex:
 
     def __init__(self, transport: Any) -> None:
         self._transport = transport
-        self._pcm_queue: asyncio.Queue[tuple[str, bytes, int]] = asyncio.Queue(maxsize=200)
+        self._pcm_queue: asyncio.Queue[tuple[int, str, bytes, int]] = asyncio.Queue(maxsize=200)
         self._handler: RemotePcmHandler | None = None
         self._pump_task: asyncio.Task | None = None
         self._owner_loop: asyncio.AbstractEventLoop | None = None
+        self._capture_epoch = 0
         self.output_volume: int = 50
         self.output_muted: bool = False
 
@@ -37,29 +38,44 @@ class VoiceDuplex:
         if loop is None or loop.is_closed():
             return
         try:
-            loop.call_soon_threadsafe(self._enqueue_on_owner, loop, uid, pcm, sample_rate)
+            loop.call_soon_threadsafe(self._enqueue_on_owner, loop, self._capture_epoch, uid, pcm, sample_rate)
         except RuntimeError:
             logger.debug("remote pcm owner loop closed, drop chunk")
 
     def _enqueue_on_owner(
-        self, loop: asyncio.AbstractEventLoop, uid: str, pcm: bytes, sample_rate: int,
+        self, loop: asyncio.AbstractEventLoop, epoch: int, uid: str, pcm: bytes, sample_rate: int,
     ) -> None:
-        if self._owner_loop is not loop:
+        if self._owner_loop is not loop or self._capture_epoch != epoch:
             return
         try:
-            self._pcm_queue.put_nowait((uid, pcm, sample_rate))
+            self._pcm_queue.put_nowait((epoch, uid, pcm, sample_rate))
         except asyncio.QueueFull:
             logger.debug("remote pcm queue full, drop chunk")
 
     async def start(self) -> None:
+        if self._pump_task is not None and not self._pump_task.done():
+            return
         await self._transport.start()
         self._owner_loop = asyncio.get_running_loop()
-        self._transport.set_remote_pcm_callback(self.enqueue_remote_pcm)
+        self._capture_epoch += 1
+        epoch = self._capture_epoch
+
+        def captured(uid: str, pcm: bytes, sample_rate: int) -> None:
+            loop = self._owner_loop
+            if loop is None or loop.is_closed():
+                return
+            try:
+                loop.call_soon_threadsafe(self._enqueue_on_owner, loop, epoch, uid, pcm, sample_rate)
+            except RuntimeError:
+                logger.debug("remote pcm owner loop closed, drop chunk")
+
+        self._transport.set_remote_pcm_callback(captured)
         if self._pump_task is None or self._pump_task.done():
             self._pump_task = asyncio.create_task(self._pump(), name="voice-duplex-pump")
 
     async def close(self) -> None:
         self._owner_loop = None
+        self._capture_epoch += 1
         self._transport.set_remote_pcm_callback(None)
         task = self._pump_task
         self._pump_task = None
@@ -67,11 +83,15 @@ class VoiceDuplex:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        while not self._pcm_queue.empty():
+            self._pcm_queue.get_nowait()
         await self._transport.close()
 
     async def _pump(self) -> None:
         while True:
-            uid, pcm, rate = await self._pcm_queue.get()
+            epoch, uid, pcm, rate = await self._pcm_queue.get()
+            if epoch != self._capture_epoch:
+                continue
             handler = self._handler
             if handler is None:
                 continue

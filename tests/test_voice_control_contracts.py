@@ -4,7 +4,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from voice_agent.voice_control import (
+from behavior.models import (
     VoiceControlDecision,
     VolumeCommand,
     parse_control_decision,

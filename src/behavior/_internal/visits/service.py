@@ -8,13 +8,15 @@ import logging
 import random
 import time
 import uuid
+from collections.abc import Callable
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from channels.api import TransportFailure
+from behavior._internal.visits.settings import effective_area
+from behavior.api import VisitsHost, VisitStore
+from behavior.models import AutoVisitConfig
 from channels.models import PlatformMember
-from voice_agent.auto_visit_settings import AutoVisitConfig, effective_area
-from voice_agent.auto_visit_state import AutoVisitStateStore
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +31,11 @@ class _Clock:
 
 
 class AutoVisitController:
-    def __init__(self, agent: Any, config: AutoVisitConfig, store: AutoVisitStateStore,
-                 *, clock: Any = None, rng: Any = None) -> None:
-        self.agent, self.config, self.store = agent, config, store
+    def __init__(self, agent: VisitsHost, config: AutoVisitConfig, store: VisitStore,
+                 *, enabled: Callable[[], bool], clock: Any = None, rng: Any = None) -> None:
+        self.agent, self.store = agent, store
+        self._config = deepcopy(config)
+        self.enabled = enabled
         self.clock, self.rng = clock or _Clock(), rng or random.Random()
         self._ready = False
         self._paused = False
@@ -59,6 +63,11 @@ class AutoVisitController:
         self._visit_channel = ""
         self._visit_policy: dict[str, Any] = {}
         self._cooldown_deadlines: dict[str, tuple[str, float]] = {}
+
+    @property
+    def config(self) -> AutoVisitConfig:
+        """兼容管理面配置快照；修改只能通过 reload。"""
+        return deepcopy(self._config)
 
     def _cooldown_deadline(self, key: str, value: str | None) -> float | None:
         if value is None:
@@ -231,7 +240,7 @@ class AutoVisitController:
         if config != self.config:
             self._epoch += 1
         changed_interval = config.check_interval_minutes != self.config.check_interval_minutes
-        self.config = config
+        self._config = deepcopy(config)
         if changed_interval or self._next_check is None:
             self._schedule_check()
         self._wake.set()
@@ -288,7 +297,7 @@ class AutoVisitController:
     def _blocked(self, snapshot: dict[str, Any]) -> str:
         if self._paused or self._state_error:
             return self._pause_reason or "自动串门记录不可用"
-        if not self.agent.settings.enabled:
+        if not self.enabled():
             return "语音对话未启用"
         if not self._ready:
             return "等待 Oopz 连接就绪"
@@ -338,7 +347,7 @@ class AutoVisitController:
     async def _query_rooms(self, area: str, *, humans_only: bool = True) -> dict[str, list[PlatformMember]]:
         observed = await self.agent.directory.voice_members(area)
         if observed.status != "confirmed":
-            raise TransportFailure(f"成员查询未确认：{observed.status}")
+            raise RuntimeError(f"成员查询未确认：{observed.status}")
         return {
             room.target.channel: [member for member in room.members
                                   if not humans_only or (member.uid and not member.is_self
@@ -359,7 +368,7 @@ class AutoVisitController:
                 if directory is not self.agent.directory or epoch != self._epoch:
                     return
                 if joined.status != "confirmed":
-                    raise TransportFailure(f"域查询未确认：{joined.status}")
+                    raise RuntimeError(f"域查询未确认：{joined.status}")
                 joined_ids = set(joined.area_ids)
                 eligible = [area for area in sorted(self.config.areas)
                             if area in joined_ids and effective_area(self.config, area)["enabled"]
@@ -398,7 +407,7 @@ class AutoVisitController:
                 await self._write("reserve", visit_id, area, self.clock.utcnow())
                 if (directory is not self.agent.directory or epoch != self._epoch
                         or self._paused or not self._ready
-                        or not self.agent.settings.enabled
+                        or not self.enabled()
                         or not effective_area(self.config, area)["enabled"]
                         or self.agent.status().get("joined")):
                     await self._write("rollback", visit_id)
@@ -414,8 +423,20 @@ class AutoVisitController:
                     # Preserve uncertain admissions; never silently erase possible success.
                     raise
                 except Exception:
-                    await self._write("rollback", visit_id)
-                    self._visit_id = ""
+                    # A transport timeout may leave Oopz admission unresolved.
+                    # Only explicit idle with no retired transport is proof that
+                    # releasing this durable quota reservation is safe.
+                    try:
+                        room = self.agent.status()
+                    except Exception:
+                        room = {}
+                    if room.get("room_state") == "idle" and room.get("room_cleanup_pending") is False:
+                        await self._write("rollback", visit_id)
+                        self._visit_id = ""
+                    else:
+                        self._paused = True
+                        self._pause_reason = "进房结果未确认，已保留访问预留；请先核对渠道状态"
+                        self._next_check = None
                     raise
                 # A joined room needs a retirement owner even when persisting confirmation fails.
                 if self.agent.is_auto_visit_current(visit_id):

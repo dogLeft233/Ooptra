@@ -6,7 +6,7 @@ import pytest
 
 
 def test_backup_consistent_sqlite_restore_and_excludes_maintenance(tmp_path):
-    from webui.maintenance_storage import BackupStore
+    from operations import create_backup_store as BackupStore
 
     (tmp_path / "data/maintenance").mkdir(parents=True)
     (tmp_path / "data/maintenance/private-job.json").write_text("secret")
@@ -29,7 +29,7 @@ def test_backup_consistent_sqlite_restore_and_excludes_maintenance(tmp_path):
 
 @pytest.mark.parametrize("name", ["../escape", "data/../../escape", "data/maintenance/job.json", "src/main.py"])
 def test_restore_rejects_paths_outside_backup_scope(tmp_path, name):
-    from webui.maintenance_storage import BackupStore
+    from operations import create_backup_store as BackupStore
 
     store = BackupStore(tmp_path)
     bad_id = "a" * 32
@@ -42,7 +42,7 @@ def test_restore_rejects_paths_outside_backup_scope(tmp_path, name):
 
 
 def test_restore_rejects_changed_content_before_overwriting_config(tmp_path):
-    from webui.maintenance_storage import BackupStore
+    from operations import create_backup_store as BackupStore
 
     (tmp_path / "config.py").write_text("VALUE = 1")
     store = BackupStore(tmp_path)

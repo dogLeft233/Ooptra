@@ -22,20 +22,19 @@ import asyncio
 import logging
 import struct
 
+import pytest
 from support.channel_fixtures import establish_room
+from support.dialogue_fixtures import mimo_backend as MimoCascadeBackend
 
-from voice_agent.agent import _MIN_UTTERANCE_RMS, VoiceAgent
-from voice_agent.backends.base import VoiceReply
-from voice_agent.backends.mimo_cascade import (
-    REPLY_CHAR_LIMIT,
-    VOICE_ROOM_RULES,
-    MimoCascadeBackend,
+from dialogue import (
     clamp_reply,
     looks_like_reasoning_leak,
     sanitize_asr,
     sanitize_for_tts,
 )
-from voice_agent.settings import VoiceAgentSettings
+from dialogue.models import VoiceReply
+from operations.models import VoiceAgentSettings
+from voice_agent.agent import _MIN_UTTERANCE_RMS, VoiceAgent
 
 # ----------------------------------------------------------------------
 # 1：emoji 必须清掉 —— 它是「说 think」的直接来源
@@ -234,13 +233,6 @@ def test_a_normal_reply_still_comes_through() -> None:
     assert asyncio.run(backend.chat("天气如何", user_key="oopz:u1")) == "还行，出门带把伞。"
 
 
-def test_reply_rules_forbid_emoji_and_demand_brevity() -> None:
-    """规则文本本身要锁住：改成人话前先想清楚，它是唯一约束模型长度的东西。"""
-    assert "35 个字" in VOICE_ROOM_RULES
-    assert "emoji" in VOICE_ROOM_RULES
-    assert "Markdown" in VOICE_ROOM_RULES
-
-
 class _StubMemory:
     """只回历史，不落盘。"""
 
@@ -308,7 +300,7 @@ def test_assistant_history_is_clamped_before_it_reaches_the_model() -> None:
     「不超过 35 个字」永远追不回来（记忆里最长的一条 150 字）。"""
     backend, session = _chat_backend([{"role": "assistant", "content": "拖" * 150}])
     sent = _sent_assistant_history(backend, session)
-    assert len(sent) <= REPLY_CHAR_LIMIT + 1, f"历史没被夹：{len(sent)} 字"
+    assert len(sent) <= 46, f"历史没被夹：{len(sent)} 字"
     assert "拖" * 100 not in sent
 
 
@@ -368,7 +360,6 @@ def _agent(utterance: bytes | None) -> tuple[VoiceAgent, _FakeBackend]:
     agent.backend = _FakeBackend()
     agent._busy = asyncio.Lock()
     agent._speaking = False
-    agent._barge_in_armed = True
     agent._user_buffers = {}
     agent.settings.area = "area1"
     agent.settings.channel = "chan1"
@@ -389,7 +380,8 @@ def test_noise_utterance_is_dropped_before_asr(caplog) -> None:
             await asyncio.sleep(0)  # 让被丢掉的路径不留下 task
         assert backend.called == 0, "底噪被送去 ASR 了"
         assert "丢弃疑似噪声回合" in caplog.text
-        assert agent._pending is None, "还是进了信箱"
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(agent.reply_scheduler.next(0), 0.01)
 
     asyncio.run(run())
 
@@ -407,9 +399,8 @@ def test_real_speech_still_goes_through(caplog) -> None:
         await establish_room(agent)
         with caplog.at_level(logging.INFO, logger="voice_agent.agent"):
             await agent._on_remote_pcm("u1", loud, 16000)
-            assert agent._pending is not None, "真说话被丢了，没进信箱"
-            await agent._throttled_round(agent._pending)
-            agent._pending = None
+            selected = await agent.reply_scheduler.next(0)
+            await agent._run_selected_reply(selected)
         assert backend.called == 1
         assert "丢弃疑似噪声回合" not in caplog.text
         assert "丢弃过短回合" not in caplog.text

@@ -48,7 +48,7 @@ def test_sample_probe_is_independent_and_reports_individual_stages(tmp_path, mon
                 return b"\x00\x20" * 240, 24000
             async def aclose(self):
                 calls.append("closed")
-        def factory(settings, memory):
+        def factory(settings, memory, **kwargs):
             assert settings is not agent.settings and memory is not agent.memory
             return Backend()
         monkeypatch.setattr(diagnostics, "create_backend", factory)
@@ -93,7 +93,7 @@ def test_live_sample_probe_exposes_protocol_limit_and_never_calls_active_room(tm
                 self.turn(False)
             async def aclose(self):
                 calls.append("closed")
-        monkeypatch.setattr(diagnostics, "create_backend", lambda settings, memory: Backend())
+        monkeypatch.setattr(diagnostics, "create_backend", lambda settings, memory, **kwargs: Backend())
         result = await diagnostics.diagnose(agent, audio_wav=sample_wav())
         checks = {item["id"]: item for item in result["checks"]}
         assert checks["asr"]["state"] == checks["tts"]["state"] == "pass"
@@ -146,7 +146,7 @@ def test_late_live_sample_audio_never_passes_a_silent_tts_probe(tmp_path, monkey
                 self.turn(False)
             async def aclose(self):
                 self.closed = True
-        def factory(settings, memory):
+        def factory(settings, memory, **kwargs):
             backend = Backend()
             backends.append(backend)
             return backend
@@ -190,7 +190,7 @@ def test_cancelling_live_tts_probe_closes_both_disposable_backends(tmp_path, mon
             async def aclose(self):
                 await asyncio.sleep(0)
                 self.closed = True
-        def factory(settings, memory):
+        def factory(settings, memory, **kwargs):
             backend = Backend()
             backends.append(backend)
             return backend
@@ -218,7 +218,7 @@ def test_sample_cancellation_waits_for_disposable_cleanup(tmp_path, monkeypatch)
             async def aclose(self):
                 await asyncio.sleep(0)
                 closed.append(True)
-        monkeypatch.setattr(diagnostics, "create_backend", lambda *args: Backend())
+        monkeypatch.setattr(diagnostics, "create_backend", lambda *args, **kwargs: Backend())
         task = asyncio.create_task(diagnostics.diagnose(agent, audio_wav=sample_wav()))
         await started.wait()
         task.cancel()
@@ -234,7 +234,7 @@ def test_invalid_or_long_audio_never_constructs_network_backend(tmp_path, monkey
     async def run():
         agent = make_agent(tmp_path)
         agent.settings.mimo_api_key = "test"
-        monkeypatch.setattr(diagnostics, "create_backend", lambda *args: pytest.fail("invalid audio sent to model"))
+        monkeypatch.setattr(diagnostics, "create_backend", lambda *args, **kwargs: pytest.fail("invalid audio sent to model"))
         with pytest.raises(ValueError):
             await diagnostics.diagnose(agent, audio_wav=data)
     asyncio.run(run())

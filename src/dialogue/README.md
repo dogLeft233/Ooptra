@@ -1,6 +1,10 @@
 # 对话生成
 
-当前状态：**子模块设计已细化，业务代码尚未迁入**。本页签名与类型是待实现契约，不可直接导入；首次真实切片迁入时创建 `api.py`、`models.py` 和工厂，之后删除重复签名，改为代码导航。全局约束见 [系统架构](../../ARCHITECTURE.md)，目录规则见 [代码要求](../../docs/coding-standards.md#模块目录与接口导航)。
+当前状态：**供应商生成实现已迁入，任务式最终接口仍在推进**。`VoiceBackend`、能力查询与注入端口见 [公开 API](api.py)，不可变生成结果与 Live 回合证据见 [公开类型](models.py)，工厂见 [包入口](__init__.py)。级联、Gemini Live、代理 WebSocket、文本净化和模型观测由本模块拥有；旧 `voice_agent/backends/` 入口已删除。
+
+本批已移除生成中的 `MemoryStore.append` / `ContextBridge.record_turn`：级联返回 `VoiceReply`，Live 通过 `set_generated_out` 交付 `GeneratedTurn`；应用核实渠道会话及播放结果后才提交上下文。控制候选保留行为定义的 `VoiceControlDecision`，不再重新编码成无类型 `raw` 字典。策略实例由装配注入 `ReplyPolicyPort`，生成不再导入行为工厂；共享上下文只通过 `MemoryTools` / `HistoryReader` 窄端口读取与请求授权工具。
+
+下文完整任务、输出证据流和许可接口仍是**待实现契约**，不得视作当前工厂返回的兼容能力均已隔离。全局约束见 [系统架构](../../ARCHITECTURE.md)，目录规则见 [代码要求](../../docs/coding-standards.md#模块目录与接口导航)。
 
 ## 职责与阅读地图
 
@@ -11,11 +15,15 @@
 | 级联识别与表达 | ASR/分类协议、提示/分句/TTS、每任务队列与取消、可重建提示缓存 | [级联子模块](_internal/cascade/README.md)；`MimoCascadeBackend`、`AliyunDeepSeekBackend` |
 | 实时模型会话 | 持续连接、协议事件、本地轮次、转录关联、输出许可、重连及任务回收 | [Live 子模块](_internal/live/README.md)；`GeminiLiveBackend`、`VoiceAgent._wire_live` |
 | 公共输出与证据 | 单次流消费、音频编号、生成终态到输出源失败、文字与音频关联证据 | 本页下文；候选 `_internal/output.py`，无需单独建子模块 |
-| 供应商适配 | Gemini/MiMo/阿里/DeepSeek 的鉴权、协议解析、网络资源及能力声明 | 叶文件候选 `_internal/adapters/`；现有 `voice_agent/backends/` |
+| 供应商适配 | Gemini/MiMo/阿里/DeepSeek 的鉴权、协议解析、网络资源及能力声明 | 当前实现在 `_internal/cascade/` 和 `_internal/live/` |
 
 选择两个有独立生命周期的子模块，不把 ASR/LLM/TTS 每一步变成透传服务。识别与表达是可分别调用的同模块能力；预览和普通对话复用表达任务，不使用真实房间状态。供应商替换只影响适配及装配配置，共同契约不变时无需调用者学习供应商参数。
 
-## 待实现公开操作
+## 已实现调用与后续目标
+
+当前应用用 `create_backend(settings, history_reader, reply_policy=policy)` 装配。设置经只读 `DialogueSettings` 结构协议读取，不反向依赖配置加载器；`bind_history` 更换后续级联请求读取源，Live 不读取本地历史。级联消费 `handle_utterance` / `StreamingUtterance.handle_utterance_stream`，关闭使用 `aclose`；同实例级联生成串行执行，等待可取消，独立实例可并行；Live 继续使用持续连接及独立输入/输出回调，不强制文字中转。`capabilities()` 已用于试听选择级联或 Live 能力；`LiveLimits` 配置候选输出字节预算和迟到转写窗口，连接器可注入用于外部协议测试。声音产出和 `GeneratedTurn.selected` 均不证明房间已播放。
+
+以下为后续目标操作；已实现的过渡能力以 API 与代码 docstring 为准。
 
 有 I/O 的单次操作为 async，流接口返回受控异步迭代器，能力/只读证据查询可同步。`api.py` 不导入内部实现，工厂在包入口装配；不返回原后端或共享可变设置。
 
@@ -79,8 +87,8 @@ Live实现 → 私有供应商窄端口、本地轮次/闸门
 
 ## 验证与迁移入口
 
-现状证据：`VoiceBackend` 仍有 context_bridge/共享 settings；MiMo 的 `_decide_utterance` 混合策略和写历史；阿里流用共享音频 sink；Gemini 同时处理概率/关键词、工具、模型事件和写记忆。模块文档不是隔离已实现的证明。
+现状证据：权威历史写入已迁出生成，模型协议和资源已归本模块；`VoiceBackend` 仍接收兼容设置和上下文端口，MiMo 的 `_decide_utterance` 仍编排策略查询，阿里流仍用每后端实例的音频 sink，Gemini 仍协调策略许可与模型事件。独立 ExpressionJob、版本化 PreparedContext、Live 提议/许可和单消费者 GenerationEvent 仍未落地，不能把源码归位当作全部契约完成。
 
 先按 [准备计划](../../docs/superpowers/plans/2026-11-08-module-refactor-readiness.md) 让房间/播放拥有者收敛，再迁移级联 job；Live 在有界许可/关闭隔离试验通过后替换。共同生成行为测试复用到多个后端，Live/控制解释等特有能力单独测。现有证据入口为 `tests/test_aliyun_deepseek.py`、`tests/test_backend_audit_regressions.py`、`tests/test_live_turn_lifecycle.py`、`tests/test_gemini_session_lifecycle.py` 和各子模块列出的回归测试。
 
-目标检查包括：两任务不串状态、分类失败不当 NoControl、未授权音频零泄漏、慢消费者/超时有界、切房迟到帧失效、重复许可不重放、断连清掉 ready、工具关闭不写新连接、流取消触达供应商清理、部分生成不写完整历史。新测试落 `tests/dialogue/`；本次仅完成源码核对和设计演练，尚无新接口实现测试或真实模型/房间验收。
+目标检查包括：两任务不串状态、分类失败不当 NoControl、未授权音频零泄漏、慢消费者/超时有界、切房迟到帧失效、重复许可不重放、断连清掉 ready、工具关闭不写新连接、流取消触达供应商清理、部分生成不写完整历史。新测试落 `tests/dialogue/`；工厂迁移由供应商回归及应用集成测试验证；[来源/历史绑定测试](../../tests/dialogue/test_context_binding.py) 使用真实来源桥、历史文件及本地模型服务验证迟到工具不能写入新来源、刷新后读取新历史，[流式协议测试](../../tests/test_aliyun_deepseek.py) 验证同实例并发请求不会把输出送入另一请求的 sink。[生成日志测试](../../tests/dialogue/test_generation_logging.py) 经供应商连接边界验证正文/会话句柄不进入日志。生成请求捕获来源代次，在网络和工具等待后复查；旧供应商回归仍有私有方法/属性断言，属于后续测试维护项，不代表完整目标契约已覆盖。真实模型/房间验收由应用级双机器人验收另行记录。

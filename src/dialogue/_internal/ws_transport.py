@@ -49,11 +49,10 @@ class _AiohttpWs:
                 with contextlib.suppress(Exception):
                     exc = self._ws.exception()
                 logger.info(
-                    "Live WebSocket 关闭：type=%s close_code=%s exception=%s detail=%r",
+                    "Live WebSocket 关闭：type=%s close_code=%s exception_type=%s",
                     msg.type.name,
                     getattr(self._ws, "close_code", None),
-                    f"{type(exc).__name__}: {exc}" if exc else None,
-                    str(getattr(msg, "data", ""))[:200],
+                    type(exc).__name__ if exc else None,
                 )
                 break
             data = getattr(msg, "data", msg)

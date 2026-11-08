@@ -10,9 +10,9 @@ from unittest.mock import AsyncMock
 import pytest
 from support.channel_fixtures import establish_room
 
+from channels import create_duplex as VoiceDuplex
+from operations.models import VoiceAgentSettings, VoiceApiSettings
 from voice_agent.agent import VoiceAgent
-from voice_agent.duplex import VoiceDuplex
-from voice_agent.settings import VoiceAgentSettings, VoiceApiSettings
 from webui.voice_routes import build_voice_routes
 
 

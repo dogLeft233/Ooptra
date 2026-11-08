@@ -25,9 +25,9 @@ from typing import Any
 
 from support.channel_fixtures import establish_room
 
+from dialogue.models import VoiceReply
+from operations.models import VoiceAgentSettings
 from voice_agent.agent import VoiceAgent
-from voice_agent.backends.base import VoiceReply
-from voice_agent.settings import VoiceAgentSettings
 
 PCM = b"\x00\x01" * 16000  # 32000 字节 = 16000 样本 = 1.0s @16k
 
@@ -42,6 +42,9 @@ class FakeTransport:
     async def push_tts_pcm(self, pcm: bytes, rate: int, *, finish: bool = False) -> dict:
         self.pushes.append((pcm, rate, finish))
         return dict(self.push_result)
+
+    async def wait_tts_complete(self, timeout=30) -> dict:
+        return {"ok": True}
 
     async def stop_tts(self) -> dict:
         return {"ok": True}
@@ -97,8 +100,8 @@ def _reply(**kw: Any) -> VoiceReply:
 # ----------------------------------------------------------------------
 
 
-def test_asr_turn_is_logged_with_text_and_duration(caplog) -> None:
-    """一次回合要留下「识别成什么 + 答了什么 + 这段音频多长」。
+def test_asr_turn_logs_metadata_without_speech_content(caplog) -> None:
+    """一次回合记录字数与时长，不记录转写或回复正文。
 
     时长是关键：只有它能把「模型听不懂」和「VAD 把句子切碎了」区分开。
     """
@@ -108,9 +111,10 @@ def test_asr_turn_is_logged_with_text_and_duration(caplog) -> None:
         with caplog.at_level(logging.INFO, logger="voice_agent.agent"):
             await agent._handle_utterance("u1", PCM, 16000)
 
-        assert "今天天气怎么样" in caplog.text, "识别结果没留痕"
-        assert "出门带把伞" in caplog.text, "回复没留痕"
-        assert "1.0s" in caplog.text, "没有记这段音频有多长，看不出 VAD 切句"
+        assert "今天天气怎么样" not in caplog.text
+        assert "出门带把伞" not in caplog.text
+        assert "input_chars=7" in caplog.text
+        assert "audio_seconds=1.0" in caplog.text
 
     asyncio.run(run())
 
@@ -123,7 +127,7 @@ def test_empty_asr_result_is_still_logged(caplog) -> None:
         with caplog.at_level(logging.INFO, logger="voice_agent.agent"):
             await agent._handle_utterance("u1", PCM, 16000)
 
-        assert "ASR 回合" in caplog.text, "识别为空时什么都不记，等于没发生过"
+        assert "event=voice.asr.completed input_chars=0" in caplog.text, "识别为空时什么都不记，等于没发生过"
 
     asyncio.run(run())
 

@@ -1,7 +1,7 @@
 import json
 import tracemalloc
 
-from voice_agent.memory import MemoryStore
+from context import create_memory as MemoryStore
 
 
 def test_long_history_recent_has_bounded_peak_allocation(tmp_path):

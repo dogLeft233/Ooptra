@@ -11,8 +11,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from support.channel_fixtures import establish_room
 from test_gemini_session_lifecycle import FakeLiveWs
 
+from operations.models import VoiceAgentSettings, VoiceApiSettings
 from voice_agent.agent import VoiceAgent
-from voice_agent.settings import VoiceAgentSettings, VoiceApiSettings
 from webui.voice_routes import mount_voice_routes
 
 
@@ -26,7 +26,11 @@ class RecordingDuplex:
         return {"ok": True}
 
     async def push_tts_pcm(self, pcm, rate, *, finish=False):
-        self.audio.append(pcm)
+        if pcm:
+            self.audio.append(pcm)
+        return {"ok": True}
+
+    async def wait_tts_complete(self, timeout=30):
         return {"ok": True}
 
     async def stop_tts(self):
@@ -37,7 +41,8 @@ class RecordingDuplex:
 
 @pytest.fixture
 def opened(monkeypatch):
-    from voice_agent import ws_transport
+    from dialogue import create_gemini_backend
+    from voice_agent import agent as agent_module
 
     sockets = []
 
@@ -46,7 +51,10 @@ def opened(monkeypatch):
         sockets.append(ws)
         return ws
 
-    monkeypatch.setattr(ws_transport, "open_live_ws", open_ws)
+    def create_backend(settings, memory, *, reply_policy):
+        return create_gemini_backend(settings, memory, reply_policy=reply_policy, connector=open_ws)
+
+    monkeypatch.setattr(agent_module, "create_backend", create_backend)
     return sockets
 
 

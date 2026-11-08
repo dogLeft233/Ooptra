@@ -11,13 +11,11 @@ import importlib
 import os
 from typing import Any
 
-from core.config_file_store import config_file_write_lock, replace_text_files_atomically
+from behavior import merge_auto_visit_patch
 from core.logger_config import get_logger
 from core.paths import PROJECT_ROOT
-from operations import patch_config_text, validate_config_text
-from operations.models import OutputVolume
-from voice_agent.auto_visit_settings import merge_auto_visit_patch
-from webui.maintenance_network import validate_network_field
+from operations import create_configuration
+from operations.models import ConfigurationChange, OutputVolume, validate_network_field
 
 logger = get_logger("WebUIConfig")
 
@@ -790,62 +788,17 @@ def _normalize_updates(updates: Any) -> dict[str, dict[str, Any]]:
     return normalized
 
 
-def _patched_text(text: str, updates: dict[str, dict[str, Any]]) -> str:
-    """兼容旧算法测试；补丁知识只由 operations 维护。"""
-    return patch_config_text(text, updates, sources=GROUP_SOURCES, filename=CONFIG_PATH)
-
-
-def _validate_text(text: str) -> None:
-    validate_config_text(text, filename=CONFIG_PATH)
-
-
-def _sync_runtime(namespace: dict[str, Any], updates: dict[str, dict[str, Any]]) -> None:
-    """Apply only saved fields; unrelated environment overrides stay intact."""
-    module = _runtime_config()
-    for group, fields in updates.items():
-        source_name = GROUP_SOURCES[group]
-        target = getattr(module, source_name, None)
-        fresh = namespace.get(source_name)
-        if isinstance(fresh, dict):
-            if isinstance(target, dict):
-                for field in fields:
-                    path = _split_field_path(field)
-                    node = target
-                    for part in path[:-1]:
-                        if not isinstance(node.get(part), dict):
-                            node[part] = {}
-                        node = node[part]
-                    node[path[-1]] = copy.deepcopy(_nested_get(fresh, path))
-            else:
-                setattr(module, source_name, copy.deepcopy(fresh))
-
-
 def apply_updates(updates: Any) -> dict[str, Any]:
     """校验并写回 config.py，随后就地更新运行中的字典。"""
     normalized = _normalize_updates(updates)
-    with config_file_write_lock():
-        with open(CONFIG_PATH, encoding="utf-8", newline="") as handle:
-            text = handle.read()
-        to_write = copy.deepcopy(normalized)
-        if "auto_visit" in normalized:
-            # Reject unsafe target bindings before reading its current value by
-            # execution; malformed definitions must never run during a save.
-            _patched_text(text, normalized)
-            current: dict[str, Any] = {}
-            exec(compile(text, CONFIG_PATH, "exec"), current)
-            raw = current.get("VOICE_AUTO_VISIT_CONFIG", {})
-            merged = merge_auto_visit_patch({} if raw is None else raw, normalized["auto_visit"])
-            to_write["auto_visit"] = {
-                field: merged[field] for field in normalized["auto_visit"]
-            }
-        patched = _patched_text(text, to_write)
-        _validate_text(patched)
-
-        namespace: dict[str, Any] = {}
-        exec(compile(patched, CONFIG_PATH, "exec"), namespace)
-        replace_text_files_atomically(((CONFIG_PATH, patched),))
-        _sync_runtime(namespace, normalized)
-    changed = {group: sorted(values) for group, values in normalized.items()}
+    change = ConfigurationChange.from_normalized(normalized, sources=GROUP_SOURCES)
+    configuration = create_configuration(
+        path=CONFIG_PATH, runtime_config=_runtime_config,
+        group_mergers={"auto_visit": lambda current, patch: merge_auto_visit_patch(
+            {} if current is None else current, patch)},
+    )
+    receipt = configuration.save_fields(change)
+    changed = receipt.changed_fields()
     restart_required = any(
         (group, field) not in _RESTART_FREE_FIELDS and group not in _HOT_RELOAD_GROUPS
         for group, fields in normalized.items()

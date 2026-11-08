@@ -21,6 +21,21 @@ DEPENDENCIES = {
 IGNORED = frozenset({"__pycache__", ".pytest_cache", ".ruff_cache"})
 
 
+# 已迁出的真实实现不能重新长回旧目录；其余旧路径继续按切片迁移。
+RETIRED_PATHS = {
+    "voice_agent/backends": "dialogue",
+    **{f"voice_agent/{name}.py": module for module, names in {
+        "context": ("memory", "context_bridge"),
+        "behavior": ("auto_visit", "auto_visit_settings", "auto_visit_state", "voice_control"),
+        "channels": ("duplex", "output_controls", "vad", "operations"),
+        "dialogue": ("ws_transport", "observation"),
+        "operations": ("settings",),
+    }.items() for name in names},
+    **{f"webui/maintenance_{name}.py": "operations"
+       for name in ("storage", "cleanup", "network", "worker")},
+}
+
+
 def imports(tree: ast.AST, package: tuple[str, ...]) -> list[tuple[int, tuple[str, ...]]]:
     """展开相对导入和 from-import 的名称，使私有导入不能藏在别名中。"""
     found = []
@@ -38,6 +53,10 @@ def imports(tree: ast.AST, package: tuple[str, ...]) -> list[tuple[int, tuple[st
 def check(root: Path) -> list[str]:
     errors: list[str] = []
     source = root / "src"
+    for retired, destination in RETIRED_PATHS.items():
+        previous = source / retired
+        if previous.is_file() or (previous.is_dir() and any(previous.glob("*.py"))):
+            errors.append(f"src/{retired}: 实现已迁移至 {destination}，请通过公开接口扩展")
     for entry in sorted(source.iterdir()):
         if entry.name in IGNORED or entry.name.startswith("."):
             continue

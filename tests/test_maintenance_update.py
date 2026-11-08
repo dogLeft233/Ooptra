@@ -10,7 +10,7 @@ def git(root, *args):
 
 
 def test_preflight_rejects_dirty_repo_and_wrong_remote(tmp_path):
-    from webui.maintenance import MaintenanceService
+    from operations import create_maintenance as MaintenanceService
 
     git(tmp_path, "init")
     git(tmp_path, "config", "user.name", "Test")
@@ -28,7 +28,7 @@ def test_preflight_rejects_dirty_repo_and_wrong_remote(tmp_path):
 
 
 def test_unsupported_install_never_starts_shutdown(tmp_path):
-    from webui.maintenance import MaintenanceService
+    from operations import create_maintenance as MaintenanceService
 
     async def run():
         service = MaintenanceService(tmp_path, managed=False, venv=False)
@@ -39,7 +39,7 @@ def test_unsupported_install_never_starts_shutdown(tmp_path):
 
 
 def test_public_status_never_returns_health_token(tmp_path):
-    from webui.maintenance import MaintenanceService
+    from operations import create_maintenance as MaintenanceService
 
     service = MaintenanceService(tmp_path)
     service.write_job({"id": "test", "phase": "preparing", "health_token": "secret", "target_sha": "a" * 40})
@@ -48,7 +48,7 @@ def test_public_status_never_returns_health_token(tmp_path):
 
 @pytest.mark.parametrize("phase", ["awaiting_restart", "switching", "checking", "rolling_back"])
 def test_stale_jobs_are_reconciled_without_blocking_new_operations(tmp_path, phase):
-    from webui.maintenance import MaintenanceService
+    from operations import create_maintenance as MaintenanceService
 
     initial = MaintenanceService(tmp_path)
     initial.write_job({"id": "old", "phase": phase, "service_pid": -1})
@@ -58,7 +58,7 @@ def test_stale_jobs_are_reconciled_without_blocking_new_operations(tmp_path, pha
 
 
 def test_restored_webui_endpoint_is_extracted_without_executing_config(tmp_path):
-    from webui.maintenance_storage import restored_endpoint
+    from operations import restored_endpoint
 
     path = tmp_path / "config.py"
     path.write_text("raise Exception('never execute')\nWEBUI_CONFIG = {'host': ' 0.0.0.0 ', 'port': 3199, 'token': ' restored '}")

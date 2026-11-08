@@ -153,8 +153,8 @@ def test_simultaneous_child_and_caller_cancellation_is_not_swallowed(tmp_path):
 
 def test_gemini_uses_live_session_without_mimo_and_ignores_internal_user_memory(tmp_path, monkeypatch):
     async def run():
-        from voice_agent import ws_transport
-        from voice_agent.backends.gemini_live import GeminiLiveBackend
+        from support import dialogue_fixtures as ws_transport
+        from support.dialogue_fixtures import gemini_backend as GeminiLiveBackend
 
         sockets = []
 
@@ -163,7 +163,7 @@ def test_gemini_uses_live_session_without_mimo_and_ignores_internal_user_memory(
             sockets.append(ws)
             return ws
 
-        monkeypatch.setattr(ws_transport, "open_live_ws", open_ws)
+        monkeypatch.setattr(ws_transport, "live_connector", open_ws)
         agent = make_agent(tmp_path)
         agent.settings.gemini_api_key = "test"
         agent.settings.mimo_api_key = ""
@@ -195,15 +195,15 @@ def test_gemini_uses_live_session_without_mimo_and_ignores_internal_user_memory(
 
 def test_announcement_timeout_stops_live_session_and_restores_input(tmp_path, monkeypatch):
     async def run():
-        from voice_agent import ws_transport
-        from voice_agent.backends.gemini_live import GeminiLiveBackend
+        from support import dialogue_fixtures as ws_transport
+        from support.dialogue_fixtures import gemini_backend as GeminiLiveBackend
 
         ws = FakeLiveWs()
 
         async def open_ws(*args, **kwargs):
             return ws
 
-        monkeypatch.setattr(ws_transport, "open_live_ws", open_ws)
+        monkeypatch.setattr(ws_transport, "live_connector", open_ws)
         agent = make_agent(tmp_path)
         agent.settings.gemini_api_key = "test"
         agent.backend = GeminiLiveBackend(agent.settings, agent.memory)
@@ -219,8 +219,8 @@ def test_announcement_timeout_stops_live_session_and_restores_input(tmp_path, mo
 
 def test_live_timeout_does_not_mute_next_session_callbacks(tmp_path, monkeypatch):
     async def run():
-        from voice_agent import ws_transport
-        from voice_agent.backends.gemini_live import GeminiLiveBackend
+        from support import dialogue_fixtures as ws_transport
+        from support.dialogue_fixtures import gemini_backend as GeminiLiveBackend
 
         sockets = []
 
@@ -229,7 +229,7 @@ def test_live_timeout_does_not_mute_next_session_callbacks(tmp_path, monkeypatch
             sockets.append(ws)
             return ws
 
-        monkeypatch.setattr(ws_transport, "open_live_ws", open_ws)
+        monkeypatch.setattr(ws_transport, "live_connector", open_ws)
         agent = make_agent(tmp_path)
         agent.settings.gemini_api_key = "test"
         agent.backend = GeminiLiveBackend(agent.settings, agent.memory)
@@ -251,15 +251,15 @@ def test_live_timeout_does_not_mute_next_session_callbacks(tmp_path, monkeypatch
 
 def test_live_audio_without_any_text_is_an_empty_ai_result(tmp_path, monkeypatch):
     async def run():
-        from voice_agent import ws_transport
-        from voice_agent.backends.gemini_live import GeminiLiveBackend
+        from support import dialogue_fixtures as ws_transport
+        from support.dialogue_fixtures import gemini_backend as GeminiLiveBackend
 
         ws = FakeLiveWs()
 
         async def open_ws(*args, **kwargs):
             return ws
 
-        monkeypatch.setattr(ws_transport, "open_live_ws", open_ws)
+        monkeypatch.setattr(ws_transport, "live_connector", open_ws)
         agent = make_agent(tmp_path)
         agent.settings.gemini_api_key = "test"
         agent.backend = GeminiLiveBackend(agent.settings, agent.memory)
@@ -283,15 +283,15 @@ def test_live_audio_without_any_text_is_an_empty_ai_result(tmp_path, monkeypatch
 
 def test_manual_leave_cancels_live_audio_push_before_waiting_for_output_lock(tmp_path, monkeypatch):
     async def run():
-        from voice_agent import ws_transport
-        from voice_agent.backends.gemini_live import GeminiLiveBackend
+        from support import dialogue_fixtures as ws_transport
+        from support.dialogue_fixtures import gemini_backend as GeminiLiveBackend
 
         ws = FakeLiveWs()
 
         async def open_ws(*args, **kwargs):
             return ws
 
-        monkeypatch.setattr(ws_transport, "open_live_ws", open_ws)
+        monkeypatch.setattr(ws_transport, "live_connector", open_ws)
         agent = make_agent(tmp_path)
         agent.settings.gemini_api_key = "test"
         agent.backend = GeminiLiveBackend(agent.settings, agent.memory)

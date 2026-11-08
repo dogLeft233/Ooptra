@@ -27,11 +27,11 @@ def test_observations_are_bounded_and_detached(tmp_path):
 
 
 def test_cascade_stage_timings_measure_real_request_boundaries(tmp_path, monkeypatch):
-    from voice_agent import observation
+    import time
     async def run():
         agent = make_agent(tmp_path)
         now = [100.0]
-        monkeypatch.setattr(observation.time, "monotonic", lambda: now[0])
+        monkeypatch.setattr(time, "monotonic", lambda: now[0])
         async def asr(*args):
             now[0] += .12
             return "你好"

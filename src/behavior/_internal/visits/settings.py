@@ -9,8 +9,9 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import dataclass
 from typing import Any
+
+from behavior.models import AutoVisitConfig
 
 _DEFAULTS = {
     'join_probability': 0.2,
@@ -23,13 +24,6 @@ _DEFAULTS = {
 _TOP_KEYS = {'check_interval_minutes', 'daily_limit', 'defaults', 'areas'}
 _AREA_KEYS = {'enabled', 'overrides', 'daily_limit'}
 
-
-@dataclass(frozen=True)
-class AutoVisitConfig:
-    check_interval_minutes: tuple[float, float]
-    daily_limit: int
-    defaults: dict[str, Any]
-    areas: dict[str, Any]
 
 
 def _mapping(value: Any, name: str, allowed: set[str] | None = None) -> dict:
@@ -136,8 +130,8 @@ def effective_area(config: AutoVisitConfig, area: str) -> dict[str, Any]:
     """Return an independent validated snapshot; absent areas are disabled."""
     _area_id(area)
     entry = config.areas.get(area, {})
-    result = deepcopy(config.defaults)
-    result.update(deepcopy(entry.get('overrides', {})))
+    result = _detached(config.defaults)
+    result.update(_detached(entry.get('overrides', {})))
     result.update(enabled=entry.get('enabled', False), daily_limit=entry.get('daily_limit', 0))
     return result
 

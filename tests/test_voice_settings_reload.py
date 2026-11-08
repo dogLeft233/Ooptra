@@ -14,13 +14,10 @@ import asyncio
 
 import pytest
 
+from operations import apply_settings
+from operations.models import VoiceAgentSettings, VoiceApiSettings
 from voice_agent import runtime as runtime_module
 from voice_agent.agent import VoiceAgent
-from voice_agent.settings import (
-    VoiceAgentSettings,
-    VoiceApiSettings,
-    apply_settings,
-)
 
 
 def _settings(tmp_path, **overrides) -> VoiceAgentSettings:
@@ -143,18 +140,43 @@ def test_reload_settings_rebuilds_vad_when_tuning_changes(
 def test_reload_settings_rebuilds_memory_and_rewires_backend(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    rt = _make_runtime(monkeypatch, _settings(tmp_path))
-    old_memory = rt.agent.memory
+    from aiohttp import web
 
-    fresh = _settings(tmp_path, memory_path=str(tmp_path / "other.jsonl"))
-    monkeypatch.setattr(
-        runtime_module, "load_voice_agent_settings", lambda: (fresh, VoiceApiSettings())
-    )
-    result = asyncio.run(rt.reload_settings())
+    async def run():
+        captured = []
 
-    assert "memory_path" in result["changed"]
-    assert rt.agent.memory is not old_memory, "记忆路径变了却没重建 MemoryStore"
-    assert rt.agent.backend.memory is rt.agent.memory, "backend 还指着旧 MemoryStore"
+        async def model(request):
+            captured.append(await request.json())
+            return web.json_response({"choices": [{"message": {"content": "hello"}}]})
+
+        app = web.Application()
+        app.router.add_post('/chat/completions', model)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        server = web.TCPSite(runner, '127.0.0.1', 0)
+        await server.start()
+        port = server._server.sockets[0].getsockname()[1]
+        model_options = {"backend": "mimo_cascade", "mimo_api_key": "synthetic",
+                         "mimo_base_url": f"http://127.0.0.1:{port}"}
+        rt = _make_runtime(monkeypatch, _settings(tmp_path, **model_options))
+        old_memory = rt.agent.memory
+        old_memory.append("user", "old history", user_key="member")
+        fresh = _settings(tmp_path, memory_path=str(tmp_path / "other.jsonl"), **model_options)
+        monkeypatch.setattr(runtime_module, "load_voice_agent_settings",
+                            lambda: (fresh, VoiceApiSettings()))
+        try:
+            result = await rt.reload_settings()
+            assert "memory_path" in result["changed"]
+            rt.agent.memory.append("user", "new history", user_key="member")
+            assert await rt.agent.backend.chat("current", user_key="member") == "hello"
+            assert [message["content"] for message in captured[0]["messages"]
+                    if message["role"] == "user"] == ["new history", "current"]
+            assert [row["content"] for row in old_memory.recent()] == ["old history"]
+        finally:
+            await rt.agent.backend.aclose()
+            await runner.cleanup()
+
+    asyncio.run(run())
 
 
 def test_reload_settings_switches_backend_type(

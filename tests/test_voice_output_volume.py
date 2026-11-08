@@ -1,3 +1,4 @@
+
 """Voice volume survives old configs, hot reloads and browser recreation."""
 
 from __future__ import annotations
@@ -10,10 +11,11 @@ from unittest.mock import AsyncMock
 import pytest
 from support.channel_fixtures import establish_room
 
+from channels import create_duplex as VoiceDuplex
 from oopz_sdk.transport.voice_browser import BrowserVoiceTransport
+from operations import load_voice_agent_settings, patch_config_text
+from operations.models import VoiceAgentSettings, VoiceApiSettings
 from voice_agent.agent import VoiceAgent
-from voice_agent.duplex import VoiceDuplex
-from voice_agent.settings import VoiceAgentSettings, VoiceApiSettings, load_voice_agent_settings
 from webui import config_editor as editor
 
 
@@ -33,7 +35,7 @@ def test_old_config_displays_default_and_saving_inserts_volume(monkeypatch):
     monkeypatch.setattr(editor, "_runtime_config", lambda: SimpleNamespace(VOICE_AGENT_CONFIG={}))
     assert editor.schema_payload()["voice"]["fields"]["output_volume"]["value"] == 50
     updates = editor._normalize_updates({"voice": {"output_volume": 10}})
-    source = editor._patched_text('VOICE_AGENT_CONFIG = {"enabled": False}\n', updates)
+    source = patch_config_text('VOICE_AGENT_CONFIG = {"enabled": False}\n', updates, sources=editor.GROUP_SOURCES, filename=editor.CONFIG_PATH)
     assert '"output_volume": 10' in source
 
 

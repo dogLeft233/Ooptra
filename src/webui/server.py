@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import ipaddress
 import os
 import platform
@@ -70,6 +71,10 @@ class WebUIConsole:
         self._port = DEFAULT_PORT
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
+        self._configuration_tasks: set[asyncio.Task] = set()
+        self._configuration_lock = asyncio.Lock()
+        self._closing = False
+        self._stop_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -95,6 +100,8 @@ class WebUIConsole:
         return (self._host, self._port)
 
     async def start(self) -> None:
+        self._closing = False
+        self._stop_task = None
         if not bool(self._config.get("enabled", True)):
             logger.info("Web 控制台已按 config.py 的 WEBUI_CONFIG.enabled 禁用")
             return
@@ -111,9 +118,10 @@ class WebUIConsole:
 
         app = web.Application(middlewares=[self._auth_middleware], client_max_size=3 * 1024 * 1024)
         self._auth.mount(app)
-        from webui.maintenance import MaintenanceService, mount_maintenance_routes
+        from operations import create_maintenance
+        from webui.maintenance import mount_maintenance_routes
 
-        self._maintenance = MaintenanceService(PROJECT_ROOT, shutdown=self._shutdown,
+        self._maintenance = create_maintenance(PROJECT_ROOT, shutdown=self._shutdown,
                                                port=self._port, host=self._host, token=self._token,
                                                runtime_status=self._controller.snapshot,
                                                bootstrap_ready=lambda: self.bootstrap_ready)
@@ -167,7 +175,17 @@ class WebUIConsole:
         logger.info("Web 控制台已启动：%s%s", self.base_url, suffix)
 
     async def stop(self) -> None:
+        self._closing = True
         self.set_bootstrap_ready(False)
+        if self._stop_task is None:
+            self._stop_task = asyncio.create_task(self._finish_stop(), name="webui-stop")
+        await self._observe_owned(self._stop_task)
+
+    async def _finish_stop(self) -> None:
+        # No new saves are admitted after closing. Complete accepted file writes
+        # and their credential/application effects before closing their resources.
+        if self._configuration_tasks:
+            await asyncio.gather(*tuple(self._configuration_tasks), return_exceptions=True)
         if self._maintenance is not None:
             await self._maintenance.close()
         await self._login.shutdown()
@@ -206,10 +224,71 @@ class WebUIConsole:
             return web.json_response({"ok": False, "error": "请登录控制台"}, status=401)
         return await handler(request)
 
+    async def _observe_owned(self, task):
+        """取消只中断等待者；先观察已受理工作完成，再传播取消。"""
+        cancelled = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                if task.cancelled():
+                    raise
+                cancelled = exc
+            except Exception:
+                break
+        try:
+            result = task.result()
+        except Exception:
+            if cancelled is not None:
+                logger.exception("请求取消后，已受理的控制台操作失败")
+                raise cancelled from None
+            raise
+        if cancelled is not None:
+            raise cancelled
+        return result
+
+    async def _save_configuration(self, updates, *, restart_after=False):
+        if self._closing:
+            raise RuntimeError("控制台正在停止，暂不能保存配置")
+        snapshot = copy.deepcopy(updates)
+        task = asyncio.create_task(
+            self._commit_configuration(snapshot, restart_after=restart_after),
+            name="webui-configuration-save",
+        )
+        self._configuration_tasks.add(task)
+
+        def finished(completed):
+            self._configuration_tasks.discard(completed)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(finished)
+        return await self._observe_owned(task)
+
+    async def _commit_configuration(self, updates, *, restart_after):
+        # Serialize persistence and application together. Another save must not
+        # commit a later token then have this task apply the earlier token last.
+        async with self._configuration_lock:
+            result = await asyncio.to_thread(config_editor.apply_updates, updates)
+            if "token" in (result.get("changed") or {}).get("webui", []):
+                self._change_password(str(updates["webui"]["token"]))
+                result["reauth_required"] = True
+                result.setdefault("notes", []).append("控制台密码与插件 API Token 已同步，请重新登录；插件请使用新 Token")
+            # Runs on the main event loop, after successful persistence, even if
+            # the HTTP waiter disconnected. It is part of this owned operation.
+            await self._hot_reload_voice(result)
+            if result.get("reauth_required") and restart_after is True:
+                try:
+                    await self._controller.restart("WebUI 保存配置并重连")
+                    result["bridge_restart_requested"] = True
+                except Exception:
+                    logger.exception("配置已保存，但桥接重连失败")
+                    result["bridge_restart_error"] = True
+                    result.setdefault("notes", []).append("桥接重连失败，请重新登录后手动重连")
+            return result
+
     async def _setup_password(self, password: str) -> None:
-        result = await asyncio.to_thread(config_editor.apply_updates, {"webui": {"token": password}})
-        self._change_password(password)
-        await self._hot_reload_voice(result)
+        await self._save_configuration({"webui": {"token": password}})
 
     def _change_password(self, password: str) -> None:
         self._token = password.strip()
@@ -299,9 +378,9 @@ class WebUIConsole:
                 },
             },
         }
-        from webui.maintenance_worker import runtime_health
+        from operations import evaluate_runtime_health
 
-        payload["health"] = runtime_health(payload)
+        payload["health"] = evaluate_runtime_health(payload)
         return web.json_response(payload)
 
     def _voice_payload(self) -> dict[str, Any]:
@@ -326,7 +405,7 @@ class WebUIConsole:
     # ------------------------------------------------------------------
 
     async def _handle_update_check(self, _request: web.Request) -> web.StreamResponse:
-        from voice_agent.settings import resolve_agent_proxy_url
+        from operations import resolve_agent_proxy_url
         from webui.update_check import check_github_update
 
         # str() 必须包住整个表达式：写成 str(getattr(...)).get(...) 会对字符串调 .get()，
@@ -417,31 +496,13 @@ class WebUIConsole:
         if payload is None:
             return web.json_response({"ok": False, "error": "请求体必须是 JSON"}, status=400)
         try:
-            result = await asyncio.to_thread(config_editor.apply_updates, payload.get("updates"))
+            result = await self._save_configuration(
+                payload.get("updates"), restart_after=payload.get("restart_after", False))
         except ValueError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
         except Exception as exc:
             logger.exception("保存配置失败")
             return web.json_response({"ok": False, "error": f"保存失败：{exc}"}, status=500)
-
-        # 语音配置必须回到主事件循环上热重载：reload_settings 会创建 asyncio 任务
-        # （重建 Live 会话），在 to_thread 的工作线程里跑会绑到错误的 loop 上。
-        if "token" in (result.get("changed") or {}).get("webui", []):
-            self._change_password(str(payload["updates"]["webui"]["token"]))
-            result["reauth_required"] = True
-            result.setdefault("notes", []).append("控制台密码与插件 API Token 已同步，请重新登录；插件请使用新 Token")
-        await self._hot_reload_voice(result)
-
-        if result.get("reauth_required") and payload.get("restart_after") is True:
-            # This request was authorized before rotating the password. Complete the
-            # explicitly requested reconnect here, without another expired-cookie call.
-            try:
-                await self._controller.restart("WebUI 保存配置并重连")
-                result["bridge_restart_requested"] = True
-            except Exception:
-                logger.exception("配置已保存，但桥接重连失败")
-                result["bridge_restart_error"] = True
-                result.setdefault("notes", []).append("桥接重连失败，请重新登录后手动重连")
 
         message = "已写入 config.py"
         notes = result.get("notes") or []

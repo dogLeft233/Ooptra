@@ -10,7 +10,7 @@ OFFICIAL = "https://github.com/Eason4869/Ooptra.git"
 
 
 def network():
-    from webui import maintenance_network
+    from tests.support.maintenance_harness import maintenance_network
     return maintenance_network
 
 
@@ -86,14 +86,14 @@ def test_official_lookup_switches_to_direct_then_official_api(tmp_path, monkeypa
         assert proxy == "http://proxy.example:7890"
         return SHA
 
-    monkeypatch.setattr(module, "_api_sha", api)
+    monkeypatch.setattr(module, "api_lookup", api)
     assert module.lookup_official_sha(tmp_path, "beta", time.monotonic() + 60, run, settings=settings) == SHA
     assert attempts == ["http://proxy.example:7890", ""]
 
 
 def test_official_branch_row_must_match_requested_channel(tmp_path, monkeypatch):
     module = network()
-    monkeypatch.setattr(module, "_api_sha", lambda *args: "b" * 40)
+    monkeypatch.setattr(module, "api_lookup", lambda *args: "b" * 40)
     sha = module.lookup_official_sha(tmp_path, "beta", time.monotonic() + 60,
                                     lambda *args, **kwargs: SHA + "\trefs/heads/dev",
                                     settings=module.NetworkSettings("direct"))
@@ -102,7 +102,7 @@ def test_official_branch_row_must_match_requested_channel(tmp_path, monkeypatch)
 
 def test_official_failure_never_consults_mirror_or_exposes_credentials(tmp_path, monkeypatch):
     module = network()
-    monkeypatch.setattr(module, "_api_sha", lambda *args: (_ for _ in ()).throw(ValueError("secret")))
+    monkeypatch.setattr(module, "api_lookup", lambda *args: (_ for _ in ()).throw(ValueError("secret")))
 
     def run(root, args, timeout, env=None):
         assert "mirror" not in " ".join(args)
@@ -130,7 +130,7 @@ def test_fallback_attempts_share_deadline(tmp_path, monkeypatch):
         clock[0] += timeout
         raise ValueError("unreachable")
 
-    monkeypatch.setattr(module, "_api_sha", api)
+    monkeypatch.setattr(module, "api_lookup", api)
     with pytest.raises(ValueError):
         module.lookup_official_sha(tmp_path, "dev", 112.0, run, settings=module.NetworkSettings("http://proxy.example:7890"))
     assert sum(attempts) <= 12.001
@@ -237,12 +237,16 @@ def test_api_fallback_uses_only_official_verified_https(monkeypatch):
             return Response()
 
     monkeypatch.setattr(module.requests, "Session", Session)
-    assert module._api_sha("dev", 3, "http://proxy.example:7890") == SHA
+    assert module.lookup_official_sha(
+        None, "dev", time.monotonic() + 60,
+        lambda *a, **kw: (_ for _ in ()).throw(ValueError("offline")),
+        settings=module.NetworkSettings("http://proxy.example:7890"),
+    ) == SHA
 
 
 def test_socks_git_proxy_falls_back_to_direct_api_without_optional_dependency(tmp_path, monkeypatch):
     module = network()
-    monkeypatch.setattr(module, "_api_sha", lambda channel, timeout, proxy: SHA if proxy == "direct" else pytest.fail("SOCKS must not require requests optional extras"))
+    monkeypatch.setattr(module, "api_lookup", lambda channel, timeout, proxy: SHA if proxy == "direct" else pytest.fail("SOCKS must not require requests optional extras"))
     assert module.lookup_official_sha(tmp_path, "dev", time.monotonic() + 60,
                                      lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("offline")),
                                      settings=module.NetworkSettings("socks5h://127.0.0.1:7890")) == SHA

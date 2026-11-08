@@ -101,3 +101,13 @@ def test_forbidden_dependency_direction_is_rejected(tmp_path: Path, owner: str, 
     root = repository(tmp_path)
     write(root, f"src/{owner}/_internal/dependency.py", statement)
     assert any("依赖方向" in error for error in check(root))
+
+
+@pytest.mark.parametrize("old_path", [
+    "src/voice_agent/memory.py", "src/voice_agent/settings.py",
+    "src/voice_agent/backends/mimo_cascade.py", "src/webui/maintenance_worker.py",
+])
+def test_migrated_implementation_cannot_return_to_legacy_directory(tmp_path, old_path):
+    root = repository(tmp_path)
+    write(root, old_path)
+    assert any("已迁移" in error for error in check(root))

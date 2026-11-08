@@ -6,6 +6,8 @@ import wave
 import pytest
 from test_voice_operations import make_agent
 
+from dialogue.models import DialogueCapabilities
+
 
 def test_preview_is_independent_wav_and_releases_backend(tmp_path, monkeypatch):
     from voice_agent import preview
@@ -14,6 +16,8 @@ def test_preview_is_independent_wav_and_releases_backend(tmp_path, monkeypatch):
         agent = make_agent(tmp_path)
         calls = []
         class Backend:
+            def capabilities(self):
+                return DialogueCapabilities()
             async def rewrite_announcement(self, kind, text):
                 return "你好呀"
             async def tts(self, text):
@@ -21,7 +25,7 @@ def test_preview_is_independent_wav_and_releases_backend(tmp_path, monkeypatch):
                 return b"\x00\x20" * 240, 24000
             async def aclose(self):
                 calls.append("closed")
-        monkeypatch.setattr(preview, "create_backend", lambda settings, memory: Backend())
+        monkeypatch.setattr(preview, "create_backend", lambda settings, memory, **kwargs: Backend())
         result = await preview.PreviewService().generate(agent.settings, "enter", "打招呼", "测试音色")
         with wave.open(io.BytesIO(base64.b64decode(result["wav_base64"]))) as wav:
             assert wav.getframerate() == 24000
@@ -40,6 +44,8 @@ def test_live_preview_collects_temp_audio_and_text(tmp_path, monkeypatch):
         agent = make_agent(tmp_path)
         agent.settings.backend = "gemini_live"
         class Backend:
+            def capabilities(self):
+                return DialogueCapabilities(live=True)
             closed = False
             def set_audio_out(self, fn):
                 self.audio = fn
@@ -54,7 +60,7 @@ def test_live_preview_collects_temp_audio_and_text(tmp_path, monkeypatch):
             async def aclose(self):
                 self.closed = True
         backend = Backend()
-        monkeypatch.setattr(preview, "create_backend", lambda settings, memory: backend)
+        monkeypatch.setattr(preview, "create_backend", lambda settings, memory, **kwargs: backend)
         result = await preview.PreviewService().generate(agent.settings, "leave", "告别")
         assert result["text"] == "拜拜啦" and backend.closed
         assert not agent.memory.recent()
@@ -68,6 +74,8 @@ def test_preview_cancellation_closes_and_allows_retry(tmp_path, monkeypatch):
         agent = make_agent(tmp_path)
         started = asyncio.Event()
         class Backend:
+            def capabilities(self):
+                return DialogueCapabilities()
             closed = False
             async def tts(self, text):
                 started.set()
@@ -75,7 +83,7 @@ def test_preview_cancellation_closes_and_allows_retry(tmp_path, monkeypatch):
             async def aclose(self):
                 self.closed = True
         backend = Backend()
-        monkeypatch.setattr(preview, "create_backend", lambda settings, memory: backend)
+        monkeypatch.setattr(preview, "create_backend", lambda settings, memory, **kwargs: backend)
         service = preview.PreviewService()
         task = asyncio.create_task(service.generate(agent.settings, "voice", "你好"))
         await started.wait()
@@ -102,7 +110,7 @@ def test_local_diagnostics_do_not_touch_active_backend(tmp_path):
 
 
 def test_saved_preview_prompts_respect_area_overrides_and_silence():
-    from voice_agent.auto_visit_settings import parse_auto_visit_config
+    from behavior import parse_auto_visit_config
     from voice_agent.preview import saved_prompts
 
     config = parse_auto_visit_config({"defaults": {"enter_prompts": ["你好", "在玩什么？"]}, "areas": {"a": {"overrides": {"enter_prompts": ["自定义"]}}, "b": {"overrides": {"leave_prompts": []}}}})

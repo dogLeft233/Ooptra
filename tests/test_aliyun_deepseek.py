@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -11,27 +12,26 @@ from unittest.mock import AsyncMock
 import pytest
 from aiohttp import web
 from support.channel_fixtures import establish_room
+from support.dialogue_fixtures import aliyun_backend as AliyunDeepSeekBackend
 from test_voice_operations import make_agent
 
-from voice_agent import settings as settings_module
-from voice_agent.backends.aliyun_deepseek import AliyunDeepSeekBackend
-from voice_agent.backends.base import VoiceReply, VoiceStreamError, VoiceStreamInterrupted
+from dialogue.models import VoiceReply, VoiceStreamError, VoiceStreamInterrupted
+from operations import load_voice_agent_settings
+from operations.models import VoiceAgentSettings
 from voice_agent.preview import EphemeralMemory
-from voice_agent.settings import VoiceAgentSettings, load_voice_agent_settings
 
 
 def test_local_keys_do_not_expand_shell_or_override_process_env(tmp_path, monkeypatch):
     path = tmp_path / '.env.local'
     path.write_text('DASHSCOPE_API_KEY="local-${UNSET}"\nDEEPSEEK_API_KEY=local-deepseek\n')
-    monkeypatch.setattr(settings_module, 'project_path', lambda *args: str(path))
     monkeypatch.delenv('DASHSCOPE_API_KEY', raising=False)
     monkeypatch.setenv('DEEPSEEK_API_KEY', 'process-deepseek')
-    settings, _ = load_voice_agent_settings()
+    settings, _ = load_voice_agent_settings(local_environment_path=path)
     assert settings.dashscope_api_key == 'local-${UNSET}'
     assert settings.deepseek_api_key == 'process-deepseek'
     assert 'local-${UNSET}' not in repr(settings)
     assert 'process-deepseek' not in repr(settings)
-    assert 'DASHSCOPE_API_KEY' not in settings_module.os.environ
+    assert 'DASHSCOPE_API_KEY' not in os.environ
 
 
 @asynccontextmanager
@@ -172,7 +172,7 @@ def test_control_request_never_opens_tts():
                 b'\x01\x00' * 16000, sample_rate=16000,
                 user_key='member', channel_key='channel', on_audio=sink,
             )
-            assert reply.raw['voice_control'] == 'leave'
+            assert reply.control is not None and reply.control.leave
             assert len(state.chat_requests) == 1
             assert not state.text and not sink.called
 
@@ -297,5 +297,29 @@ def test_streaming_barge_in_ignores_silence_and_requires_hold_duration(tmp_path)
         await agent._on_remote_pcm('member', b'\x00\x20' * 1600, 16000)
         assert not agent._speaking
         agent.duplex.stop_tts.assert_awaited_once()
+
+    asyncio.run(run())
+
+
+def test_concurrent_generation_keeps_each_output_sink_separate():
+    async def run():
+        async with model_servers() as (backend, state):
+            outputs = [bytearray(), bytearray()]
+
+            async def generate(index):
+                async def sink(pcm, rate):
+                    assert rate == 24000
+                    outputs[index].extend(pcm)
+                    state.audio_seen.set()
+
+                return await backend.handle_utterance_stream(
+                    b'\x01\x00' * 16000, sample_rate=16000,
+                    user_key=f'member-{index}', channel_key='channel', on_audio=sink,
+                )
+
+            replies = await asyncio.wait_for(asyncio.gather(generate(0), generate(1)), 5)
+            assert all(outputs), "each request must receive its own audio"
+            assert [reply.pcm16 for reply in replies] == list(map(bytes, outputs))
+            assert [reply.user_key for reply in replies] == ['member-0', 'member-1']
 
     asyncio.run(run())

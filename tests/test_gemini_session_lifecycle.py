@@ -15,10 +15,9 @@ import json
 from typing import Any
 
 import pytest
+from support.dialogue_fixtures import gemini_backend as GeminiLiveBackend
 
-from voice_agent.backends import gemini_live as gemini_module
-from voice_agent.backends.gemini_live import GeminiLiveBackend
-from voice_agent.settings import VoiceAgentSettings
+from operations.models import VoiceAgentSettings
 
 # ----------------------------------------------------------------------
 # 假 WebSocket：能收能发，可以被「服务端」掐断
@@ -94,9 +93,9 @@ def opened(monkeypatch: pytest.MonkeyPatch) -> list[FakeLiveWs]:
         created.append(ws)
         return ws
 
-    import voice_agent.ws_transport as transport
+    from support import dialogue_fixtures as transport
 
-    monkeypatch.setattr(transport, "open_live_ws", fake_open)
+    monkeypatch.setattr(transport, "live_connector", fake_open)
     return created
 
 
@@ -193,7 +192,7 @@ def test_push_audio_does_not_silently_swallow_failure(
         await ws.drop()
         await _settle()
         # 直接对已死的会话灌音频：内部会尝试重连，无论成败都不能无声无息
-        with caplog.at_level("DEBUG", logger="voice_agent.backends.gemini_live"):
+        with caplog.at_level("DEBUG", logger="dialogue._internal.live.gemini_live"):
             await backend.push_audio(b"\x00\x01" * 160, 16000)
         # Audio frames schedule bounded background recovery rather than opening
         # another session inline and bypassing the retry budget.
@@ -245,8 +244,3 @@ def test_unknown_voice_falls_back_to_default(opened: list[FakeLiveWs]) -> None:
         await backend.aclose()
 
     asyncio.run(run())
-
-
-def test_module_exports_expected_backends() -> None:
-    assert gemini_module.GeminiLiveBackend.name == "gemini_live"
-    assert issubclass(gemini_module.OpenAiRealtimeBackend, GeminiLiveBackend)

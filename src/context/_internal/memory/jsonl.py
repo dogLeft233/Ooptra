@@ -7,19 +7,11 @@ import os
 import threading
 import time
 from collections import deque
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from typing import Any
 
+from context.models import ConfirmedTurn, MemoryTurn, RecordReceipt
 from core.paths import project_path
-
-
-@dataclass
-class MemoryTurn:
-    role: str  # user | assistant | system
-    content: str
-    user_key: str = ""
-    channel_key: str = ""
-    ts: float = 0.0
 
 
 class MemoryStore:
@@ -51,9 +43,29 @@ class MemoryStore:
             ts=time.time(),
         )
         line = json.dumps(asdict(turn), ensure_ascii=False)
-        with self._lock, open(self._path, "a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
+        self._append_lines(line + "\n")
         return asdict(turn)
+
+    def _append_lines(self, text: str) -> None:
+        with self._lock:
+            needs_separator = False
+            if os.path.exists(self._path) and os.path.getsize(self._path):
+                with open(self._path, "rb") as existing:
+                    existing.seek(-1, os.SEEK_END)
+                    needs_separator = existing.read(1) != b"\n"
+            with open(self._path, "a", encoding="utf-8") as fh:
+                fh.write(("\n" if needs_separator else "") + text)
+
+    def record(self, turn: ConfirmedTurn) -> RecordReceipt:
+        rows: list[MemoryTurn] = []
+        timestamp = time.time()
+        if turn.user_text.strip():
+            rows.append(MemoryTurn("user", turn.user_text, turn.user_key, turn.channel_key, timestamp))
+        if turn.confirmation == "completed":
+            rows.append(MemoryTurn("assistant", turn.reply_text, turn.user_key, turn.channel_key, timestamp))
+        if rows:
+            self._append_lines("".join(json.dumps(asdict(row), ensure_ascii=False) + "\n" for row in rows))
+        return RecordReceipt(bool(turn.user_text.strip()), turn.confirmation == "completed")
 
     def recent(self, *, user_key: str = "", limit: int | None = None) -> list[dict[str, Any]]:
         limit = self._max_turns if limit is None else max(1, int(limit))
@@ -66,9 +78,12 @@ class MemoryStore:
                 if not line:
                     continue
                 try:
-                    row = json.loads(line)
+                    parsed = MemoryTurn.parse(json.loads(line))
                 except json.JSONDecodeError:
                     continue
+                if parsed is None:
+                    continue
+                row = asdict(parsed)
                 if user_key and row.get("user_key") and row.get("user_key") != user_key:
                     continue
                 rows.append(row)
@@ -102,10 +117,12 @@ class MemoryStore:
                     if not line.strip():
                         continue
                     try:
-                        row = json.loads(line)
+                        parsed = MemoryTurn.parse(json.loads(line))
                     except json.JSONDecodeError:
                         continue
-                    if not user_key or row.get("user_key") == user_key:
+                    if parsed is None:
+                        continue
+                    if not user_key or parsed.user_key == user_key:
                         removed += 1
                         continue
                     kept.append(line if line.endswith("\n") else line + "\n")

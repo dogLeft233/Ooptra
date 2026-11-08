@@ -1,12 +1,13 @@
-"""级联的当前问题只应发送一次，记忆仍保存当前回合。"""
+"""级联的当前问题只应发送一次，生成读取历史但不提前提交本轮草稿。"""
 
 from __future__ import annotations
 
 import asyncio
 
-from voice_agent.backends.mimo_cascade import MimoCascadeBackend
-from voice_agent.memory import MemoryStore
-from voice_agent.settings import VoiceAgentSettings
+from support.dialogue_fixtures import mimo_backend as MimoCascadeBackend
+
+from context import create_memory as MemoryStore
+from operations.models import VoiceAgentSettings
 
 
 def test_current_question_is_not_duplicated_in_chat_request(monkeypatch, tmp_path):
@@ -50,12 +51,14 @@ def test_current_question_is_not_duplicated_in_chat_request(monkeypatch, tmp_pat
         monkeypatch.setattr(backend, "asr", asr)
         monkeypatch.setattr(backend, "tts", tts)
         monkeypatch.setattr(backend, "_http", http)
-        await backend.handle_utterance(b"\x01\x00" * 320, sample_rate=16000, user_key="oopz:u")
+        result = await backend.handle_utterance(b"\x01\x00" * 320, sample_rate=16000, user_key="oopz:u")
+        assert result.user_text == "current question"
+        assert result.text == "answer"
         assert [m["content"] for m in captured if m["role"] == "user"] == [
             "previous", "current question",
         ]
         assert [m["content"] for m in memory.as_messages(user_key="oopz:u")] == [
-            "previous", "previous reply", "current question", "answer",
+            "previous", "previous reply",
         ]
 
     asyncio.run(run())

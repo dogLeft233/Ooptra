@@ -14,13 +14,8 @@ from uuid import uuid4
 
 import aiohttp
 
-from voice_agent.backends.base import (
-    AudioSink,
-    VoiceReply,
-    VoiceStreamError,
-    VoiceStreamInterrupted,
-)
-from voice_agent.backends.mimo_cascade import (
+from behavior.models import VoiceControlDecision
+from dialogue._internal.cascade.mimo_cascade import (
     MimoCascadeBackend,
     clamp_reply,
     looks_like_reasoning_leak,
@@ -28,7 +23,13 @@ from voice_agent.backends.mimo_cascade import (
     sanitize_asr,
     sanitize_for_tts,
 )
-from voice_agent.voice_control import VoiceControlDecision
+from dialogue.models import (
+    AudioSink,
+    DialogueCapabilities,
+    VoiceReply,
+    VoiceStreamError,
+    VoiceStreamInterrupted,
+)
 
 
 async def sse_events(content) -> AsyncIterator[dict]:
@@ -69,8 +70,11 @@ def check_event(data: dict, task_id: str) -> str:
 class AliyunDeepSeekBackend(MimoCascadeBackend):
     name = "aliyun_deepseek"
 
-    def __init__(self, settings, memory) -> None:
-        super().__init__(settings, memory)
+    def capabilities(self) -> DialogueCapabilities:
+        return DialogueCapabilities(streaming_utterance=True)
+
+    def __init__(self, settings, memory, *, reply_policy) -> None:
+        super().__init__(settings, memory, reply_policy=reply_policy)
         self._audio_sink: AudioSink | None = None
         self._tts_task: asyncio.Task[bytes] | None = None
         self._texts: asyncio.Queue[str | None] | None = None
@@ -283,13 +287,14 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
         self, pcm16: bytes, *, sample_rate: int, user_key: str, channel_key: str,
         on_audio: AudioSink,
     ) -> VoiceReply:
-        self._audio_sink = on_audio
-        try:
-            return await self.handle_utterance(
-                pcm16, sample_rate=sample_rate, user_key=user_key, channel_key=channel_key,
-            )
-        finally:
-            await self._clear_stream()
+        async with self._generation_lock:
+            self._audio_sink = on_audio
+            try:
+                return await self._generate_utterance(
+                    pcm16, sample_rate=sample_rate, user_key=user_key, channel_key=channel_key,
+                )
+            finally:
+                await self._clear_stream()
 
     async def _clear_stream(self) -> None:
         task, self._tts_task = self._tts_task, None

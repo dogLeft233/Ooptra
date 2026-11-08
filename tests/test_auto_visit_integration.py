@@ -6,8 +6,8 @@ from types import SimpleNamespace
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from operations.models import VoiceAgentSettings, VoiceApiSettings
 from voice_agent.runtime import VoiceRuntime
-from voice_agent.settings import VoiceAgentSettings, VoiceApiSettings
 from webui.voice_routes import build_voice_routes
 
 

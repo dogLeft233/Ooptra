@@ -105,13 +105,14 @@ async def run() -> None:
         await stop_event.wait()
     finally:
         console.set_bootstrap_ready(False)
+        # 先拒绝新配置并收完已提交保存/热应用，再释放它们可能访问的业务资源。
+        await console.stop()
         if voice_runtime is not None:
             try:
                 await voice_runtime.stop()
             except Exception:
                 logger.exception("语音 Agent 停止失败")
         await controller.stop()
-        await console.stop()
     logger.info("桥接已停止。")
 
 

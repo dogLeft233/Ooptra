@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from webui import maintenance_worker as worker
+from tests.support.maintenance_harness import maintenance_worker as worker
 
 
 def git(root, *args):

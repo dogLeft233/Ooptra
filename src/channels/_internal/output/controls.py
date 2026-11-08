@@ -7,12 +7,11 @@ from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
-from voice_agent.settings import VoiceAgentSettings
-from voice_agent.voice_control import VolumeCommand
+from channels.api import OutputSettings
 
 
 class VoiceOutputControls:
-    def __init__(self, settings: VoiceAgentSettings, duplex: Callable[[], Any], joined: Callable[[], bool]):
+    def __init__(self, settings: OutputSettings, duplex: Callable[[], Any], joined: Callable[[], bool]):
         self.settings = settings
         self._duplex = duplex
         self._joined = joined
@@ -70,16 +69,11 @@ class VoiceOutputControls:
         async with self._lock:
             return await self._change(volume, muted)
 
-    async def command(self, command: VolumeCommand) -> dict[str, Any]:
+    async def adjust(self, target: Callable[[int], tuple[int | None, bool | None]]) -> dict[str, Any]:
+        """在音量锁内将相对策略解析为绝对目标，避免并发增量丢失。"""
         async with self._lock:
-            volume = self.settings.output_volume
-            if command.action == "increase":
-                return await self._change(min(100, volume + 10), None)
-            if command.action == "decrease":
-                return await self._change(max(10, volume - 10), None)
-            if command.action == "set":
-                return await self._change(command.value, None)
-            return await self._change(None, command.action == "mute")
+            volume, muted = target(self.settings.output_volume)
+            return await self._change(volume, muted)
 
     async def _change(self, volume: int | None, muted: bool | None) -> dict[str, Any]:
         if volume is None and muted is None:

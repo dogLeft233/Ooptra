@@ -10,14 +10,15 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
-from voice_agent.backends.mimo_cascade import (  # noqa: E402
+from channels import create_vad  # noqa: E402
+from channels.models import VadvConfig  # noqa: E402
+from context import create_memory as MemoryStore  # noqa: E402
+from dialogue import (  # noqa: E402  # noqa: E402
     pcm16_to_wav,
     resample_pcm16,
     wav_to_pcm16,
 )
-from voice_agent.memory import MemoryStore  # noqa: E402
-from voice_agent.settings import load_voice_agent_settings, resolve_agent_proxy_url  # noqa: E402
-from voice_agent.vad import EnergyVad, VadvConfig  # noqa: E402
+from operations import load_voice_agent_settings, resolve_agent_proxy_url  # noqa: E402
 
 
 def test_settings_defaults() -> None:
@@ -86,7 +87,7 @@ def test_memory_clear_one_user_keeps_the_others() -> None:
 
 
 def test_vad_silence_and_speech() -> None:
-    vad = EnergyVad(VadvConfig(sample_rate=16000, silence_ms=120, energy_threshold=0.02))
+    vad = create_vad(VadvConfig(sample_rate=16000, silence_ms=120, energy_threshold=0.02))
     # 500ms 静音
     silence = struct.pack("<" + "h" * 800, *([0] * 800))
     assert vad.feed(silence) is None

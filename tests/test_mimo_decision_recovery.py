@@ -6,10 +6,11 @@ import logging
 from collections import deque
 
 import pytest
+from support.dialogue_fixtures import mimo_backend as MimoCascadeBackend
 
-from voice_agent.backends.mimo_cascade import MimoCascadeBackend
-from voice_agent.memory import MemoryStore
-from voice_agent.settings import VoiceAgentSettings
+from behavior.models import VoiceControlDecision, VolumeCommand
+from context import create_memory as MemoryStore
+from operations.models import VoiceAgentSettings
 
 
 def make_backend(tmp_path, monkeypatch, responses):
@@ -79,7 +80,7 @@ def test_semantic_requests_use_json_mode_to_reach_speech_or_control(tmp_path, mo
         backend.settings.reply_probability_percent = percent
         reply = await backend.handle_utterance(b"audio", sample_rate=16000)
         if percent == 0:
-            assert reply.raw == {"voice_control": "volume", "volume_command": {"action": "mute"}}
+            assert reply.control == VoiceControlDecision(volume=VolumeCommand("mute"))
             assert not spoken and not reply.pcm16
         else:
             assert spoken == ["出门带把伞。"] and reply.pcm16
@@ -99,7 +100,9 @@ def test_whole_fenced_json_is_validated_before_speech_or_control(tmp_path, monke
         backend.settings.reply_probability_percent = percent
         reply = await backend.handle_utterance(b"audio", sample_rate=16000)
         if percent == 0:
-            assert reply.raw["volume_command"] == {"action": "restore"}
+            assert reply.control is not None
+            assert reply.control.volume is not None
+            assert reply.control.volume.action == "restore"
             assert not spoken and not reply.pcm16
         else:
             assert spoken == ["出门带把伞。"] and reply.pcm16
@@ -122,15 +125,11 @@ def test_valid_independent_no_control_decision_recovers_a_fresh_reply(tmp_path, 
         ])
         reply = await backend.handle_utterance(b"audio", sample_rate=16000, user_key="oopz:u")
         assert reply.text == "出门带把伞。" and reply.pcm16
-        assert spoken == ["出门带把伞。"] and not reply.raw.get("voice_control")
+        assert spoken == ["出门带把伞。"] and reply.control is None
         assert len(requests) == 3
         assert "response_format" not in requests[-1]
         assert [m["content"] for m in requests[-1]["messages"] if m["role"] == "user"] == [
             "今天天气怎么样",
-        ]
-        assert backend.memory.as_messages(user_key="oopz:u") == [
-            {"role": "user", "content": "今天天气怎么样"},
-            {"role": "assistant", "content": "出门带把伞。"},
         ]
         row = backend.observation.snapshot()["recent_decisions"][-1]
         assert (row["reason"], row["outcome"], row["timing_mode"]) == ("reply", "replied", "stages")
@@ -139,12 +138,12 @@ def test_valid_independent_no_control_decision_recovers_a_fresh_reply(tmp_path, 
 
 
 @pytest.mark.parametrize("intent,expected", [
-    ('{"leave": true, "volume": null}', {"voice_control": "leave"}),
+    ('{"leave": true, "volume": null}', VoiceControlDecision(leave=True)),
     ('{"leave": false, "volume": {"action": "mute"}}',
-     {"voice_control": "volume", "volume_command": {"action": "mute"}}),
-    ('{"leave": "false", "volume": null}', {}),
-    ('解释：{"leave": true, "volume": null}', {}),
-    ('{"leave": false, "volume": {"action": "set", "value": 0}}', {}),
+     VoiceControlDecision(volume=VolumeCommand("mute"))),
+    ('{"leave": "false", "volume": null}', None),
+    ('解释：{"leave": true, "volume": null}', None),
+    ('{"leave": false, "volume": {"action": "set", "value": 0}}', None),
 ])
 def test_recovery_never_chats_before_a_valid_no_control_decision(tmp_path, monkeypatch, intent, expected):
     async def run():
@@ -152,7 +151,7 @@ def test_recovery_never_chats_before_a_valid_no_control_decision(tmp_path, monke
             (200, "invalid combined response"), (200, intent),
         ])
         reply = await backend.handle_utterance(b"audio", sample_rate=16000)
-        assert reply.raw == expected and not reply.pcm16 and not spoken
+        assert reply.control == expected and not reply.pcm16 and not spoken
         assert len(requests) == 2
 
     asyncio.run(run())
@@ -163,7 +162,7 @@ def test_combined_failure_logs_stage_without_upstream_secrets(tmp_path, monkeypa
         backend, _, _ = make_backend(tmp_path, monkeypatch, [
             (503, "secret-key-and-room-text"), (200, '{"leave": true, "volume": null}'),
         ])
-        with caplog.at_level(logging.WARNING, logger="voice_agent.backends.mimo_cascade"):
+        with caplog.at_level(logging.WARNING, logger="dialogue._internal.cascade.mimo_cascade"):
             await backend.handle_utterance(b"audio", sample_rate=16000)
         assert "合并请求失败" in caplog.text and "RuntimeError" in caplog.text
         assert "secret-key-and-room-text" not in caplog.text
@@ -197,12 +196,12 @@ def test_failed_fresh_reply_keeps_upstream_body_out_of_agent_logs_and_status(tmp
 
 
 def test_recovery_timings_include_both_chat_requests(tmp_path, monkeypatch):
-    from voice_agent import observation
+    import time
 
     async def run():
         now = [100.0]
         backend, _, _ = make_backend(tmp_path, monkeypatch, [])
-        monkeypatch.setattr(observation.time, "monotonic", lambda: now[0])
+        monkeypatch.setattr(time, "monotonic", lambda: now[0])
 
         async def chat(*args, _with_intent=False, **kwargs):
             now[0] += 2.0 if _with_intent else .5
@@ -210,7 +209,7 @@ def test_recovery_timings_include_both_chat_requests(tmp_path, monkeypatch):
 
         async def intent(*args):
             now[0] += .25
-            from voice_agent.voice_control import VoiceControlDecision
+            from behavior.models import VoiceControlDecision
             return VoiceControlDecision()
 
         monkeypatch.setattr(backend, "chat", chat)

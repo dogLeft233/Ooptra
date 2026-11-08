@@ -5,9 +5,8 @@ import asyncio
 import pytest
 from test_voice_operations import make_agent
 
+from behavior.models import VoiceControlDecision
 from voice_agent import diagnostics
-from voice_agent.backends.mimo_cascade import MimoCascadeBackend
-from voice_agent.voice_control import VoiceControlDecision
 
 
 @pytest.mark.parametrize("backend", [" MIMO ", " MiMo_Cascade ", " CASCADE_MIMO "])
@@ -15,7 +14,14 @@ def test_network_diagnostics_accept_normalized_mimo_aliases(tmp_path, monkeypatc
     async def classify(self, text):
         return VoiceControlDecision()
 
-    monkeypatch.setattr(MimoCascadeBackend, "detect_control_intent", classify)
+    original_factory = diagnostics.create_backend
+
+    def create(*args, **kwargs):
+        backend = original_factory(*args, **kwargs)
+        backend.detect_control_intent = lambda text: classify(backend, text)
+        return backend
+
+    monkeypatch.setattr(diagnostics, "create_backend", create)
     agent = make_agent(tmp_path)
     agent.settings.backend = backend
     agent.settings.mimo_api_key = "diagnostic-test"

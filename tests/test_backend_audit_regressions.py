@@ -5,10 +5,10 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from context import create_memory as MemoryStore
 from core.proxy_utils import resolve_proxy_settings
-from voice_agent.memory import MemoryStore
+from operations import patch_config_text, restored_endpoint
 from webui import config_editor as editor
-from webui.maintenance_storage import restored_endpoint
 from webui.voice_routes import build_voice_routes
 
 
@@ -83,13 +83,13 @@ def test_config_references_rejected_without_execution(tmp_path, monkeypatch):
 def test_unrelated_dynamic_group_does_not_block_safe_target():
     source = "if True:\n    WEBUI_CONFIG = {}\nOOPZ_CONFIG = {'jwt_token': 'keep'}\n"
     namespace = {}
-    exec(editor._patched_text(source, {'oopz': {'proxy': 'direct'}}), namespace)
+    exec(patch_config_text(source, {'oopz': {'proxy': 'direct'}}, sources=editor.GROUP_SOURCES, filename=editor.CONFIG_PATH), namespace)
     assert namespace['OOPZ_CONFIG'] == {'jwt_token': 'keep', 'proxy': 'direct'}
 
 
 @pytest.mark.parametrize('source', ["OOPZ_CONFIG: dict = {'keep': 1}\n", "OTHER = {}\n"])
 def test_annotated_or_missing_config_group_preserves_fields(source):
-    patched = editor._patched_text(source, {'oopz': {'proxy': 'direct'}})
+    patched = patch_config_text(source, {'oopz': {'proxy': 'direct'}}, sources=editor.GROUP_SOURCES, filename=editor.CONFIG_PATH)
     namespace = {}
     exec(patched, namespace)
     assert namespace['OOPZ_CONFIG']['proxy'] == 'direct'

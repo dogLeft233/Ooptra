@@ -2,18 +2,8 @@
 
 from __future__ import annotations
 
-import struct
-from dataclasses import dataclass
-
-
-@dataclass
-class VadvConfig:
-    sample_rate: int = 16000
-    frame_ms: int = 30
-    # 与 VoiceAgentSettings.silence_ms 保持一致：700ms 对中文偏短，会把一句话切碎。
-    silence_ms: int = 1200
-    max_utterance_ms: int = 15000
-    energy_threshold: float = 0.012  # 归一化 RMS 阈值，可按环境调
+from channels.models import VadvConfig
+from core.audio import pcm16_rms
 
 
 class EnergyVad:
@@ -33,20 +23,6 @@ class EnergyVad:
         self._speaking = False
         self._silence_ms = 0
         self._utterance_ms = 0
-
-    @staticmethod
-    def _rms(pcm16: bytes) -> float:
-        if len(pcm16) < 2:
-            return 0.0
-        count = len(pcm16) // 2
-        samples = struct.unpack("<" + "h" * count, pcm16[: count * 2])
-        if not samples:
-            return 0.0
-        acc = 0.0
-        for s in samples:
-            v = s / 32768.0
-            acc += v * v
-        return (acc / count) ** 0.5
 
     def feed(self, pcm16: bytes) -> bytes | None:
         """喂入 PCM16 小段；若一句结束则返回这一句的 PCM，否则 None。
@@ -71,7 +47,7 @@ class EnergyVad:
         while len(self._buffer) >= frame_bytes:
             frame = bytes(self._buffer[:frame_bytes])
             del self._buffer[:frame_bytes]
-            rms = self._rms(frame)
+            rms = pcm16_rms(frame)
             active = rms >= self.config.energy_threshold
 
             if not self._speaking:
