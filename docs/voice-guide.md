@@ -79,20 +79,33 @@ DEEPSEEK_API_KEY=你的DeepSeek密钥
 在「配置 → 语音模型」选择「阿里语音 + DeepSeek（流式级联）」并开启语音，默认使用：
 
 - ASR：`qwen-audio-3.1-asr-flash-message`，16 kHz 单声道 PCM；
-- LLM：`deepseek-flash`，非思考模式；
+- LLM：`deepseek-flash`，low 思考模式；
 - TTS：`qwen-audio-3.1-tts-flash`，音色 `longanhuan_v3.1`，PCM 输出。
 
 阿里接口可设置为对应业务空间的北京地域专属 WebSocket 地址；默认公共北京地址。
 模型权限、地域与额度需与密钥匹配。先在「自检与试听」验证，再进入语音房。
 
-输入仍由本地 VAD 按成员切句，完成一句后通过 WebSocket 发送给 ASR，**尚未持续流式识别**。
+输入由渠道按成员授权和 VAD 切句；达到最小音频窗口后，行为先扣一次尝试额度，
+随即建立 ASR WebSocket 并持续发送本句增量（包括断句静音），不等待整句完成才上传。
+启用 `intermediate_result_enabled=true`，临时转录按句 ID 覆盖；本地切句结束并收到
+服务端最终转录后才交决策和记忆，临时转录不会触发回复、控制或持久写入。
+仍保留本地 `silence_ms` 的停顿确认等待；本轮没有缩短它，也未向 WebUI 增加临时字幕。
+DeepSeek 请求显式使用 `thinking={"type":"enabled"}`、`reasoning_effort="low"`。
+只把正式回答 `content` 送入语音，`reasoning_content` 不进入 TTS、字幕、日志或权威历史；
+正式回答出现思考标签或只返回推理而无正文时失败关闭，不猜测正文。
 正常回复通过 DeepSeek SSE 按完整句送入双向流式 TTS，音频到达后即推送房间，
 不等待整轮合成结束。控制意图先单独验证，控制 JSON 不进入 TTS。
 若启用 AstrBot 记忆工具，涉及工具的 LLM 结果先完整处理，再流式输出 TTS 音频。
 抢话达到配置门限后会取消当前生成并清空播放；退房、换房与停用会回收在途任务。
 手动「直接朗读」、独立试听及进退房台词仍使用完整短音频返回。
 
-参考：[ASR WebSocket](https://help.aliyun.com/zh/model-studio/qwen-asr-message-websocket-api)、
+识别流最多 64 帧、每帧 64 KiB、总音频 60 秒；应用最多 8 份识别租约。
+采集断点、格式/采样变化、退房、切后端及超时关闭原流。被最新输入信箱替换的识别在
+冷却加四秒后关闭，不写入上下文；已开始识别的失败/短句不退还尝试额度。
+诊断 `asr` 包含与说话重叠的识别总时间，`asr_finalize` 表示输入结束后的收尾时间，
+两者不是可相加的阶段，也都不是端到端首音延迟。
+
+参考：[DeepSeek 思考模式](https://api-docs.deepseek.com/guides/thinking_mode/)、[ASR WebSocket](https://help.aliyun.com/zh/model-studio/qwen-asr-message-websocket-api)、
 [TTS WebSocket](https://help.aliyun.com/zh/model-studio/qwen-audio-tts-websocket-api)、
 [DeepSeek Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/)。
 

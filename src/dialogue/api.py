@@ -29,6 +29,7 @@ from dialogue.models import (
     Reject,
     ResolveReceipt,
     ToolRef,
+    TranscriptRevision,
 )
 
 
@@ -177,6 +178,20 @@ class PreviewService(Protocol):
     async def generate(self, settings: DialogueSettings, kind: str, text: str, voice: str = "") -> dict: ...
 
 
+class RecognitionStream(Protocol):
+    """单许可单拥有者；固定原会话/说话者/采样率。feed为非阻塞有界输入。
+
+    最多64帧，每帧64KiB、总音频60秒；溢出使流失败，禁止拼接丢帧。
+    finish_input幂等结束上传；result只交付最终文本，临时文本按句ID替换。
+    取消result等待不撤销流，拥有者必须aclose；绝对期限取自原尝试许可。
+    """
+    def feed(self, pcm16: bytes) -> None: ...
+    def finish_input(self) -> None: ...
+    def partial(self) -> tuple[TranscriptRevision, ...]: ...
+    async def result(self) -> Recognition: ...
+    async def aclose(self) -> None: ...
+
+
 class VoiceBackend:
     """语音大脑：输入一段 utterance PCM，输出文字 + 回话 PCM。"""
 
@@ -190,6 +205,10 @@ class VoiceBackend:
     async def tts(self, text: str) -> tuple[bytes, int]:
         """级联的固定文字合成；Live 不承诺逐字合成，应使用其表达能力。"""
         raise NotImplementedError("Fixed speech is unsupported by this backend")
+
+    def open_recognition(self, input: AudioInput, permit: AttemptPermit) -> RecognitionStream:
+        """开始受许可流式识别；input须为空音频头，不支持时明确失败。"""
+        raise NotImplementedError("Streaming recognition is unsupported")
 
     async def recognize(self, input: AudioInput, permit: AttemptPermit) -> Recognition:
         """级联识别能力；Live 不支持逐输入识别。"""

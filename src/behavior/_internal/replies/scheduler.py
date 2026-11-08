@@ -26,10 +26,10 @@ class LatestReplies:
         self._deadline = 0.0
         self._wake.set()
 
-    def offer(self, user_key: str, pcm: bytes, sample_rate: int) -> None:
+    def offer(self, user_key: str, pcm: bytes, sample_rate: int, *, input_ref: str = "") -> None:
         self._sequence += 1
         self._pending = ScheduledReply(user_key, pcm, sample_rate, self._clock(),
-                                       self._generation, self._sequence)
+                                       self._generation, self._sequence, input_ref)
         self._wake.set()
 
     async def next(self, cooldown: float) -> ScheduledReply:

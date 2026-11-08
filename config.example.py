@@ -192,7 +192,7 @@ VOICE_AGENT_CONFIG = {
         "tts_model": "qwen-audio-3.1-tts-flash",
         "tts_voice": "longanhuan_v3.1",
         "llm_base_url": "https://api.deepseek.com",
-        "llm_model": "deepseek-flash",
+        "llm_model": "deepseek-flash",  # 适配器显式开启 low 思考，仅播正式 content。
     },
     "gemini": {
         "api_key": "",                # 或 GEMINI_API_KEY

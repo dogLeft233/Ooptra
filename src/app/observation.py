@@ -16,7 +16,7 @@ class FlowObservations:
         self._rows.append(dict(timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             trigger_id=trigger_id, session_id=session_id, backend=backend, reason=reason,
             outcome=outcome, elapsed_ms=round(max(0, elapsed_ms), 1), timing_mode=timing_mode,
-            timings_ms={stage:timings.get(stage) for stage in ("asr", "intent", "chat", "tts", "generation_total")}))
+            timings_ms={stage:timings.get(stage) for stage in ("asr", "asr_finalize", "intent", "chat", "tts", "generation_total")}))
 
     def snapshot(self):
         return {"recent_decisions": copy.deepcopy(list(self._rows)), "limit": self._rows.maxlen}

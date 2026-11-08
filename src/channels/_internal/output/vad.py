@@ -9,6 +9,7 @@ from core.audio import pcm16_rms
 class EnergyVad:
     def __init__(self, config: VadvConfig | None = None) -> None:
         self.config = config or VadvConfig()
+        self.stream_pcm16 = b""
         self._buffer = bytearray()
         self._utterance = bytearray()
         self._voiced_end = 0
@@ -41,6 +42,8 @@ class EnergyVad:
         是 ~30ms 的静音（对话式 ASR 不会返回空，会照着编一句，表现为「识别
         不准」和「没人说话也接话」）。见 tests/test_vad.py。
         """
+        self.stream_pcm16 = b""
+        streamed = bytearray()
         if not pcm16:
             return None
         self._buffer.extend(pcm16)
@@ -61,6 +64,7 @@ class EnergyVad:
                 self._silence_ms = 0
                 self._utterance_ms = 0
 
+            streamed.extend(frame)
             self._utterance.extend(frame)
             self._utterance_ms += self.config.frame_ms
             if active:
@@ -75,5 +79,7 @@ class EnergyVad:
             ):
                 utt = bytes(self._utterance[: self._voiced_end])
                 self.reset()
+                self.stream_pcm16 = bytes(streamed)
                 return utt or None
+        self.stream_pcm16 = bytes(streamed)
         return None

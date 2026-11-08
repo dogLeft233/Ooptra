@@ -75,10 +75,11 @@ def test_local_keys_do_not_expand_shell_or_override_process_env(tmp_path, monkey
 
 
 @asynccontextmanager
-async def model_servers(*, fail_asr=False, truncate=False, control=False):
+async def model_servers(*, fail_asr=False, truncate=False, control=False, invalid_answer="", incomplete_asr=False):
     state = SimpleNamespace(
         text=[], chat_requests=[], audio_seen=asyncio.Event(), llm_finished=False,
         open_sockets=0, asr_bytes=bytearray(), sockets_idle=asyncio.Event(),
+        first_input=asyncio.Event(), asr_parameters=None,
     )
 
     async def websocket(request):
@@ -96,6 +97,8 @@ async def model_servers(*, fail_asr=False, truncate=False, control=False):
                 await ws.send_json({'header': {'event': name, 'task_id': task, **header},
                                     'payload': payload or {}})
 
+            if kind == 'asr':
+                state.asr_parameters = run['payload']['parameters']
             if kind == 'asr' and fail_asr:
                 await event('task-failed', error_code='InvalidParameter')
                 return ws
@@ -103,6 +106,9 @@ async def model_servers(*, fail_asr=False, truncate=False, control=False):
             async for message in ws:
                 if message.type == web.WSMsgType.BINARY:
                     state.asr_bytes.extend(message.data)
+                    await event('result-generated', {'output': {'sentence': {
+                        'sentence_id': 1, 'text': '临时识别', 'sentence_end': False}}})
+                    state.first_input.set()
                     continue
                 if message.type != web.WSMsgType.TEXT:
                     break
@@ -118,7 +124,7 @@ async def model_servers(*, fail_asr=False, truncate=False, control=False):
                         await event('result-generated', {'output': {'sentence': {
                             'sentence_id': 1, 'text': '错误的中间结果', 'sentence_end': False}}})
                         await event('result-generated', {'output': {'sentence': {
-                            'sentence_id': 1, 'text': '你好', 'sentence_end': True}}})
+                            'sentence_id': 1, 'text': '你好', 'sentence_end': not incomplete_asr}}})
                         await event('result-generated', {'output': {'sentence': {
                             'sentence_id': 0, 'text': 'heartbeat', 'sentence_end': True,
                             'heartbeat': True}}})
@@ -135,7 +141,8 @@ async def model_servers(*, fail_asr=False, truncate=False, control=False):
         body = await request.json()
         state.chat_requests.append(body)
         assert body['model'] == 'deepseek-flash'
-        assert body['thinking'] == {'type': 'disabled'}
+        assert body['thinking'] == {'type': 'enabled'}
+        assert body['reasoning_effort'] == 'low'
         if body.get('response_format'):
             value = {'leave': control, 'volume': None}
             return web.json_response({'choices': [{'message': {'content': json.dumps(value)}}]})
@@ -149,6 +156,14 @@ async def model_servers(*, fail_asr=False, truncate=False, control=False):
             for cut in (record[:23], record[23:25], record[25:]):
                 await response.write(cut)
 
+        await response.write(('data: '+json.dumps({'choices':[{'delta':{'reasoning_content':'秘密推理，不得播报。'},'finish_reason':None}]},ensure_ascii=False)+'\n\n').encode())
+        if invalid_answer:
+            if invalid_answer == 'markup':
+                await delta('<thi')
+                await delta('nk>秘密思考。</think>')
+            await delta('', 'stop')
+            await response.write(b'data: [DONE]\n\n')
+            return response
         await delta('**你好**。')
         # The LLM cannot finish until the client has played its first PCM.
         await asyncio.wait_for(state.audio_seen.wait(), 3)
@@ -394,4 +409,155 @@ def test_concurrent_generation_keeps_each_output_sink_separate():
             assert [reply.pcm16 for reply in replies] == list(map(bytes, outputs))
             assert [reply.user_key for reply in replies] == ['member-0', 'member-1']
 
+    asyncio.run(run())
+
+
+def test_streaming_recognition_uploads_before_end_and_only_final_text_is_authoritative():
+    async def run():
+        import time
+
+        from behavior.models import AttemptPermit
+        from channels.models import RoomTarget, SessionRef
+        from dialogue.models import AudioInput
+        async with model_servers() as (backend, state):
+            session = SessionRef("process", "binding", "session", RoomTarget("a", "c"))
+            permit = AttemptPermit(session, 1, "input", time.monotonic()+5)
+            stream = backend.open_recognition(AudioInput("input", session, b"", 16000,
+                                                         "peer", permit.attempt_id), permit)
+            try:
+                stream.feed(b"\x00\x20" * 1600)
+                await asyncio.wait_for(state.first_input.wait(), 1)
+                assert state.asr_parameters['intermediate_result_enabled'] is True
+                # Wait for the real receiver to expose the revision, without ending the audio.
+                async def partial():
+                    while not stream.partial():
+                        await asyncio.sleep(0)
+                await asyncio.wait_for(partial(), 1)
+                assert stream.partial()[0].text == "临时识别"
+                assert not stream.partial()[0].final
+                stream.feed(b"\x00\x20" * 1600)
+                stream.finish_input()
+                result = await stream.result()
+                assert result.status == "recognized" and result.text == "你好"
+                assert len(state.asr_bytes) == 6400
+                assert not state.chat_requests and not state.text
+            finally:
+                await stream.aclose()
+            await asyncio.wait_for(state.sockets_idle.wait(), 1)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('end', ['reply', 'leave', 'gap'])
+def test_room_capture_streams_before_cut_and_releases_original_attempt(tmp_path, end):
+    async def run():
+        async with model_servers() as (backend, state):
+            agent = make_agent(tmp_path)
+            await agent.backend.aclose()
+            agent.backend = backend
+            agent.settings.min_utterance_ms = 60
+            agent.settings.silence_ms = 60
+            agent.settings.cascade_turn_limit = 1
+            await agent.join('a', 'c')
+            pushed = asyncio.Event()
+            async def push(pcm, rate, **kwargs):
+                if pcm:
+                    state.audio_seen.set()
+                    pushed.set()
+                return {'ok': True}
+            agent.duplex.push_tts_pcm = push
+            try:
+                await agent._on_remote_pcm('member', b'\x00\x20' * 960, 16000)
+                await asyncio.wait_for(state.first_input.wait(), 1)
+                assert agent.status()['cascade_attempts'] == 1
+                assert not state.chat_requests
+                if end == 'leave':
+                    await agent.leave()
+                elif end == 'gap':
+                    # Invalid PCM resets both the channel window and in-flight recognition.
+                    await agent._on_remote_pcm('member', b'odd', 16000)
+                    await agent.leave()
+                else:
+                    # Even though the limit is now exhausted, the admitted utterance may finish.
+                    await agent._on_remote_pcm('member', bytes(1920), 16000)
+                    await asyncio.wait_for(pushed.wait(), 1)
+                    async def completed():
+                        while agent.last_reply != '你好。再见。':
+                            await asyncio.sleep(0)
+                    await asyncio.wait_for(completed(), 1)
+                    assert agent.memory.as_messages(user_key='oopz:member') == [
+                        {'role':'user', 'content':'你好'},
+                        {'role':'assistant', 'content':'你好。再见。'}]
+                    assert state.text == ['你好。', '再见。']
+                    assert agent.status()['cascade_attempts'] == 1
+                    await agent.leave()
+                await asyncio.wait_for(state.sockets_idle.wait(), 1)
+                assert state.open_sockets == 0
+                if end != 'reply':
+                    assert not state.chat_requests and not agent.memory.as_messages()
+            finally:
+                await agent.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('invalid_answer', ['markup', 'reasoning_only'])
+def test_reasoning_without_a_valid_formal_answer_produces_no_speech(invalid_answer):
+    async def run():
+        async with model_servers(invalid_answer=invalid_answer) as (backend, state):
+            with pytest.raises(OutputSourceError):
+                await run_expression_protocol(backend, b"\x00\x20" * 1600, sample_rate=16000,
+                    user_key='peer', channel_key='a/c', on_audio=AsyncMock())
+            assert state.text == []
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('shutdown', ['owner', 'backend', 'overflow'])
+def test_streaming_recognition_shutdown_closes_active_socket(shutdown):
+    async def run():
+        import time
+
+        from behavior.models import AttemptPermit
+        from channels.models import RoomTarget, SessionRef
+        from dialogue.models import AudioInput
+
+        async with model_servers() as (backend, state):
+            session = SessionRef('p', 'b', 's', RoomTarget('a', 'c'))
+            permit = AttemptPermit(session, 1, 'input', time.monotonic()+5)
+            stream = backend.open_recognition(AudioInput('input', session, b'', 16000,
+                                                         'peer', permit.attempt_id), permit)
+            stream.feed(b'\x00\x20' * 1600)
+            await asyncio.wait_for(state.first_input.wait(), 1)
+            if shutdown == 'backend':
+                await backend.aclose()
+            else:
+                if shutdown == 'overflow':
+                    with pytest.raises(ValueError, match='溢出'):
+                        for _ in range(65):
+                            stream.feed(b'\x00\x20' * 160)
+                await stream.aclose()
+            await asyncio.wait_for(state.sockets_idle.wait(), 1)
+            assert state.open_sockets == 0 and not state.chat_requests
+    asyncio.run(run())
+
+
+def test_streaming_asr_missing_final_result_cannot_become_a_recognized_input():
+    async def run():
+        import time
+
+        from behavior.models import AttemptPermit
+        from channels.models import RoomTarget, SessionRef
+        from dialogue.models import AudioInput
+
+        async with model_servers(incomplete_asr=True) as (backend, state):
+            session = SessionRef('p', 'b', 's', RoomTarget('a', 'c'))
+            permit = AttemptPermit(session, 1, 'input', time.monotonic()+5)
+            stream = backend.open_recognition(AudioInput('input', session, b'', 16000,
+                                                         'peer', permit.attempt_id), permit)
+            try:
+                stream.feed(b"\x00\x20" * 1600)
+                stream.finish_input()
+                result = await stream.result()
+                assert result.status == 'failed' and result.text == ''
+                assert not state.chat_requests and not state.text
+            finally:
+                await stream.aclose()
     asyncio.run(run())

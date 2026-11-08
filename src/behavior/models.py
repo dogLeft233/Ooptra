@@ -200,6 +200,7 @@ class ScheduledReply:
     offered_at: float
     generation: int
     sequence: int
+    input_ref: str = ""
 
 
 @dataclass(frozen=True)

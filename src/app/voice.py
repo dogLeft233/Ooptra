@@ -19,6 +19,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from app.live import LiveFlow
+from app.recognition import RecognitionInputs
 from behavior import (
     create_barge_in_gate,
     create_behavior,
@@ -146,7 +147,7 @@ class VoiceCoordinator:
         self.api_settings = api_settings
         self._binding = create_voice_binding(bot, on_audio=self._on_remote_pcm,
                                               controls=lambda:self.output_controls,
-                                              on_gap=lambda _uid:self.ingress.reset())
+                                              on_gap=lambda _uid:self._input_gap())
         self.context_service = create_context_service(
             settings.memory_path, max_turns=settings.memory_max_turns,
             outbox_path=Path(settings.memory_path).with_name("astrbot_voice_outbox.json"))
@@ -231,6 +232,7 @@ class VoiceCoordinator:
         self._voice_suspended = False
         self._reply_generating = False
         self._reply_tasks: set[asyncio.Task] = set()
+        self.recognition_inputs = RecognitionInputs(self)
         self._announcement_task: asyncio.Task | None = None
         self._announcement_cancel_requests: set[asyncio.Task] = set()
         self._announcement_active = False
@@ -769,6 +771,7 @@ class VoiceCoordinator:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
         self.reply_scheduler.reset()
+        await self.recognition_inputs.reset()
 
     async def leave(self, *, source: str = "manual", expected_visit_id: str | None = None,
                     expected_operation_epoch: int | None = None, action_id: str | None = None,
@@ -965,12 +968,15 @@ class VoiceCoordinator:
                 or getattr(self, "_announcement_active", False) or getattr(self, "_retiring_visit_id", "")
                 or not getattr(self, "_connection_ready", True) or getattr(self, "_voice_suspended", False)):
             return
-        if self._cascade_limit_reached():
+        if self._cascade_limit_reached() and not self.backend.capabilities().streaming_recognition:
             return
         if not self.settings.enabled or not pcm:
             return
+        generation = self.ingress.generation
         self.ingress.configure(self._input_policy())
         audio = self.ingress.accept(uid, pcm, sample_rate)
+        if self.ingress.generation != generation:
+            self.recognition_inputs.invalidate()
         if audio is None:
             return
         uid, pcm, sample_rate = audio.user_key, audio.pcm16, audio.sample_rate
@@ -992,8 +998,16 @@ class VoiceCoordinator:
                      or self._barge_in_reached(uid, pcm, sample_rate))):
             await self._interrupt_speaking()
         result = self.ingress.cut(audio)
-        if result.status == "ready":
+        if self.backend.capabilities().streaming_recognition:
+            key = await self.recognition_inputs.feed(audio, result)
+            if key:
+                self.reply_scheduler.offer(uid, result.pcm16, sample_rate, input_ref=key)
+        elif result.status == "ready":
             self._offer_utterance(uid, result.pcm16, sample_rate)
+
+    def _input_gap(self) -> None:
+        self.ingress.reset()
+        self.recognition_inputs.invalidate()
 
     def _offer_utterance(self, uid: str, pcm: bytes, sample_rate: int) -> None:
         self.reply_scheduler.offer(uid, pcm, sample_rate)
@@ -1011,9 +1025,17 @@ class VoiceCoordinator:
 
     async def _run_selected_reply(self, item: ScheduledReply) -> None:
         self._barged_in = False
+        recognition = self.recognition_inputs.take(item.input_ref) if item.input_ref else None
         try:
-            await self._handle_utterance(item.user_key, item.pcm, item.sample_rate)
+            if item.input_ref:
+                if recognition is None:
+                    return
+                await self._handle_utterance(item.user_key, item.pcm, item.sample_rate, recognition=recognition)
+            else:
+                await self._handle_utterance(item.user_key, item.pcm, item.sample_rate)
         finally:
+            if recognition is not None:
+                await self.recognition_inputs.release(recognition)
             self.reply_scheduler.finish(item, cooldown=self._reply_cooldown(), interrupted=self._barged_in)
 
     def _rearm_barge_in(self) -> None:
@@ -1040,12 +1062,12 @@ class VoiceCoordinator:
             except Exception:
                 logger.debug("stop tts on barge-in failed", exc_info=True)
 
-    async def _handle_utterance(self, uid: str, pcm: bytes, sample_rate: int) -> None:
+    async def _handle_utterance(self, uid: str, pcm: bytes, sample_rate: int, *, recognition=None) -> None:
         task = asyncio.current_task()
         if task is not None:
             self._reply_tasks.add(task)
         try:
-            await self._handle_utterance_reply(uid, pcm, sample_rate)
+            await self._handle_utterance_reply(uid, pcm, sample_rate, recognition=recognition)
         finally:
             if task is not None:
                 self._reply_tasks.discard(task)
@@ -1053,7 +1075,7 @@ class VoiceCoordinator:
     def _cascade_limit_reached(self) -> bool:
         return not self.live_mode and self.behavior.exhausted(self.settings.cascade_turn_limit)
 
-    async def _handle_utterance_reply(self, uid: str, pcm: bytes, sample_rate: int) -> None:
+    async def _handle_utterance_reply(self, uid: str, pcm: bytes, sample_rate: int, *, recognition=None) -> None:
         from app.flows import run_cascade
         from behavior.models import ReplySettings
 
@@ -1078,7 +1100,9 @@ class VoiceCoordinator:
             try:
                 flow_task = asyncio.create_task(run_cascade(
                     backend=self.backend, context=self.context_service, behavior=self.behavior,
-                    channel=self.channels, session=session, trigger_id=uuid4().hex,
+                    channel=self.channels, session=session,
+                    trigger_id=recognition.trigger.trigger_id if recognition else uuid4().hex,
+                    recognition=recognition,
                     user_key=f"oopz:{uid}", pcm=pcm, sample_rate=sample_rate,
                     limit=self.settings.cascade_turn_limit,
                     settings=ReplySettings(
