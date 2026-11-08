@@ -4,6 +4,7 @@ import asyncio
 import random
 
 import pytest
+from support.channel_fixtures import establish_room
 from test_round_throttle import _offer, _take
 from test_voice_reply_probability import fragment
 from test_voice_session_regressions import make_agent
@@ -36,7 +37,7 @@ def test_force_keywords_load_and_are_editable_in_basic_config(monkeypatch):
 def test_mimo_keyword_overrides_zero_probability_after_asr(tmp_path, monkeypatch, text, keywords, forced):
     async def run():
         agent = make_agent(tmp_path, backend="mimo_cascade", reply_cooldown_ms=0)
-        agent._joined = True
+        await establish_room(agent)
         agent.settings.reply_probability_percent = 0
         agent.settings.force_reply_keywords = keywords
         calls = []
@@ -73,6 +74,7 @@ def test_live_keyword_after_turn_complete_restores_only_the_original_reply(tmp_p
         agent = make_agent(tmp_path)
         agent.settings.reply_probability_percent = 0
         agent.settings.force_reply_keywords = ["ooptra"]
+        await establish_room(agent)
         await agent._wire_live()
         await fragment(agent.backend, b"original", complete=True)
         await agent.backend._handle_server_msg({"serverContent": {"inputTranscription": {"text": "Ooptra"}}})
@@ -94,6 +96,7 @@ def test_live_ambiguous_late_keyword_cannot_force_a_new_reply(tmp_path, monkeypa
         agent = make_agent(tmp_path)
         agent.settings.reply_probability_percent = 0
         agent.settings.force_reply_keywords = ["ooptra"]
+        await establish_room(agent)
         await agent._wire_live()
         await fragment(agent.backend, b"old", complete=True)
         if boundary == "voice":
@@ -125,6 +128,7 @@ def test_live_silent_pcm_keeps_completed_reply_available(tmp_path, monkeypatch):
         agent = make_agent(tmp_path)
         agent.settings.reply_probability_percent = 0
         agent.settings.force_reply_keywords = ["ooptra"]
+        await establish_room(agent)
         await agent._wire_live()
         await fragment(agent.backend, b"old", complete=True)
         async def noop(*args):
@@ -144,6 +148,7 @@ def test_live_reset_during_late_audio_restore_discards_remaining_audio_and_memor
         agent = make_agent(tmp_path)
         agent.settings.reply_probability_percent = 0
         agent.settings.force_reply_keywords = ["ooptra"]
+        await establish_room(agent)
         await agent._wire_live()
         await fragment(agent.backend, b"first")
         await fragment(agent.backend, b"second", text="old answer", complete=True)
@@ -166,6 +171,7 @@ def test_live_late_keyword_replays_the_whole_buffered_reply(tmp_path):
         agent = make_agent(tmp_path)
         agent.settings.reply_probability_percent = 0
         agent.settings.force_reply_keywords = ["ooptra"]
+        await establish_room(agent)
         await agent._wire_live()
         await fragment(agent.backend, b"first")
         await agent.backend._handle_server_msg({"serverContent": {"inputTranscription": {"text": "OOP-"}}})
@@ -191,6 +197,7 @@ def test_live_deferred_audio_budget_discards_whole_reply_and_resets_next_turn(tm
         agent = make_agent(tmp_path)
         agent.settings.reply_probability_percent = 0
         agent.settings.force_reply_keywords = ["human"]
+        await establish_room(agent)
         await agent._wire_live()
         await fragment(agent.backend, b"too much")
         await fragment(agent.backend, b"tail", text="answer", complete=True)
@@ -214,7 +221,7 @@ def test_mimo_nonmatching_keyword_draws_once_after_asr(tmp_path, monkeypatch, sa
 
     async def run():
         agent = make_agent(tmp_path, backend="mimo_cascade", reply_cooldown_ms=0)
-        agent._joined = True
+        await establish_room(agent)
         agent.settings.reply_probability_percent = 30
         agent.settings.force_reply_keywords = ["nickname"]
         chatted = []
@@ -242,6 +249,7 @@ def test_live_keyword_edit_takes_effect_next_turn_without_partial_playback(tmp_p
         agent = make_agent(tmp_path)
         agent.settings.reply_probability_percent = 0
         agent.settings.force_reply_keywords = []
+        await establish_room(agent)
         await agent._wire_live()
         await fragment(agent.backend, b"already discarded")
         agent.settings.force_reply_keywords = ["human"]

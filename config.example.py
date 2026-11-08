@@ -129,6 +129,8 @@ VOICE_AGENT_CONFIG = {
     #   openai_realtime —— 骨架，协议待接
     "backend": "gemini_live",
     "persona": "你是 Oopz 语音频道助手，说话简洁友好，像在语音房里自然聊天。",
+    # 级联后端每次进房最多自动接话几次；0 不限。失败也计次，手动开口不计。
+    "cascade_turn_limit": 0,
     "barge_in": True,
     # 某人要**连续**说话满这么多毫秒才算抢话（房间越吵调越大，600~800 适合人多时）。
     # 0 = 关掉门限：一出声就打断，房间一热闹 bot 就说不完整句话。

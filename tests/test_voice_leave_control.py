@@ -85,9 +85,9 @@ def test_mimo_zero_probability_still_detects_intent_and_leaves_after_audio_tail(
         agent.settings.reply_probability_percent = 0
         events = []
         agent.set_operation_callback(lambda event: record(events, event))
-        await agent.join("a", "c")
         duplex = DepartureDuplex()
         agent.duplex = duplex
+        await agent.join("a", "c")
         calls = []
         async def asr(*args):
             calls.append("asr")
@@ -379,9 +379,9 @@ def test_gemini_live_tool_intent_really_says_farewell_and_leaves(tmp_path, monke
         agent.settings.reply_probability_percent = 0
         agent.backend = create_backend(agent.settings, agent.memory)
         agent.live_mode = True
-        await agent.join("a", "c")
         duplex = DepartureDuplex()
         agent.duplex = duplex
+        await agent.join("a", "c")
         await agent._wire_live()
         assert "tools" in sockets[0].sent[0]["setup"]
         await sockets[0]._queue.put(json.dumps({"toolCall": {"functionCalls": [

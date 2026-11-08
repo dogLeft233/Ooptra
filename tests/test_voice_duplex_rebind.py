@@ -136,7 +136,6 @@ def _make_agent() -> VoiceAgent:
     agent.backend = FakeBackend()
     agent.live_mode = True
     agent._bot = None
-    agent._joined = False
     agent._speaking = False
     agent._barge_in_armed = True
     agent._live_output_lock = asyncio.Lock()
@@ -147,8 +146,8 @@ def _make_agent() -> VoiceAgent:
     agent.last_reply = ""
     agent.last_user_text = ""
     agent.turns = 0
-    agent._area = "area1"
-    agent._channel = "chan1"
+    agent.settings.area = "area1"
+    agent.settings.channel = "chan1"
     agent.memory = type(
         "M", (), {"append": lambda *a, **k: None, "set_persona": lambda *a: None}
     )()
@@ -294,7 +293,7 @@ def test_push_failure_is_logged_once_per_turn(caplog) -> None:
             await agent.backend.emit_audio(1)  # 同一回合的第 2 个分片
             first_turn = [r for r in caplog.records if "推流失败" in r.getMessage()]
             assert len(first_turn) == 1, "同一回合不能逐分片刷屏"
-            assert "not joined" in first_turn[0].getMessage()
+            assert "transport_failed" in first_turn[0].getMessage()
 
             await agent.backend.end_turn()
             await agent.backend.emit_audio(1)

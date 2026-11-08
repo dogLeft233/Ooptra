@@ -22,6 +22,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from support.channel_fixtures import establish_room
+
 from voice_agent.agent import VoiceAgent
 from voice_agent.settings import load_voice_agent_settings
 
@@ -97,7 +99,7 @@ class FakeBackend:
         await self._turn_out(interrupted)
 
 
-def _make_agent(*, hold_ms: int = HOLD_MS) -> tuple[VoiceAgent, FakeDuplex, FakeBackend]:
+async def _make_agent(*, hold_ms: int = HOLD_MS) -> tuple[VoiceAgent, FakeDuplex, FakeBackend]:
     agent = VoiceAgent.__new__(VoiceAgent)
     agent.settings = load_voice_agent_settings()[0]
     # CI 的 config.py 来自 config.example.py（enabled=False）；关掉时 _on_remote_pcm
@@ -109,7 +111,6 @@ def _make_agent(*, hold_ms: int = HOLD_MS) -> tuple[VoiceAgent, FakeDuplex, Fake
     agent.settings.listen_only_uids = []
     agent.settings.sample_rate_in = 16000
     agent._bot = None
-    agent._joined = True
     agent._speaking = False
     agent._barge_in_armed = True
     agent._live_output_lock = asyncio.Lock()
@@ -124,18 +125,19 @@ def _make_agent(*, hold_ms: int = HOLD_MS) -> tuple[VoiceAgent, FakeDuplex, Fake
     agent.last_reply = ""
     agent.last_user_text = ""
     agent.turns = 0
-    agent._area = "area1"
-    agent._channel = "chan1"
+    agent.settings.area = "area1"
+    agent.settings.channel = "chan1"
 
     duplex, backend = FakeDuplex(), FakeBackend()
     agent.duplex = duplex
     agent.backend = backend
     agent.live_mode = True
+    await establish_room(agent)
     return agent, duplex, backend
 
 
 async def _setup(hold_ms: int = HOLD_MS) -> tuple[VoiceAgent, FakeDuplex, FakeBackend]:
-    agent, duplex, backend = _make_agent(hold_ms=hold_ms)
+    agent, duplex, backend = await _make_agent(hold_ms=hold_ms)
     # 必须真的走一遍 _wire_live：不然 backend 的 audio_out/turn_out 没注册，
     # emit_audio / end_turn 无从驱动 _speaking，门限根本走不到。
     await agent._wire_live()

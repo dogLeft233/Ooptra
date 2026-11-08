@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from support.channel_fixtures import establish_room
 
 from oopz_sdk.transport.voice_browser import BrowserVoiceTransport
 from voice_agent.agent import VoiceAgent
@@ -62,7 +63,7 @@ def test_hot_volume_change_updates_browser_without_rebuilding_model(tmp_path):
         duplex = VoiceDuplex(transport)
         agent.bind_duplex(duplex)
         assert duplex.output_volume == 75
-        agent._joined = True
+        await establish_room(agent)
         agent.output_controls.muted = True
         agent.backend.aclose = AsyncMock()
         agent._cancel_announcement = AsyncMock()

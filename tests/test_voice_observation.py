@@ -4,6 +4,7 @@ import asyncio
 import json
 
 import pytest
+from support.channel_fixtures import establish_room
 from test_voice_operations import make_agent
 from test_voice_reply_probability import fragment
 
@@ -52,6 +53,7 @@ def test_empty_live_turn_and_transport_error_are_observable(tmp_path, monkeypatc
     from test_voice_session_regressions import make_agent as live_agent
     async def run():
         agent = live_agent(tmp_path)
+        await establish_room(agent)
         await agent._wire_live()
         await agent.backend._handle_server_msg({"serverContent": {"turnComplete": True}})
         assert agent.status()["voice_observation"]["recent_decisions"][-1]["reason"] == "empty"
@@ -75,6 +77,7 @@ def test_live_explicit_speech_does_not_open_a_keyword_conversation_window(tmp_pa
         agent.settings.force_reply_keywords = ["human"]
         agent.settings.conversation_window_enabled = True
         agent.settings.conversation_window_seconds = 30
+        await establish_room(agent)
         await agent._wire_live()
         agent.backend.note_input_speaker("member")
         agent.backend._force_reply = True
@@ -115,6 +118,7 @@ def test_live_trace_explains_whole_turn_and_does_not_invent_separate_stages(tmp_
         agent = live_agent(tmp_path)
         agent.settings.reply_probability_percent = percent
         agent.settings.force_reply_keywords = keyword
+        await establish_room(agent)
         await agent._wire_live()
         await fragment(agent.backend, b"pcm", text="reply", complete=True)
         row = agent.status()["voice_observation"]["recent_decisions"][-1]

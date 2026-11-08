@@ -24,6 +24,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from support.channel_fixtures import establish_room
 
 from voice_agent.agent import VoiceAgent
 from voice_agent.backends.base import VoiceReply
@@ -67,6 +68,7 @@ class _StubVad:
 
 def _agent(utterance: bytes | None = None, **overrides) -> tuple[VoiceAgent, _RecordingBackend]:
     agent = VoiceAgent.__new__(VoiceAgent)
+    agent._cascade_attempts = 0
     overrides.setdefault("reply_probability_percent", 100)
     overrides.setdefault("voice_leave_enabled", False)
     overrides.setdefault("voice_volume_enabled", False)
@@ -78,8 +80,8 @@ def _agent(utterance: bytes | None = None, **overrides) -> tuple[VoiceAgent, _Re
     agent._speaking = False
     agent._barge_in_armed = True
     agent._user_buffers = {}
-    agent._area = "area1"
-    agent._channel = "chan1"
+    agent.settings.area = "area1"
+    agent.settings.channel = "chan1"
     agent.last_user_text = ""
     agent.last_reply = ""
     agent.turns = 0
@@ -365,7 +367,7 @@ def test_hot_switch_to_cascade_starts_the_worker(monkeypatch) -> None:
         agent, _ = _agent()
         agent.memory = object()
         agent._make_vad = lambda: object()  # type: ignore[method-assign]
-        agent._joined = True
+        await establish_room(agent)
         agent.live_mode = True  # 进房时是 Live，worker 没起来
         # 新后端是个「不像 Live」的（name=mimo_cascade、没有 push_audio）
         monkeypatch.setattr(agent_mod, "create_backend", lambda s, m: _RecordingBackend())
@@ -387,7 +389,7 @@ def test_hot_switch_to_live_stops_the_worker(monkeypatch) -> None:
         agent, _ = _agent()
         agent.memory = object()
         agent._make_vad = lambda: object()  # type: ignore[method-assign]
-        agent._joined = True
+        await establish_room(agent)
         agent.live_mode = True
         await agent._start_round_worker()
         task = agent._round_task

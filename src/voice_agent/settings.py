@@ -65,6 +65,8 @@ class VoiceAgentSettings:
     #: 体感就是「延迟越来越高」。被人抢话打断的回合不计冷却（人家要的是立刻回应）。
     #: 0 = 不冷却。
     reply_cooldown_ms: int = 2500
+    # 每次进房的级联自动接话尝试上限；0 不限制，失败也消耗额度。
+    cascade_turn_limit: int = 0
 
     # 模型 API 网络出口：""=直连/系统，"clash"=127.0.0.1:7890，或显式 URL
     proxy: str = ""
@@ -157,6 +159,7 @@ def load_voice_agent_settings() -> tuple[VoiceAgentSettings, VoiceApiSettings]:
         max_utterance_ms=int(_get(agent_raw, "max_utterance_ms", 15000)),
         min_utterance_ms=int(_get(agent_raw, "min_utterance_ms", 500)),
         reply_cooldown_ms=int(_get(agent_raw, "reply_cooldown_ms", 2500)),
+        cascade_turn_limit=max(0, int(_get(agent_raw, "cascade_turn_limit", 0))),
         proxy=str(_get(agent_raw, "proxy", "") or ""),
         mimo_api_key=_env("MIMO_API_KEY", str(mimo.get("api_key", "") or "")),
         mimo_base_url=str(mimo.get("base_url", VoiceAgentSettings.mimo_base_url) or VoiceAgentSettings.mimo_base_url),

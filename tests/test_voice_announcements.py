@@ -31,9 +31,9 @@ class AnnouncementDuplex:
 def test_mimo_every_request_rewrites_and_waits_for_tail(tmp_path):
     async def run():
         agent = make_agent(tmp_path)
-        await agent.join("a", "c", source="auto", visit_id="v")
         duplex = AnnouncementDuplex()
         agent.duplex = duplex
+        await agent.join("a", "c", source="auto", visit_id="v")
         requests = []
 
         async def rewrite(kind, template):
@@ -169,9 +169,9 @@ def test_gemini_uses_live_session_without_mimo_and_ignores_internal_user_memory(
         agent.settings.mimo_api_key = ""
         agent.backend = GeminiLiveBackend(agent.settings, agent.memory)
         agent.live_mode = True
-        await agent.join("a", "c", source="auto", visit_id="v")
         duplex = AnnouncementDuplex()
         agent.duplex = duplex
+        await agent.join("a", "c", source="auto", visit_id="v")
         await agent._wire_live()
         duplex.drained.set()
         for kind in ("enter", "leave"):
@@ -234,8 +234,8 @@ def test_live_timeout_does_not_mute_next_session_callbacks(tmp_path, monkeypatch
         agent.settings.gemini_api_key = "test"
         agent.backend = GeminiLiveBackend(agent.settings, agent.memory)
         agent.live_mode = True
-        await agent.join("a", "c", source="auto", visit_id="v")
         agent.duplex = AnnouncementDuplex()
+        await agent.join("a", "c", source="auto", visit_id="v")
         await agent._wire_live()
         stale_audio = agent.backend._audio_out
         assert not (await agent.speak_announcement("enter", "hi", expected_visit_id="v", timeout=0.01))["ok"]
@@ -264,8 +264,8 @@ def test_live_audio_without_any_text_is_an_empty_ai_result(tmp_path, monkeypatch
         agent.settings.gemini_api_key = "test"
         agent.backend = GeminiLiveBackend(agent.settings, agent.memory)
         agent.live_mode = True
-        await agent.join("a", "c", source="auto", visit_id="v")
         agent.duplex = AnnouncementDuplex()
+        await agent.join("a", "c", source="auto", visit_id="v")
         agent.duplex.drained.set()
         await agent._wire_live()
         task = asyncio.create_task(agent.speak_announcement("enter", "hi", expected_visit_id="v"))
@@ -316,9 +316,9 @@ def test_manual_leave_cancels_live_audio_push_before_waiting_for_output_lock(tmp
 def test_announcement_does_not_mix_with_an_existing_reply_tail(tmp_path):
     async def run():
         agent = make_agent(tmp_path)
-        await agent.join("a", "c", source="auto", visit_id="v")
         duplex = AnnouncementDuplex()
         agent.duplex = duplex
+        await agent.join("a", "c", source="auto", visit_id="v")
         rewrites = []
 
         async def rewrite(kind, template):

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from aiohttp import web
+from support.channel_fixtures import establish_room
 from test_voice_operations import make_agent
 
 from voice_agent import settings as settings_module
@@ -217,7 +218,7 @@ def test_asr_task_failure_does_not_reach_llm():
 def test_room_stream_is_not_replayed_and_stale_audio_is_rejected(tmp_path, invalidate):
     async def run():
         agent = make_agent(tmp_path)
-        agent._joined = True
+        await establish_room(agent)
         pushed = []
 
         async def push(pcm, rate, **kwargs):
@@ -249,7 +250,7 @@ def test_room_stream_is_not_replayed_and_stale_audio_is_rejected(tmp_path, inval
 def test_barge_in_cancels_generation_without_cancelling_room_worker(tmp_path):
     async def run():
         agent = make_agent(tmp_path)
-        agent._joined = True
+        await establish_room(agent)
         agent.duplex.push_tts_pcm = AsyncMock(return_value={'ok': True})
         started = asyncio.Event()
         cancelled = asyncio.Event()
