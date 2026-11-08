@@ -128,7 +128,9 @@ async def run_cascade(*, backend, context, behavior, channel,
                       pcm: bytes, sample_rate: int, limit: int,
                       settings: ReplySettings, interpret_controls: bool,
                       current, on_playing, observations=None, reply_text_to_channel: bool = False,
-                      subtitle_target: RoomTarget | None = None, recognition=None) -> FlowResult:
+                      subtitle_target: RoomTarget | None = None, recognition=None,
+                      first_audio_timeout_seconds: float = 45,
+                      audio_gap_timeout_seconds: float = 10) -> FlowResult:
     """取消必结尝试；执行后的失败使用渠道事实，执行前失败使用NotExecuted。"""
     revision = context.snapshot(session.room_target).revision
     trigger = recognition.trigger if recognition else AudioReady(trigger_id, session, user_key, revision)
@@ -152,8 +154,9 @@ async def run_cascade(*, backend, context, behavior, channel,
         timings["asr"] = recognized.elapsed_ms
         if recognition:
             timings["asr_finalize"] = recognized.finalize_ms
-        logger.info("event=voice.asr.completed input_chars=%d audio_seconds=%.1f session_id=%s attempt_id=%s",
-                    len(recognized.text), len(pcm)/2/sample_rate, session.session_id, permit.attempt_id)
+        logger.info("event=voice.asr.completed input_chars=%d audio_seconds=%.1f duration_ms=%.1f finalize_ms=%.1f session_id=%s attempt_id=%s",
+                    len(recognized.text), len(pcm)/2/sample_rate, recognized.elapsed_ms, recognized.finalize_ms,
+                    session.session_id, permit.attempt_id)
         if not current():
             end_reason = "superseded"
             return FlowResult(reason=end_reason)
@@ -211,9 +214,11 @@ async def run_cascade(*, backend, context, behavior, channel,
         screen = None
         capabilities = getattr(backend, "capabilities", None)
         if capabilities is not None and capabilities().image_input:
+            capture_started = time.monotonic()
             capture = await channel.capture_screen(session)
-            logger.info("event=voice.screen.captured status=%s session_id=%s input_ref=%s",
-                        capture.status, session.session_id, trigger_id)
+            timings["screen_capture"] = (time.monotonic()-capture_started)*1000
+            logger.info("event=voice.screen.captured status=%s duration_ms=%.1f session_id=%s input_ref=%s",
+                        capture.status, timings["screen_capture"], session.session_id, trigger_id)
             if not current():
                 end_reason = "superseded"
                 return FlowResult(reason=end_reason)
@@ -224,7 +229,8 @@ async def run_cascade(*, backend, context, behavior, channel,
         on_playing(True)
         execution_started = True
         outcome = await channel.play(PlaybackRequest(
-            intent.action_id, session, job.generation_id, intent.deadline), audio.frames())
+            intent.action_id, session, job.generation_id, intent.deadline,
+            first_audio_timeout_seconds, audio_gap_timeout_seconds), audio.frames())
         behavior.feedback(outcome)
         feedback_sent = True
         if outcome.status != "completed":
@@ -274,6 +280,8 @@ async def run_cascade(*, backend, context, behavior, channel,
                 behavior.finish_attempt(AttemptFinished(permit, end_reason, time.monotonic()))
                 if recognition:
                     recognition.finished = True
+                if audio is not None:
+                    timings.update(dict(audio.evidence().timings_ms))
                 if observations is not None:
                     observations.record(trigger_id=trigger_id, session_id=session.session_id,
                         backend=backend.name, reason=trace_reason, outcome=end_reason,
@@ -283,7 +291,8 @@ async def run_cascade(*, backend, context, behavior, channel,
 
 async def run_expression(*, backend, context, channel, session, text, kind: Literal["fixed", "announcement"]="fixed", user_key="api",
                          current, timeout: float=60, announcement_kind: Literal["enter", "leave"]="enter",
-                         reply_text_to_channel: bool=False, subtitle_target: RoomTarget | None=None):
+                         reply_text_to_channel: bool=False, subtitle_target: RoomTarget | None=None,
+                         first_audio_timeout_seconds: float=45, audio_gap_timeout_seconds: float=10):
     from uuid import uuid4
 
     from behavior.models import SpeechIntent
@@ -297,7 +306,8 @@ async def run_expression(*, backend, context, channel, session, text, kind: Lite
     job = backend.generate(intent, prepared, tools=context.tools(prepared))
     audio = audio_output(job)
     try:
-        outcome = await channel.play(PlaybackRequest(action_id, session, job.generation_id, intent.deadline), audio.frames())
+        outcome = await channel.play(PlaybackRequest(action_id, session, job.generation_id, intent.deadline,
+            first_audio_timeout_seconds, audio_gap_timeout_seconds), audio.frames())
         evidence = audio.evidence()
         text_outcome, text_reason = await record_expression_outputs(context=context, channel=channel,
             session=session, prepared=prepared, outcome=outcome, evidence=evidence,

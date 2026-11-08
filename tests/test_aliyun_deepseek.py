@@ -630,14 +630,17 @@ def test_screen_image_is_sent_only_with_this_reply_and_never_as_spoken_text():
     ("这个题有人能帮忙解释吗？", "contribute", 0, True),
     ("我继续算我的", "silent", 100, False),
 ])
-def test_real_cascade_uses_semantic_decision_and_name_fallback(tmp_path, text, assessment, percent, expected):
+def test_real_cascade_uses_semantic_decision_and_name_fallback(tmp_path, text, assessment, percent, expected, caplog):
     from app.flows import run_cascade
     from behavior import create_behavior
     from behavior.models import ReplySettings
     from channels import create_channel
     from channels.models import AudioPushResult, JoinRoom, RoomTarget
     from context import create_context_service
+    caplog.set_level("INFO")
+    from app.observation import FlowObservations
     async def run():
+        observations = FlowObservations()
         async with model_servers(assessment=assessment, transcript=text) as (backend, state):
             class Transport:
                 async def join(self, target): return "rtc"
@@ -656,6 +659,7 @@ def test_real_cascade_uses_semantic_decision_and_name_fallback(tmp_path, text, a
                     channel=channel, session=session, trigger_id="input", user_key="any-member",
                     pcm=b"\x01\x00"*16000, sample_rate=16000, limit=0,
                     settings=ReplySettings(probability=percent, keywords=("大肥鱼",)),
+                    observations=observations,
                     interpret_controls=False, current=lambda: True, on_playing=lambda _: None)
                 assert bool(result.outcome and result.outcome.status == "completed") is expected
                 assert state.audio_seen.is_set() is expected
@@ -663,6 +667,16 @@ def test_real_cascade_uses_semantic_decision_and_name_fallback(tmp_path, text, a
                 if expected:
                     assert result.reply_text == "你好。再见。"
                     assert "decision" not in "".join(state.text)
+                    stages = observations.snapshot()["recent_decisions"][-1]["timings_ms"]
+                    for stage in ("screen_capture", "llm_headers", "llm_first_token", "llm_first_sentence",
+                                  "llm_total", "tts_ready", "tts_first_audio", "tts_total"):
+                        assert stages[stage] is not None and stages[stage] >= 0
+                    messages = [row.getMessage() for row in caplog.records if any(event in row.getMessage() for event in ("event=voice.generation.", "event=voice.llm.finished"))]
+                    assert messages and all("session_id=" in message and "action_id=" in message
+                        and "generation_id=" in message and "input_ref=" in message for message in messages)
+                    joined = "".join(messages)
+                    for private in (text, "你好。再见。", "秘密推理", "fake-deepseek", "fake-dashscope"):
+                        assert private not in joined
             finally:
                 await context.close()
     asyncio.run(run())

@@ -45,3 +45,5 @@
 ## 共享画面
 
 `Channel.capture_screen(session)` 在五秒内尝试取单一屏幕分享者的当前 JPEG，返回 `ScreenCapture`。无共享、多人共享、失败和旧会话分别报告；并发捕获不排队。Oopz 适配查询当前频道分享者，通过独立 Agora audience 观看连接取得最新帧，不发布音视频；退房关闭观看连接。图片至多 1 MiB、最长边 1920，只在当前回复中使用，不缓存编码图片或写入历史。协议和切房反例见 `tests/channels/test_screen_capture.py`，真实视频解码见 `tests/browser/screen-frame.cjs`。
+
+`PlaybackRequest` 分别定义首段音频等待（默认45秒）和后续断流等待（默认10秒）。源帧等待使用对应预算，传输确认最多10秒、排空确认最多30秒，均受请求绝对截止约束。超时结果区分 `first_audio_timeout`、`audio_gap_timeout`、`transport_timeout`、`drain_timeout` 与整轮 `deadline`；失败停止并关闭源，部分提交保留unknown_samples。公开验证见 `tests/channels/test_playback_timeouts.py`，含真实等待超过旧10秒的反例。

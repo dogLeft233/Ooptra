@@ -227,9 +227,15 @@ class PlaybackRequest:
     session: SessionRef
     output_id: str
     deadline: float
+    first_audio_timeout_seconds: float = 45
+    audio_gap_timeout_seconds: float = 10
 
     def __post_init__(self) -> None:
         import math
+        if (any(type(value) not in {int, float} or not math.isfinite(value)
+                or not 0 < value <= maximum for value, maximum in (
+                    (self.first_audio_timeout_seconds, 120), (self.audio_gap_timeout_seconds, 60)))):
+            raise ValueError("首段音频等待须在(0,120]秒，断流等待须在(0,60]秒")
         if (not isinstance(self.action_id, str) or not self.action_id.strip()
                 or not isinstance(self.output_id, str) or not self.output_id.strip()
                 or not isinstance(self.session, SessionRef)

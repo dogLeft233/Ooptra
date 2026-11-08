@@ -3,13 +3,13 @@ import asyncio
 import base64
 import json
 import time
-from types import SimpleNamespace
 
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 from support.context_fixtures import prepare_source
 
+from behavior.models import SpeechIntent
 from channels.models import OutputSourceError, RoomTarget, SessionRef
 from context import create_context_service
 from context.models import (
@@ -25,9 +25,8 @@ from operations.models import VoiceAgentSettings
 
 
 def intent(session, prepared):
-    return SimpleNamespace(action_id=str(time.monotonic_ns()), session=session,
-        context_version=prepared.version, text='请记住我的喜好', user_key='oopz:member', kind='reply',
-        deadline=time.monotonic()+5)
+    return SpeechIntent('intent', str(time.monotonic_ns()), session, 'input', prepared.version,
+        time.monotonic()+5, '请记住我的喜好', 'oopz:member')
 
 
 def test_late_model_tool_cannot_write_into_replaced_context(tmp_path):

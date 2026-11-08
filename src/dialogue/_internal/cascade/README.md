@@ -33,3 +33,5 @@
 新模型只要保持公开事件、错误、取消和产物契约，应用流程无需学习其分片格式、JSON或重试细节。供应商能力改变时显式修改capabilities，不通过私有属性探测。
 
 阿里/DeepSeek 的 `assess_reply` 使用独立配置快照与HTTP会话，JSON模式、关闭思考、最多128输出token、总请求4秒；近期10条上下文为观察资料，重复/未知字段、截断/空白均返回invalid，网络失败返回unavailable。候选只供行为决策，不进入语音。正式生成继续复制用户配置的思考档位。
+
+表达任务通过有界timing事件及安全日志报告阶段耗时：`llm_start/llm_headers/llm_first_token/llm_first_sentence/llm_total` 自模型请求开始累计，首字只计正式content；`tts_start/tts_ready/tts_first_audio/tts_total` 自TTS启动累计。图像处理与模型思考包含在首字等待中，供应商未提供二者独立计时，不能声称已拆开。生成、取消和失败日志保留原关联ID，不记录正文或推理；已产生的阶段证据在失败时仍可查询。

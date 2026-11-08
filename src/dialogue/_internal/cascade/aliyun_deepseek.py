@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 from collections.abc import AsyncIterator
 from uuid import uuid4
 
@@ -26,6 +28,8 @@ from dialogue.models import (
     AudioSink,
     DialogueCapabilities,
 )
+
+logger = logging.getLogger(__name__)
 
 
 async def sse_events(content) -> AsyncIterator[dict]:
@@ -222,10 +226,13 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
                     ]
                     break
         session = await self._http()
+        request_started = time.monotonic()
+        await self._stage_timing("llm_start", request_started)
         async with session.post(
             self.settings.deepseek_base_url.rstrip("/") + "/chat/completions",
             headers=self._headers(), json=request, proxy=self._proxy_url(),
         ) as response:
+            await self._stage_timing("llm_headers", request_started)
             if response.status >= 400:
                 raise RuntimeError(f"DeepSeek {stage} failed HTTP {response.status}")
             if not streaming:
@@ -239,9 +246,12 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
                     # Tool continuations need the supplier field within this transient task.
                     if not body.get("tools"):
                         message.pop("reasoning_content", None)
+                await self._stage_timing("llm_total", request_started)
                 return data
+            first_token = first_sentence = False
             raw, spoken = "", ""
             finished = False
+            finish_reason = ""
             async for event in sse_events(response.content):
                 choices = event.get("choices") or []
                 if not choices:
@@ -254,6 +264,9 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
                 content = delta.get("content")
                 if content is not None and not isinstance(content, str):
                     raise ValueError("Invalid formal answer delta")
+                if content and not first_token:
+                    first_token = True
+                    await self._stage_timing("llm_first_token", request_started)
                 raw += content or ""
                 if any(marker in raw.lower() for marker in ("<think", "</think", "<｜", "<|")):
                     raise ValueError("Reasoning markup in formal answer")
@@ -265,6 +278,9 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
                     complete = clean[:end]
                     if not complete.startswith(spoken):
                         raise RuntimeError("Streaming reply changed previously spoken text")
+                    if not first_sentence:
+                        first_sentence = True
+                        await self._stage_timing("llm_first_sentence", request_started)
                     await self._queue_text(complete[len(spoken):])
                     spoken = complete
                 reason = choice.get("finish_reason")
@@ -272,13 +288,21 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
                     if reason not in {"stop", "length"}:
                         raise RuntimeError("DeepSeek did not finish a normal reply")
                     finished = True
+                    finish_reason = reason
             if not finished:
                 raise RuntimeError("DeepSeek stream missing completion event")
+            if self._trace is not None:
+                session_id, action_id, input_ref = self._trace
+                logger.info("event=voice.llm.finished finish_reason=%s formal_chars=%d max_tokens=%d session_id=%s action_id=%s input_ref=%s generation_id=%s",
+                            finish_reason, len(raw), request["max_tokens"], session_id, action_id, input_ref, self._generation_id)
             clean = clamp_reply(sanitize_for_tts(raw))
             if not looks_like_reasoning_leak(clean):
                 if not clean.startswith(spoken):
                     raise RuntimeError("Final reply differs from spoken text")
+                if clean[len(spoken):] and not first_sentence:
+                    await self._stage_timing("llm_first_sentence", request_started)
                 await self._queue_text(clean[len(spoken):])
+            await self._stage_timing("llm_total", request_started)
             if self._texts is not None:
                 await self._texts.put(None)
             return {"choices": [{"message": {"role": "assistant", "content": raw}}]}
@@ -299,6 +323,9 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
             yield text
 
     async def _synthesize(self, texts: AsyncIterator[str]) -> bytes:
+        tts_started = time.monotonic()
+        await self._stage_timing("tts_start", tts_started)
+        first_audio = False
         session = await self._http()
         task_id = uuid4().hex
         async with session.ws_connect(
@@ -314,6 +341,7 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
             }))
             await self._started(ws, task_id)
 
+            await self._stage_timing("tts_ready", tts_started)
             async def send_text():
                 async for text in texts:
                     await ws.send_json(task_event("continue-task", task_id, {"input": {"text": text}}))
@@ -332,6 +360,9 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
                         pcm.extend(chunk)
                         if len(pcm) > self.settings.sample_rate_out * 2 * 60:
                             raise RuntimeError("TTS audio exceeded 60 seconds")
+                        if chunk and not first_audio:
+                            first_audio = True
+                            await self._stage_timing("tts_first_audio", tts_started)
                         if chunk and self._audio_sink is not None:
                             await self._audio_sink(chunk, self.settings.sample_rate_out)
                     elif message.type == aiohttp.WSMsgType.TEXT:
@@ -340,6 +371,7 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
                             await sender
                             if pending or not pcm:
                                 raise RuntimeError("TTS returned incomplete or empty PCM")
+                            await self._stage_timing("tts_total", tts_started)
                             return bytes(pcm)
                     else:
                         raise RuntimeError("DashScope TTS closed before task-finished")

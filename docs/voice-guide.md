@@ -121,6 +121,21 @@ DeepSeek 请求显式传递所选 `reasoning_effort`：`none` 时 `thinking={"ty
 Gemini 根据输入音频选择语言，人格后会追加中文普通话约束，但外语或音乐仍可能影响输出。
 可进一步限定监听成员，或在人格中强调语言要求；`Live 回合：` 日志包含输入转写与回复，便于排查。
 
+## 音频等待与阶段耗时
+
+在「配置 → 高级选项 → 语音模型 → 音频等待」分别设置：
+
+| 配置 | 默认 | 范围与含义 |
+| --- | --- | --- |
+| `first_audio_timeout_seconds` | 45秒 | 1到120秒；从开始消费生成流到首段音频，包含模型看图、思考、形成首句及TTS启动 |
+| `audio_gap_timeout_seconds` | 10秒 | 1到60秒；输出首段后等待下一段音频的上限 |
+
+设置适用于级联自动回复和快捷开口，保存从下一轮生效，不取消正在进行的回复。Live使用渠道默认预算。两项都不能延长原行动绝对截止：级联尝试从ASR准入起默认60秒，因此可等待时间还受ASR、决策和截图等已经消耗的时间限制。源帧等待、渠道传输（最多10秒）和播放排空（最多30秒）分别计时，失败停止/关闭源，不重播已发前缀。
+
+`voice.generation.stage` 用原session/action/input/generation ID关联模型请求开始、HTTP响应头、正式首字、首个可合成句子、LLM完成、TTS启动/就绪/首音频/完成；`voice.playback.first_audio` 记录消费者等待首帧的真实时间。耗时均为单调时钟毫秒。模型阶段自请求开始累计，TTS阶段自TTS启动累计，流式阶段可能重叠，不能直接相加。图像理解与思考无法由当前供应商接口独立计时。日志和`voice_observation`只包含元数据，推理内容仍不会进TTS或历史。
+
+超时原因区分 `first_audio_timeout`、`audio_gap_timeout`、`transport_timeout`、`drain_timeout` 和整轮 `deadline`，失败时已获得的阶段耗时仍保留。未记录到的阶段是未知，不能当作零耗时。
+
 ## 回复频率与强制关键词
 
 当前 `aliyun_deepseek` 使用语义接话，替代随机概率和固定连续窗口：ASR 最终转写 → 准备当前上下文 → DeepSeek 输出严格 JSON `{"decision":"addressed|contribute|silent"}` → 行为模块授权 → 截图、正式回答与 TTS。`addressed` 表示叫名/对机器人追问，`contribute` 表示适合提供明确帮助，`silent` 表示继续倾听。所有成员遵循同一规则。判定器单独关闭思考、限时4秒；正式回答仍使用控制台配置的思考强度。判定结果和思维内容都不会送入 TTS 或助手历史。

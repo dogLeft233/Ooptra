@@ -496,6 +496,8 @@ class VoiceCoordinator:
             tuple(self.settings.listen_only_uids), minimum, _MIN_UTTERANCE_RMS)
 
     async def refresh(self, changed: list[str]) -> list[str]:
+        if changed and set(changed) <= {"first_audio_timeout_seconds", "audio_gap_timeout_seconds"}:
+            return ["音频等待设置已更新，从下一轮生效"]
         # 思考强度由新生成任务复制；不取消当前回复、问候或控制任务。
         if changed == ["deepseek_reasoning_effort"]:
             return ["思考强度已更新，从下一次生成回复生效"]
@@ -1107,6 +1109,8 @@ class VoiceCoordinator:
                     channel=self.channels, session=session,
                     trigger_id=recognition.trigger.trigger_id if recognition else uuid4().hex,
                     recognition=recognition,
+                    first_audio_timeout_seconds=self.settings.first_audio_timeout_seconds,
+                    audio_gap_timeout_seconds=self.settings.audio_gap_timeout_seconds,
                     user_key=f"oopz:{uid}", pcm=pcm, sample_rate=sample_rate,
                     limit=self.settings.cascade_turn_limit,
                     settings=ReplySettings(
@@ -1194,6 +1198,8 @@ class VoiceCoordinator:
         try:
             result = await run_expression(backend=self.backend, context=self.context_service,
                 channel=self.channels, session=session, text=text, current=current,
+                first_audio_timeout_seconds=self.settings.first_audio_timeout_seconds,
+                audio_gap_timeout_seconds=self.settings.audio_gap_timeout_seconds,
                 reply_text_to_channel=self.settings.reply_text_to_channel, subtitle_target=self.subtitle_target)
         finally:
             if current():

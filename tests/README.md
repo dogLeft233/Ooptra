@@ -52,3 +52,5 @@ python -m pytest -v -o faulthandler_timeout=60
 共享画面：`tests/channels/test_screen_capture.py` 覆盖原会话、退房取消与 Oopz 数字发布者身份；`tests/browser/screen-frame.cjs` 执行真实 MediaStream 抽帧；`tests/test_aliyun_deepseek.py` 验证当轮图像请求与 TTS 隔离。
 
 语义接话：`tests/behavior/test_semantic_replies.py` 验证无抽样、叫名兜底和输入绑定；`tests/dialogue/test_reply_assessment.py` 验证真实HTTP与严格JSON边界；`tests/test_aliyun_deepseek.py` 贯通识别、语义候选、真实行为/上下文、生成与播放。外部ASR/TTS/LLM服务在本地协议服务器替代，真实叫名声学效果另行验证。
+
+音频等待验证：`tests/channels/test_playback_timeouts.py` 通过公开Channel.play检查超过旧10秒的首段、断流、绝对期限、资源关闭与不可变预算；`tests/test_aliyun_deepseek.py` 检查阶段证据与脱敏日志；`tests/browser/preview.cjs` 保存并重载两种高级等待配置。

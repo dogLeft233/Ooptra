@@ -267,6 +267,9 @@ class VoiceAgentSettings:
     #: 体感就是「延迟越来越高」。被人抢话打断的回合不计冷却（人家要的是立刻回应）。
     #: 0 = 不冷却。
     reply_cooldown_ms: int = 2500
+    # 级联首段等待与播出后的断流等待；仍受原行动绝对截止约束。
+    first_audio_timeout_seconds: int = 45
+    audio_gap_timeout_seconds: int = 10
     # 每次进房的级联自动接话尝试上限；0 不限制，失败也消耗额度。
     cascade_turn_limit: int = 0
 
@@ -309,6 +312,11 @@ class VoiceAgentSettings:
 
     memory_path: str = "data/voice_memory.jsonl"
     memory_max_turns: int = 30
+
+    def __post_init__(self) -> None:
+        for value, maximum in ((self.first_audio_timeout_seconds, 120), (self.audio_gap_timeout_seconds, 60)):
+            if type(value) is not int or not 1 <= value <= maximum:
+                raise ValueError("级联音频等待必须为范围内的整数秒数")
 
 
 @dataclass
