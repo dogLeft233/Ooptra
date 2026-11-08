@@ -162,3 +162,12 @@ python scripts/run_bot_pair_acceptance.py /绝对路径/Ooptra /绝对路径/Oop
 - 本地全套 **1170 passed、1 skipped、0 failed**，Ruff、Pyright、架构、JS lint、预览同步和提交钩子通过；该运行提交的远端 lint、Linux Python 3.10 / 3.13、Windows Python 3.13 与 browser 五项 CI 均通过。
 - 本地证据：`data/bot-pair-modules-1ef1142.json`（25 次状态采样、实际对话、完成数、提交及清理结果）、`data/bot-pair-module-deployment.json`（两端旧/新 PID、就绪与配置哈希确认）。原始报告不纳入 Git；本轮没有新录像，历史录像不作为这次迁移的证据。
 - 结束后两应用仍正常运行、Oopz 连接保持就绪且均已退房；配置限额和监听白名单维持原值。未验证 Gemini Live 实机/人工音质、真实维护发布，以及仍标记为目标设计的完整接口协议。
+
+
+### 2026-11-08 完整契约落地后首轮复测（Asia/Shanghai）
+
+- 两端实际运行提交均为 `0037efc6c8908583c67c88a73a7b5b0e8e809ca6`，验收时均无已跟踪差异。新应用 PID 为 93918 / 93937，bootstrap 与 Oopz 就绪，配置文件哈希保持不变。
+- 继续使用独立账号、状态目录与原有模型、对端白名单及三次限额。控制器只提交一次开场，后续由真实 Oopz 音频驱动。
+- **51.75 秒完成两端各三次自动回复，渠道实际终态各有三个独立完成标识，尝试数 3 / 3、轮数 4 / 3，最终退房确认 `[true, true]`。** 对话由周末散步接续到图书馆、散文和推理小说；末段有一句 ASR 仅识别出短片段，因此不将本轮视为识别质量保证。
+- 原始证据保存在本机 `data/bot-pair-contracts-0037efc.json`、`data/bot-pair-contracts-deployment.json`；包含真实身份与对话，不纳入 Git。本轮未生成新录像。
+- 此后删除已无调用的凭据模板读取旧辅助函数、两份旧 VAD 桩及节流测试辅助函数，清理完成后再次部署同版本双端并验收，记录见下一节。

@@ -56,19 +56,6 @@ class _RecordingBackend:
         return Recognition(audio.input_ref, audio.session, permit.attempt_id, audio.user_key, "no_speech")
 
 
-class _StubVad:
-    """把 feed 的结果钉死，这样测的是节流而不是 EnergyVad。"""
-
-    def __init__(self, out: bytes | None) -> None:
-        self._out = out
-
-    def feed(self, pcm: bytes) -> bytes | None:
-        return self._out
-
-    def reset(self) -> None:
-        pass
-
-
 def _agent(utterance: bytes | None = None, **overrides) -> tuple[VoiceCoordinator, _RecordingBackend]:
     temporary = tempfile.TemporaryDirectory()
     agent = VoiceCoordinator(VoiceAgentSettings(enabled=True, memory_path=str(Path(temporary.name) / "history.jsonl")), VoiceApiSettings())
@@ -91,14 +78,6 @@ def _agent(utterance: bytes | None = None, **overrides) -> tuple[VoiceCoordinato
     if utterance:
         agent.settings.max_utterance_ms = max(30, int(len(utterance)/2/SR*1000))
     return agent, agent.backend
-
-
-def _offer(agent, pcm):
-    agent._offer_utterance("u1", pcm, SR)
-
-
-async def _take(agent):
-    return await agent.reply_scheduler.next(agent._reply_cooldown())
 
 
 # ----------------------------------------------------------------------

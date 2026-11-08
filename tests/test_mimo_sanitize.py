@@ -242,19 +242,6 @@ def _pcm(amplitude: int, samples: int = 1600) -> bytes:
     return struct.pack("<h", amplitude) * samples
 
 
-class _StubVad:
-    """把 feed 的结果钉死，这样测的是闸门而不是 EnergyVad。"""
-
-    def __init__(self, out: bytes | None) -> None:
-        self._out = out
-
-    def feed(self, pcm: bytes) -> bytes | None:
-        return self._out
-
-    def reset(self) -> None:
-        pass
-
-
 class _FakeBackend:
     name = "mimo_cascade"
 

@@ -31,14 +31,6 @@ def credentials_payload(credentials: Mapping[str, Any]) -> dict[str, Any]:
     return dict(credentials)
 
 
-def _read_config_template() -> str:
-    for path in (CONFIG_PATH, CONFIG_EXAMPLE_PATH):
-        if os.path.exists(path):
-            with open(path, encoding="utf-8") as file:
-                return file.read()
-    raise CredentialsError("config.py 不存在，且未找到 config.example.py")
-
-
 def _has_additional_config_binding(tree: ast.AST) -> bool:
     """Recognize bindings stored as strings rather than ast.Name nodes."""
     for node in ast.walk(tree):
