@@ -21,6 +21,7 @@ from dialogue._internal.controls import (
     VOLUME_INTENT_DESCRIPTION,
 )
 from dialogue._internal.memory_tools import MEMORY_RULES, memory_tools
+from dialogue._internal.room_context import history_messages, room_rules
 from dialogue.api import ContextToolPort, VoiceBackend
 from dialogue.models import (
     VoiceStreamInterrupted,
@@ -357,7 +358,7 @@ class MimoCascadeBackend(VoiceBackend):
         prepared = self._prepared_context
         if prepared is None:
             raise ValueError("表达必须携带准备上下文")
-        history = [{"role": message.role, "content": message.content} for message in prepared.history]
+        history = history_messages(prepared.history)
         # 历史里存着净化之前的回复（emoji、星号动作、换行、超长），照样会带偏
         # 模型 —— 一并清掉。长度也要夹：只清不夹的话，模型照着历史里的长回复
         # 模仿，prompt 里那句「不超过 35 个字」永远追不回来。
@@ -371,7 +372,7 @@ class MimoCascadeBackend(VoiceBackend):
             for m in history
         ]
         messages: list[dict[str, str]] = [
-            {"role": "system", "content": prepared.persona + VOICE_ROOM_RULES}
+            {"role": "system", "content": prepared.persona + VOICE_ROOM_RULES + room_rules(user_key)}
         ]
         messages.extend(history)
         if bridge is not None and tools_available:

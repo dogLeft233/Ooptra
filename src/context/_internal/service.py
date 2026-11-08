@@ -30,6 +30,8 @@ from context.models import (
 )
 from core.paths import project_path
 
+ROOM_HISTORY_MAX_AGE_SECONDS = 15 * 60
+
 
 class ContextService:
     def __init__(self, history_path: str, *, max_turns: int = 30, timeout: float = 4, outbox_path: Path | None = None):
@@ -75,8 +77,6 @@ class ContextService:
         room = encoded(asdict(observation.session.room_target))
         key = (observation.connection_id, observation.session.session_id)
         previous = self._sequences.get(key, -1)
-        if observation.sequence <= previous:
-            return self._revision()
         current = self._observations.get(room)
         # Only explicit session observations can replace an active session. Delayed transcription remains history.
         active = (observation.session.session_id not in self._retired_sessions and
@@ -88,6 +88,11 @@ class ContextService:
             if len(self._inputs) > 4096:
                 self._inputs.pop(next(iter(self._inputs)))
         self._seen[observation.event_id] = fingerprint
+        if len(self._seen) > 4096:
+            self._seen.pop(next(iter(self._seen)))
+        # 多人ASR乱序完成仍是输入事实；只阻止较旧观察回退当前投影。
+        if observation.sequence <= previous:
+            return self._revision()
         self._sequences[key] = observation.sequence
         if active:
             self._version += 1
@@ -102,9 +107,6 @@ class ContextService:
             elif current:
                 self._retired_sessions.add(current[0].session.session_id)
             self._observations[room] = (projection, self._version)
-        # Bounded dedup affects projection only; durable input idempotency survives process restart.
-        if len(self._seen) > 4096:
-            self._seen.pop(next(iter(self._seen)))
         return self._revision()
 
     def snapshot(self, scope: RoomTarget) -> SituationSnapshot:
@@ -139,12 +141,12 @@ class ContextService:
         else:
             ref = ContextRef(request.session, 0, "local")
         room = encoded(asdict(request.session.room_target))
-        history = self._ledger.scoped_history(room=room, source=ref.binding_id, user_key=request.user_key,
-                                              exclude_input_ref=request.input_ref)
+        history = self._ledger.scoped_history(room=room, source=ref.binding_id,
+                                              exclude_input_ref=request.input_ref, since=time.time() - ROOM_HISTORY_MAX_AGE_SECONDS)
         self._grants = {key: grant for key, grant in self._grants.items() if grant.expires_at >= time.time()}
         grants: tuple[WriteAuthorization, ...] = ()
         observed = self._inputs.get(request.input_ref)
-        if active and observed and observed.complete and observed.session == request.session and observed.user_key and self._explicit_remember(observed.text):
+        if active and observed and observed.complete and observed.session == request.session and observed.user_key and (not request.user_key or observed.user_key == request.user_key) and self._explicit_remember(observed.text):
             grant = WriteAuthorization(uuid.uuid4().hex, ref, request.input_ref, time.time() + 120)
             self._grants[grant.grant_id] = grant
             grants = (grant,)
@@ -247,7 +249,7 @@ class BoundTools:
 
     @property
     def history(self):
-        return [asdict(row) for row in self._prepared.history]
+        return [{"role": row.role, "content": row.content} for row in self._prepared.history]
 
     @property
     def session_id(self):

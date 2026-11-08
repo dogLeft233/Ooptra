@@ -89,8 +89,15 @@ class ContextRef:
 
 @dataclass(frozen=True)
 class HistoryMessage:
+    """房间内的一句事实；user_key 是人类说话者，assistant 时为原接话对象。
+
+    ts 为本地确认入库的秒级时间戳；旧手工上下文可以不含身份或时间。
+    """
+
     role: str
     content: str
+    user_key: str = ""
+    ts: float = 0.0
 
 
 @dataclass(frozen=True)

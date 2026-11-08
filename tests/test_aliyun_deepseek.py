@@ -710,14 +710,14 @@ def test_unselected_recognized_sentences_remain_visible_when_bot_is_busy(tmp_pat
             agent.settings.cascade_turn_limit = 0
             agent.settings.force_reply_keywords = ['大肥鱼']
             await agent.join('a', 'c')
-            async def utterance():
-                await agent._on_remote_pcm('member', b'\x00\x20' * 960, 16000)
-                await agent._on_remote_pcm('member', bytes(1920), 16000)
+            async def utterance(uid='member'):
+                await agent._on_remote_pcm(uid, b'\x00\x20' * 960, 16000)
+                await agent._on_remote_pcm(uid, bytes(1920), 16000)
             try:
                 await utterance()
                 await asyncio.wait_for(state.chat_started.wait(), 2)
-                await utterance()
-                await utterance()
+                await utterance('bob')
+                await utterance('carol')
                 async def unselected():
                     while True:
                         rows = agent.context_service.voice_traces(VoiceTraceQuery()).rows
@@ -727,8 +727,16 @@ def test_unselected_recognized_sentences_remain_visible_when_bot_is_busy(tmp_pat
                 rows = await asyncio.wait_for(unselected(), 6)
                 assert all(row.trace.text == '大肥鱼，你在吗？' for row in rows)
                 assert sum(row.trace.reason == 'unselected_or_expired' for row in rows) == 2
-                # 未被选中的转写仅作排障，不冒充正式对话历史。
+                # 忙碌时仍保存输入事实，但不能冒充助手回复或触发记忆投递。
+                from context.models import ContextRequest
+                prepared = await agent.context_service.prepare_context(ContextRequest(
+                    agent.channels.snapshot().session, 'oopz:member', 'next-input'))
+                assert {row.user_key for row in prepared.history} == {'oopz:member', 'oopz:bob', 'oopz:carol'}
                 assert len(agent.memory.as_messages(user_key='oopz:member')) == 1
+                history = agent.memory.as_messages()
+                assert len(history) == 3
+                assert all(row['role'] == 'user' for row in history)
+                assert agent.context_bridge.status()['pending_writes'] == 0
             finally:
                 try:
                     await agent.leave()
@@ -766,4 +774,56 @@ def test_asr_failure_is_visible_and_is_not_reported_as_model_silence(tmp_path):
             finally:
                 await agent.leave()
                 await agent.close()
+    asyncio.run(run())
+
+
+def test_room_speakers_reach_both_assessment_and_formal_model_requests(tmp_path):
+    from app.flows import run_cascade
+    from behavior import create_behavior
+    from behavior.models import ReplySettings
+    from channels import create_channel
+    from channels.models import AudioPushResult, JoinRoom, RoomTarget
+    from context import create_context_service
+    from context.models import Observation
+
+    async def run():
+        async with model_servers(transcript='那它为什么收敛？') as (backend, state):
+            class Transport:
+                async def join(self, target): return 'rtc'
+                async def leave(self): pass
+                async def retire_output(self): pass
+                async def push_audio(self, pcm, rate, *, finish=False):
+                    state.audio_seen.set()
+                    return AudioPushResult(True)
+                async def wait_playback(self, timeout): return AudioPushResult(True)
+            context = create_context_service(str(tmp_path / 'history.jsonl'))
+            channel, behavior = create_channel(Transport()), create_behavior()
+            session = (await channel.execute(JoinRoom('join', RoomTarget('a', 'c'), 0))).session
+            behavior.start_session(session)
+            try:
+                context.observe(Observation('alice', session, 'earlier', 1, 'recognized',
+                    '我们在看反常积分', 'alice', 'alice'))
+                context.observe(Observation('carol', session, 'earlier', 2, 'recognized',
+                    '被积函数是一除以x平方', 'carol', 'carol'))
+                result = await run_cascade(backend=backend, context=context, behavior=behavior,
+                    channel=channel, session=session, trigger_id='bob', user_key='bob',
+                    pcm=b'\x01\x00'*16000, sample_rate=16000, limit=0,
+                    settings=ReplySettings(probability=0), interpret_controls=False,
+                    current=lambda: True, on_playing=lambda _: None)
+                assert result.outcome.status == 'completed'
+                assessment, formal = state.chat_requests
+                payload = json.loads(assessment['messages'][-1]['content'])
+                assert payload['current_speaker'] == 'bob'
+                assert [(row['speaker'], row['content']) for row in payload['history']] == [
+                    ('alice', '我们在看反常积分'), ('carol', '被积函数是一除以x平方')]
+                messages = formal['messages']
+                assert [json.loads(row['content']) for row in messages[1:-1]] == [
+                    {'speaker': 'alice', 'text': '我们在看反常积分'},
+                    {'speaker': 'carol', 'text': '被积函数是一除以x平方'}]
+                assert messages[-1] == {'role': 'user', 'content': '那它为什么收敛？'}
+                assert '当前发言者身份："bob"' in messages[0]['content']
+                assert result.reply_text == '你好。再见。'
+                assert all('speaker' not in text and 'alice' not in text for text in state.text)
+            finally:
+                await context.close()
     asyncio.run(run())

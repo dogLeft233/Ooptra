@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from behavior.models import AttemptFinished, AttemptPermit, AttemptRejected, AudioReady
 from channels.models import IncomingAudio, UtteranceResult
+from context.models import Observation
 from dialogue.api import RecognitionStream
 from dialogue.models import AudioInput
 
@@ -27,7 +28,7 @@ class PreparedRecognition:
 
 
 class RecognitionInputs:
-    """最多8份识别租约；被信箱替换的输入在冷却+4秒后关闭，不进入记忆。"""
+    """最多8份识别租约；被信箱替换的输入在冷却+4秒后关闭；已完成识别仍提交房间事实。"""
     def __init__(self, host):
         self.host = host
         self._active: dict[str, PreparedRecognition] = {}
@@ -39,6 +40,15 @@ class RecognitionInputs:
     async def _watch(self, item: PreparedRecognition):
         try:
             result = await item.stream.result()
+            if result.status == "recognized":
+                try:
+                    self.host.context_service.observe(Observation(
+                        item.trigger.trigger_id, item.trigger.session, item.trigger.session.session_id,
+                        item.permit.attempt_number, "recognized", text=result.text,
+                        user_key=item.trigger.user_key, input_ref=item.trigger.trigger_id))
+                except Exception:
+                    logger.exception("event=context.recognition.failed session_id=%s input_ref=%s",
+                                     item.trigger.session.session_id, item.trigger.trigger_id)
             self.host.observations.trace(item.trigger.session, item.trigger.trigger_id, item.trigger.user_key,
                 "recognized", text=result.text, reason="awaiting_decision" if result.text else result.status,
                 recognition_status=result.status)

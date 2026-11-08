@@ -266,12 +266,12 @@ class ContextLedger:
             pairs = tuple((str(k), encoded(v)) for k, v in receipts.items())
         return DeliveryStatus(identifier, row[0], pairs)
 
-    def scoped_history(self, *, room: str, source: str = "", user_key: str = "", limit=None, exclude_input_ref: str = ""):
+    def scoped_history(self, *, room: str, source: str = "", user_key: str = "", limit=None, exclude_input_ref: str = "", since: float = 0):
         with self.transaction() as db:
             # Imported legacy entries have no trustworthy room and remain available only in the explicit legacy view.
             excluded = "input:" + exclude_input_ref if exclude_input_ref else ""
-            rows = db.execute("SELECT role,content FROM history WHERE room=? AND (?='' OR source='' OR source=?) AND (?='' OR user_key='' OR user_key=?) AND (?='' OR entry_id<>?) ORDER BY seq DESC LIMIT ?", (room, source, source, user_key, user_key, excluded, excluded, limit or self.max_turns)).fetchall()
-        return tuple(HistoryMessage(role, content) for role, content in reversed(rows))
+            rows = db.execute("SELECT role,content,user_key,ts FROM history WHERE room=? AND (?='' OR source='' OR source=?) AND (?='' OR user_key='' OR user_key=?) AND (?='' OR entry_id<>?) AND ts>=? ORDER BY seq DESC LIMIT ?", (room, source, source, user_key, user_key, excluded, excluded, since, limit or self.max_turns)).fetchall()
+        return tuple(HistoryMessage(role, content, user_key, ts) for role, content, user_key, ts in reversed(rows))
 
     def revision(self):
         with self.transaction() as db:
