@@ -1,0 +1,129 @@
+# 五模块重构准备与验证
+
+状态：2026-11-08 顶层及内部子模块详细设计已形成；渠道首个房间控制代码切片已迁入，第一批尚未整体验收。本文是迁移计划和本次验证记录，长期职责与契约分别以 [系统架构](../../../ARCHITECTURE.md) 及模块说明为准，重要取舍见 [边界设计](../specs/2026-11-08-module-boundaries.md)。
+
+## 核实范围与实际差距
+
+本次以 Codegraph 查询和定向阅读核实入口、关键调用、状态及相关测试，不声称遍历全部动态回调。保留当前未提交工作；没有移动业务代码、改配置数据、运行真实升级或重新接入房间。
+
+| 当前证据 | 重构需改变的边界 | 目标导航 |
+| --- | --- | --- |
+| `BridgeController` 在 `src/bridge/app.py` 管连接，`VoiceRuntime.bind_bot/set_bot_ready` 将其绑定语音 | 真实连接/重绑状态归渠道；装配只连接生命周期 | [渠道](../../../src/channels/README.md) |
+| `VoiceAgent.join/leave/_wire_live/_stop_reply_locked` 同时管理房间锁、执行代次、模型和播放 | 房间/输出状态收敛渠道；模型资源归生成；跨模块取消由应用传递 | [渠道](../../../src/channels/README.md)、[生成](../../../src/dialogue/README.md) |
+| `ContextBridge` 持有来源、pending/outbox；`MemoryStore` 持有本地历史；后端读取 bridge | 上下文独立准备/记录/投递，模型只接准备结果，保留旧来源范围 | [上下文](../../../src/context/README.md) |
+| `VoiceAgent._handle_utterance_reply` 在首次后端 await 前增加级联尝试数；`AutoVisitController` 持有串门时钟、计数和暂停状态 | 策略状态归行为；不能把失败消耗额度改为成功播放数 | [行为](../../../src/behavior/README.md) |
+| `VoiceBackend.handle_utterance` 合并识别与回复，`StreamingUtterance` 用音频回调；Gemini 用持续会话回调 | 级联独立识别；共同生成流与 Live 专门端口分别设计，保留能力差异 | [生成](../../../src/dialogue/README.md) |
+| `VoiceRuntime._save_output_volume` 导入 `webui.config_editor`；`MaintenanceService` 与 HTTP 路由同文件；launcher/worker 负责停机后维护 | 配置/维护独立于 HTTP，注入管理端口，父子进程阶段和数据保护保留 | [维护](../../../src/operations/README.md) |
+| WebUI 和独立语音 API 仍使用 VoiceAgent/运行时，旧模块存在跨职责访问 | 逐个迁移调用者并保留旧响应适配，最后删除旧入口，不做一次性目录搬迁 | [测试导航](../../../tests/README.md) |
+
+## 分批实施及退出条件
+
+每一批都是可回归、可单独审查的变更。先迁移拥有者及其调用者，再删除兼容入口；不同时运行两份同一状态。不为后续批次创建空 Python 接口或目录。
+
+### 第一批：渠道房间控制
+
+范围：`VoiceAgent.join/leave` 的房间执行、bot/duplex 绑定、状态查询；迁移 WebUI/语音 API 的进退房和自动串门对房间的访问。先创建渠道公开类型/API/工厂及最小内部实现，`app` 按需创建装配，兼容旧 HTTP 响应。
+
+- 在改代码前列出相关调用者（含 getattr/回调）和现有测试；明确保留的公开兼容行为。首个 PR 将此清单随代码审查保留。
+- 迁出锁/代次/真实房间后，旧 `VoiceAgent` 仅通过渠道契约访问；不能在 `_internal/legacy.py` 包一层后继续让旧对象和新对象各改一份状态。若暂不能拆出拥有者，标为兼容过渡，不能通过本批完成验收。
+- 渠道接口覆盖真实成功、断连、退房失败、并发手动/自动、重复命令、旧会话失效与取消。用外部 SDK/传输替身，尽量保留模块内部真实执行。
+- `scripts/check_architecture.py` 补根架构允许依赖矩阵、禁止环和相关正反例；公开 API/工厂返回类型人工检查。当前脚本只提供目录/私有导入/旧代码隔离约束。
+- 退出：相关调用者不读 SDK bot、房间锁或内部 epoch；唯一房间拥有者；旧测试行为不丢；公开接口故障测试、完整套件和 lint/type 检查通过。
+
+第一批只迁移房间控制，不同时重写全部 Live/级联生成；旧播放代码在过渡期间也必须通过同一房间拥有者取得受限会话能力，禁止复制真实房间字段。无法保持此条件时，将会话绑定的最小播放入口纳入同批，缩小其他范围。
+
+### 第二批：播放与执行结果
+
+渠道接管播放、输出状态、取消及终态台账，生成流暂用明确兼容适配接入；应用通过公开接口传递结果。覆盖旧会话不能写新传输、流关闭级联、打断、推流失败、队列满载与播放确认。终态事件和返回值重复到达不能重复记忆。退出条件是生成完成和实际输出完成分离，所有播放器共享同一执行拥有者，不留旧直推通路。
+
+### 第三批：行为与上下文
+
+抽离配额/冷却/串门，提供情境快照、上下文准备、结果记录和 outbox。先保留 AstrBot HTTP/OneBot 兼容，不改来源键或既有数据库。补 AudioReady尝试准入/首次ASR前计额、NoAction不生成、AttemptFinished冷却、失败不退款、过期意图收尾、来源切换/重复回执/存储失败的公开行为测试。上下文事务存储选择独立SQLite，新路径由现有记忆目录派生；迁移前验证旧JSONL/outbox导入幂等、来源完整、失败停止和新记录回退/导出，并同步备份清单/SQLite在线备份，禁止双写两份权威历史。退出条件是后端与行为不再直接操作记忆存储，行为不读取房间私有状态，文字与语音路由不重复响应。
+
+### 第四批：级联与 Live 生成
+
+先完成级联识别/生成拆分和共同流契约，再迁移 Live 端口。Live 编码前完成一个隔离适配试验：把现有音频/文本/turnComplete/interrupted 回调映射为本地会话及轮次 ID，证明输出许可不阻塞 reader、未批准音频不外泄、队列/许可超时有界、打断/关闭无死锁、旧会话回调无效。真实协议没有全局轮次 ID，不能直接假定上游提供。
+
+试验无法满足时先修订生成契约和能力限制，不能在应用中加供应商分支掩盖。无需当前就安装框架或访问模型。退出需共同生成行为测试、能力特有测试及 [语音联调验收](../../bot-pair-acceptance.md) 的适用路径；纸面推演或 fake 不能替代真实语音/Live 验收。
+
+### 第五批：配置与维护收敛
+
+提取配置/维护能力和管理端口，迁移 WebUI、运行时保存配置及 launcher/worker 交接。覆盖配置版本冲突、持久化/热应用部分失败、单任务互斥、候选进程写屏障、quiesce部分失败、handoff后主循环退出、受管重启及回滚，保留数据和身份映射。退出条件是业务不导入 WebUI，维护能力可在无 HTTP 的隔离环境测试，旧路由和受管启动行为兼容。
+
+每批统一收尾：按实际代码更新模块说明；接口落地后把草案签名替换为代码导航；测试随实现迁至同名模块目录并核对收集结果；删除无调用者的旧入口与迁移豁免。运行仓库要求的相关/完整 pytest、Ruff、Pyright，界面变化再补浏览器验证；仅文档更新不重复运行无关联调。
+
+## 架构设计阶段验证
+
+| 检查 | 范围与结论 | 证据边界 |
+| --- | --- | --- |
+| 导航和层次 | 根架构 → 五模块 → 当前入口/测试/计划；每模块按独立知识分子能力，不机械建子目录 | 静态阅读和路径核对，不证明已迁移 |
+| 接口使用 | 房间、级联、切房取消、Live、外部文字和维护完成公开契约推演，补齐原草案遗漏的操作 | [接口演练](../specs/2026-11-08-module-boundaries.md)，伪代码，不是可运行新 API |
+| 唯一状态归属 | 实际房间/播放归渠道，记忆/outbox归上下文，配额归行为，模型缓存归生成，配置/维护任务归维护 | 目标约束；当前 VoiceAgent 混合职责仍须逐批迁移 |
+| 静态依赖 | 五模块类型引用可拓扑排序：渠道 → 上下文 → 行为 → 生成；维护独立，通过装配注入 | 设计分析；现有检查器不执行矩阵或检查所有动态访问 |
+| 变化与去层 | 五种变化已核对现有扩散入口及目标收敛方式；每模块有独有知识 | 设计分析，未替换真实后端或存储 |
+| 故障收尾 | 切房迟到、取消、流关闭、重复回执、配置部分失败与重启都有指定拥有者和验证批次 | 契约推演；目标接口测试待各批补齐 |
+
+本次自动检查结果在完成检查后写入下节。结论只针对当前工作区，不代替迁移后验证。
+
+## 自动检查记录
+
+### 顶层草案验证（此前轮次）
+
+- 文档验证：9 个受影响文档的 67 个本地链接/锚点有效；18 个当前类/方法经 AST 核对存在；提及的现有测试文件均存在。检查沿实际 Markdown 链接，不把未实现的 `api.py` 当成有效代码入口。
+- 目标依赖图：按根文档矩阵可拓扑排序，无环；这是声明图的设计检查，不是当前代码全图检查。
+- `.venv/bin/python scripts/check_architecture.py`：通过，旧模块保留迁移豁免。
+- `.venv/bin/python -m pytest tests/architecture tests/test_voice_operations.py tests/test_voice_duplex_rebind.py tests/test_tts_completion.py tests/test_bridge_restart.py tests/test_astrbot_context_bridge.py tests/test_memory_recent.py tests/test_auto_visit_controller.py tests/test_voice_turn_limit.py tests/test_round_throttle.py tests/test_live_turn_lifecycle.py tests/test_gemini_session_lifecycle.py tests/test_maintenance_health.py tests/test_maintenance_payload_boundaries.py -q -o faulthandler_timeout=60`：**173 passed**。这是所选现有行为与架构检查的基线，不是目标新 API 的测试。
+- `git diff --check`：通过。
+
+本次只修改架构文档和 AGENTS 索引，未运行全套 pytest、Ruff/Pyright、浏览器或真实语音验收；未创建新接口代码，也未新增自动化检查。文档链接和符号核对使用临时检查脚本，没有声称已接入 CI。
+
+## 子模块详细设计与互审（本轮）
+
+采用三位 subagent 并行细化、互相只读审查，由主 agent 完成维护/装配设计及跨模块整合。五模块共12份内部设计：渠道2、上下文3、行为2、生成2、维护3；装配层另有一份说明。它们分别定义内部任务操作、最小字段/不变量、独有状态、状态机、并发/取消、故障序列、依赖和迁移切片；平台适配、执行台账、公共输出等尚不值得独立目录的能力留在父文档/候选简单文件中。
+
+互审已在目标设计中修正以下问题，仍需实现测试证明：
+
+| 发现的反例 | 已落实的设计修正 |
+| --- | --- |
+| 只有Speak扣额会改变现有空ASR/沉默/控制计数，且无action无法结冷却 | AudioReady→ProcessInput(AttemptPermit)，同attempt后续不重复扣；AttemptFinished独立结算；动作反馈不重复设冷却 |
+| Live许可在决策后被拒绝会留下悬空action；二态许可丢晚转录 | Allow/Hold/Reject及有界revision；确认未受理时NotExecuted(permission)，重复已受理回执返回原绑定 |
+| 生成失败被转成正常EOS、帧过大或提前关闭却等待终态 | dialogue公开audio_output接管切分/编号/错误/关闭，单帧64KiB与累计预算分开，部分evidence立即可读 |
+| Live控制工具和记忆工具无法通过草案接口往返，试听缺少合法目标 | 具名控制候选/结果回传、ContextToolPort及prepare授权引用、独立preview请求；不恢复SDK/记忆内部后门 |
+| outbox满载后幂等记录阻止补投；历史和outbox不能共同提交 | 独立SQLite事务台账；同键重试只补未受理投递，保留原目标及确认状态 |
+| 新候选进程内存锁绕过维护；quiesce后无退出步骤；部分关闭被称旧服务继续 | 持久任务角色控制写屏障，显式request_exit和父确认退出；blocked/degraded保留资源清单 |
+| 切房前检查epoch无法挡住await中的旧push | 会话失效后等输出屏障；未确认停止隔离旧绑定，不在新房复用 |
+
+本轮检查结果：22份文档、109个本地链接/锚点、39个现有测试文件核对通过；所有内部设计从根架构逐级可达；目标声明依赖图可拓扑排序；没有创建空Python接口。文档检查使用临时脚本，未新增CI保证。
+
+现有测试基线：渠道agent选定房间/重绑/尾音测试30 passed；生成agent选定后端/Live测试105 passed；主agent运行架构、上下文、行为、配置与维护的19组文件/目录，221 passed、1 skipped。各组为已存在实现的回归证据，不等于新接口已被测试。主agent命令：
+
+```bash
+.venv/bin/python -m pytest tests/architecture tests/test_astrbot_context_bridge.py tests/test_astrbot_bridge_routes.py tests/test_memory_recent.py tests/test_auto_visit_controller.py tests/test_auto_visit_state.py tests/test_round_throttle.py tests/test_voice_turn_limit.py tests/test_config_editor.py tests/test_config_file_store.py tests/test_voice_settings_reload.py tests/test_maintenance_worker.py tests/test_maintenance_atomic_status.py tests/test_maintenance_deadlines.py tests/test_maintenance_health.py tests/test_maintenance_rehearsal.py tests/test_maintenance_archive_boundaries.py tests/test_maintenance_backup_delete.py tests/test_maintenance_storage_cleanup.py -q -o faulthandler_timeout=60
+```
+
+本轮 `scripts/check_architecture.py`、`git diff --check` 通过。只编辑文档和AGENTS导航，未迁移业务代码、创建新数据库、修改真实配置或进行真实模型/房间/更新验收；没有运行全套测试、Ruff/Pyright或浏览器验收。
+
+## 重构就绪结论
+
+第一批所需的模块归属、内部会话/播放屏障、输入/结果语义、状态拥有者、兼容入口和退出条件已明确，可开始房间控制切片。渠道首个代码切片已落地（见下节），第一批尚未整体验收，不宣称全系统已完成隔离。Live 输出许可、跨流关闭与配置部分应用的实现证明分别是对应批次的开工/退出门槛；这些风险不阻碍第一批，但阻止未经验证就迁移或删除现有通路。
+
+
+## 首个代码切片：渠道房间事实与最小音频屏障
+
+本轮按用户确认的 execute、snapshot/outcome 公共边界执行逐条红绿测试。真实外部传输使用可控替身，渠道状态机和执行协作保留真实代码；新增契约测试并非复述旧方法调用次数。
+
+- 代码入口：`src/channels/api.py`、`models.py`、包工厂、`_internal/session/service.py` 和 `_internal/legacy.py`。首次迁入不预建其他四模块空实现。
+- 调用者范围：VoiceAgent 的 join/leave/status，Live、级联、快捷开口及公告的音频推送；WebUI、独立语音 API 和自动串门暂沿原入口，经 VoiceAgent 兼容编排调用渠道。旧房间字段改为只读快照投影，没有新旧两份可变房间真相。
+- 保留的兼容行为：HTTP 字典响应、成功操作事件在高层锁外通知、自动请求不覆盖已有房间、输入限额与冷却、模型/上下文初始化失败补偿退房。底层外部异常不再直接回传正文，改为稳定失败原因；状态额外公开 room_state，便于区分不确定性。
+- 真实副作用边界：渠道拥有实际进退房及最小推送屏障；房间转换与在途推送互斥。拒绝旧 SessionRef；推送/外部操作超时保留未完任务引用，效果未知时禁止复用。有限台账活动 128、总量 1024，终态至少保留十分钟，满载拒绝新动作。
+- 尚未完成第一批：bot/duplex 异步绑定、断连关闭、自动串门的平台成员查询、手动抢占及高层锁/代次仍需迁出。完整播放命令、显式 cancel、事件流、帧格式/字节预算和播放确认属于后续切片。不能把本轮结果标作第一批或五模块重构全部完成。
+
+测试发现修复：首次执行未限定范围的 pytest 时，误收集 `data/run_bot_pair_test.py` 并触发现有实例联调。相关运行已中止，两次可见收尾均报告两端退房成功；这些调用的是现有实例，不是本轮代码验收证据。新增默认 tests 范围和隔离行为测试；撤掉 testpaths 时该测试确实失败，恢复后通过。没有修改真实配置或执行升级/恢复。此事件不算新实现真实房间验收。
+
+本轮最终验证（当前工作区，未提交）：
+
+- `.venv/bin/python -m pytest -q -o faulthandler_timeout=60`：**1112 passed、1 skipped、0 failed，20.90 秒**。其中 `tests/channels/test_room_contract.py` 有 16 项公开契约/实际旧入口协作测试；完整套件也覆盖旧 HTTP、串门和生成通路。
+- `.venv/bin/python -m ruff check .`：通过；激活虚拟环境后 `python -m pyright`：**0 errors、0 warnings**；`python scripts/check_architecture.py`、`git diff --check`：通过。
+- 文档核对：24 份文档、128 个本地链接/锚点、39 个引用的现有测试文件有效；模块说明可从根导航抵达；临时检查脚本没有接入 CI。
+- 故障敏感性证据：临时删除实际退役输出屏障后，切房测试在“在途音频未收尾时，切房不能完成”断言失败；恢复后通过。撤掉 pytest 默认 tests 范围后，隔离发现测试因导入模拟手工脚本失败；恢复后通过。两处故障注入均已还原。
+- 未验证：新实现真实 Oopz/Live/模型联调与完整播放终态；未修改界面，未运行浏览器验收或生成截图。此前误触的旧实例调用不计为本轮实机验证。未迁出的第一批职责按上文保留，不宣称已全部完成。

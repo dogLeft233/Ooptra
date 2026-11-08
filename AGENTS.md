@@ -1,6 +1,6 @@
 # 仓库贡献指南
 
-探索或修改代码前，先阅读 [ARCHITECTURE.md](ARCHITECTURE.md)，了解子系统职责、运行路径与状态归属。变更影响这些边界或路径时，同步更新架构文档。
+探索或修改代码前，先阅读 [ARCHITECTURE.md](ARCHITECTURE.md)，了解渠道交互、上下文管理、行为决策、对话生成、系统维护五模块的目标职责、接口与状态归属，以及当前实现的迁移入口。本文描述的目标接口尚未全部实现，修改时核对代码与迁移状态；变更影响职责、接口或运行路径时同步更新架构文档。
 
 ## 文档语言与索引
 
@@ -10,18 +10,31 @@
 
 | 文档或目录 | 内容与阅读时机 |
 | --- | --- |
-| [代码要求与开发模板](docs/coding-standards.md) | 新增或修改代码、测试、lint 配置及准备提交时阅读 |
-| [代码审查要求](docs/code-review.md) | 审查代码或修改外部输入解析、领域类型及消费方时阅读；逐入口追踪解析结果与构造不变量 |
+| [代码要求与开发模板](docs/coding-standards.md) | 新增或修改代码、测试、日志、lint 配置及 Git 提交、推送、PR 操作时阅读 |
+| [代码审查要求](docs/code-review.md) | 审查代码或修改输入解析、领域类型、日志及异常处理时阅读 |
 | [工程规范与模板选型依据](docs/engineering-sources.md) | 调整工程规范或评估外部模板、工具时参考 |
-| [配置与维护指南](docs/operations.md) | 修改配置、启动方式、环境变量、更新或数据备份时阅读 |
+| [配置与维护指南](docs/operations.md) | 修改配置、启动方式、环境变量、日志排障、更新或数据备份时阅读 |
 | [语音与 API 指南](docs/voice-guide.md) | 修改语音后端、播放控制、进退房、自动串门或 HTTP API 时阅读 |
+| [双机器人语音联调验收](docs/bot-pair-acceptance.md) | 修改语音采集、VAD、模型后端、推流、成员映射、监听白名单、回合限额、进退房或多实例运行时阅读并核对验收 |
 | [AstrBot 上下文同步](docs/astrbot-context-sync.md) | 修改人格、会话来源、记忆同步或插件交互契约时阅读 |
 | [Pyright 诊断修复记录](docs/pyright-audit.md) | 处理类型检查及相关运行边界问题时参考 |
 | [三渠道同步审查](docs/repository-audit.md) | 检查历史审查范围、修复背景和发布验证约束时参考 |
+| [渠道子模块设计](src/channels/README.md) | 修改平台适配、房间状态机、音频输入/输出、执行台账时，经子模块导航深入 |
+| [上下文子模块设计](src/context/README.md) | 修改情境投影、事务历史/outbox、来源/授权或 AstrBot RPC 时阅读 |
+| [行为子模块设计](src/behavior/README.md) | 修改接话尝试/冷却、Live 等待、串门及主动调度时阅读 |
+| [生成子模块设计](src/dialogue/README.md) | 修改级联 job、Live 会话、工具端口或输出证据协议时阅读 |
+| [维护子模块设计](src/operations/README.md) | 修改配置事务、备份边界、任务交接或失败恢复时阅读 |
+| [应用装配与流程](src/app/README.md) | 修改跨模块任务、输入路由、工具端口适配或管理面停止顺序时阅读 |
+| [模块边界与接口演练](docs/superpowers/specs/2026-11-08-module-boundaries.md) | 设计模块接口、核对依赖与推演级联/Live/取消流程时阅读 |
+| [五模块重构准备](docs/superpowers/plans/2026-11-08-module-refactor-readiness.md) | 开始重构、确定迁移批次、检查现状证据与验收门槛时阅读 |
 | [设计方案目录](docs/superpowers/specs/) | 查阅自动串门、语音与维护功能的设计背景 |
 | [实施计划目录](docs/superpowers/plans/) | 查阅功能实施、验证、渠道同步和发布的历史计划 |
 
-审计记录和历史方案按其记录时点理解；当前行为以代码、配置及测试核实，存在差异时明确说明。
+内部详细设计通过所属模块 README 的子模块索引维护，不在顶层复制全部接口。审计记录和历史方案按其记录时点理解；当前行为以代码、配置及测试核实，存在差异时明确说明。
+
+项目级 skill：[深模块架构设计](.agents/skills/design-deep-modules/SKILL.md)。设计或审查模块划分、公开接口、状态归属，或维护及验证架构文档时读取，执行其中的禁止事项与自查；普通局部修复不因此扩大为全库重构。
+
+项目级 skill：[Prove It](.agents/skills/prove-it/SKILL.md)。交付前验证、同一问题被再次纠正，或编写与清理测试时读取。
 
 ## 项目结构与模块组织
 
@@ -33,6 +46,10 @@ Ooptra 基于 Python 3.10+，连接 Oopz 与 OneBot v11/AstrBot，并提供实�
 - `src/webui/` 包含控制台路由与前端资源；根目录 `assets/` 存放文档配图。
 - `src/oopz_sdk/` 是内置上游 SDK。保留其现有代码风格，兼容性修复需通过回归测试验证。
 - `tests/` 存放 Python 测试，`tests/browser/` 存放浏览器检查，`docs/` 存放操作与开发文档。
+
+## 模块导航与目录约束
+
+新增能力或迁移实现时，从 [架构中的模块导航](ARCHITECTURE.md#接口与数据契约) 选择模块，先读其 `README.md` 和已实现的 `api.py`、`models.py`，再进入 `_internal/`。遵循 [目录规则](docs/coding-standards.md#模块目录与接口导航)；现有目录处于迁移期，导航中的接口草案不代表实现已存在。测试归属与执行入口见 [测试导航](tests/README.md)。
 
 ## Codegraph 代码查询
 
@@ -51,6 +68,7 @@ Ooptra 基于 Python 3.10+，连接 Oopz 与 OneBot v11/AstrBot，并提供实�
 - `cp config.example.py config.py`：首次检出时初始化本地配置。
 - `python launcher.py`：启动应用，控制台默认地址为 `http://127.0.0.1:3090`。
 - `python -m pip install -r requirements-optional.txt` 和 `python -m playwright install chromium`：安装可选语音及浏览器功能所需依赖。
+- `python scripts/check_architecture.py`：检查模块目录与公开接口导入约束。
 - `ruff check .` 和 `pyright`：执行代码规范与类型检查。
 - `npm ci` 和 `npm run lint:js`：安装锁定的开发工具并检查正式 JavaScript 与浏览器测试（Node.js 22.13+ 的 22.x 或 24+）。
 - `python -m pre_commit install`：可选安装本地提交检查；`python -m pre_commit run --all-files` 手动运行，使用已激活的开发虚拟环境。
@@ -65,9 +83,17 @@ Python 使用四空格缩进，函数和模块使用 `snake_case`，类使用 `P
 
 pytest 文件命名为 `test_<behavior>.py`，测试函数使用描述性的 `test_*` 名称。通过 `tmp_path`、`monkeypatch`、合成凭据和模拟服务隔离回归测试。开发时先运行相关测试，提交前运行完整套件。当前未配置数值化覆盖率门槛。
 
+| 规则 | 由什么拦住 |
+| --- | --- |
+| 默认测试收集只进入 `tests/`；真实联调脚本单独按验收指南执行，禁止用 `pytest .` 扩大收集 | `pyproject.toml` 的 `testpaths` + `tests/architecture/test_test_discovery.py`；显式指定其他路径仍需人工核对 |
+
 界面变更还需运行 `tests/browser/` 下的 Playwright 脚本；依赖安装方式与执行命令见 `.github/workflows/ci.yml`。
 
+语音链路或多实例运行的变更，还需按 [双机器人语音联调验收](docs/bot-pair-acceptance.md) 核对适用路径，记录真实双向接话、轮数限制和两端退房证据。未实测的路径明确标为未验证；验收结论注明版本与证据范围。
+
 ## 提交与 Pull Request 要求
+
+Agent 按 [Git 仓库工作流程](docs/coding-standards.md#git-仓库工作流程) 检查已有改动、拆分完整提交、验证快照并核对远端 CI 与合并门禁。
 
 当前浅克隆历史仅包含一条描述性合并提交，无法据此确定提交前缀惯例。提交标题应简洁，以动作描述变更。PR 需说明行为变化、关联相关问题并列出验证结果；界面变更附截图，涉及预览时同步重新生成。
 

@@ -255,3 +255,10 @@ DELETE /memory
 
 例如 [astrbot_plugin_ooptra](https://github.com/Eason4869/astrbot_plugin_ooptra) 默认接入 WebUI 端口，令牌填写 `WEBUI_CONFIG.token`；
 独立端口也填写同一个 Token；旧 `VOICE_API_CONFIG.token` 与 `VOICE_API_TOKEN` 不再读取。绑定所需域与频道 ID 在「会话控制」复制。
+
+
+## 双机器人有界联调
+
+双实例隔离配置、`cascade_turn_limit` 的额度语义、同频道复测步骤、停止与退房要求，
+统一见 [双机器人语音联调验收](bot-pair-acceptance.md)。该文档同时保存首次实测结论和回放证据，
+作为语音功能的验收标准之一。

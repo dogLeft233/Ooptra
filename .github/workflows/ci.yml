@@ -27,6 +27,8 @@ jobs:
           pip install -r requirements-dev.txt
       - name: ruff
         run: ruff check .
+      - name: 模块目录与接口依赖
+        run: python scripts/check_architecture.py
       - name: Type check with example configuration
         run: |
           python -c "import shutil; shutil.copyfile('config.example.py', 'config.py')"

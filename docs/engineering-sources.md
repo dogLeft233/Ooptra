@@ -18,6 +18,10 @@ Ooptra 已有 `src/`、pytest、Ruff、Pyright 和 GitHub Actions，核心复杂
 | [Google Python Style Guide](https://google.github.io/styleguide/pyguide.html) | 用 lint 消除常见错误；合理抑制误报并说明原因；明确资源释放和类型信息 | 保留现有 Ruff/Pyright；抑制限定到具体规则和位置。Google 的工具选型与行宽属于其组织约定，本项目继续使用自身配置 |
 | [Microsoft：Pyright 渐进类型检查](https://github.com/microsoft/pyright/blob/main/docs/getting-started.md) | 逐步增加参数、实例变量及返回值类型，将类型检查放入 CI；可按文件提高严格程度 | 保留 standard 模式，优先补清模块接口、配置和外部输入类型；新建模块可独立评估更严格检查，避免以全局忽略消除诊断 |
 
+## 模块设计依据
+
+[Matt Pocock 的文章](https://www.aihero.dev/how-to-make-codebases-ai-agents-love) 与 [John Ousterhout 的 Modular Design 讲义](https://web.stanford.edu/~ouster/cgi-bin/cs190-winter18/lecture.php?topic=modularDesign) 的提炼和项目应用集中维护在 [深模块架构设计 skill](../.agents/skills/design-deep-modules/SKILL.md)。设计或审查模块边界时读取；它明确区分原文原则与项目选择，不将目录层级或文件数量作为架构质量标准。
+
 ## 模板比较
 
 | 模板或配置来源 | 可以借鉴 | 对 Ooptra 的裁剪 |
@@ -51,3 +55,11 @@ Ooptra 已有 `src/`、pytest、Ruff、Pyright 和 GitHub Actions，核心复杂
 - WebUI 变更检查真实交互及生成预览；单独 lint 通过不能证明浏览器行为正确。
 
 关于 asyncio，Python 3.10 官方文档说明 [`create_task` 需要保留任务引用](https://docs.python.org/3.10/library/asyncio-task.html#asyncio.create_task)，并展示 [`cancel` 后等待任务与清理资源](https://docs.python.org/3.10/library/asyncio-task.html#asyncio.Task.cancel) 的行为。代码示例应以本项目最低 Python 版本为准，不能直接要求较新版本才提供的任务管理 API。
+
+## 日志与可观测性依据
+
+[Python 3.10 Logging Cookbook](https://docs.python.org/3.10/howto/logging-cookbook.html) 提供日志上下文、`QueueHandler` / `QueueListener` 与多进程输出方案。本项目据此要求集中配置、明确关联上下文和写入生命周期；当前运行实现仍为同步文本 handler。
+
+[OpenAI Harness engineering](https://openai.com/index/harness-engineering/) 描述隔离 worktree 中可查询日志、指标和调用链的验证闭环，属于具体团队实践。本项目借鉴可复现与可关联的排障方式，暂不将整套观测基础设施列为运行依赖。[Vector 管道概念](https://vector.dev/docs/introduction/concepts/) 区分采集、转换和发送；采集器不能补出业务未记录的上下文。
+
+[Ruff G101](https://docs.astral.sh/ruff/rules/logging-extra-attr-clash/) 检查 `extra` 与保留字段冲突，[PLE1205](https://docs.astral.sh/ruff/rules/logging-too-many-args/) 检查格式参数数量。项目显式选择日志规则，范围与人工审查要求见 [代码要求](coding-standards.md#日志与可观测性)。
