@@ -212,3 +212,6 @@ Draft PR [#3](https://github.com/dogLeft233/Ooptra/pull/3) 以 `codex/refactor-v
 提交前完整快照检查：`python -m pytest -q -o faulthandler_timeout=60` → **1219 passed，1 skipped，0 failed**（25.21 秒）；Ruff、Pyright、架构/退休路径、ESLint、预览同步和相对文档链接检查通过。浏览器四项现有检查在 Playwright 1.64.1/Chromium 上完成，96种布局审计无脚本错误；CI仍按仓库锁定的1.63.0再验证。
 
 完整任务/事务/播放/控制、类型值边界及原生HTTP/WS回归均在本快照；下面另追加固定提交和两轮真实双 bot 结果。真实双 bot 验收仍按 [既有操作指南](../../bot-pair-acceptance.md) 执行，独立记录模型、双向接话、轮次上限和两端退出。真实生产更新/恢复、人耳声学验证和 Gemini Live 外部网络若未执行，明确保留其证据边界。
+
+
+最终代码与清理证据：完整实现提交 `0037efc6c8908583c67c88a73a7b5b0e8e809ca6`，两端同版本真实接话 **51.75 秒、各三次完成、均确认退房**；最终无引用代码清理提交 `afafabc14ff15ce6ce931bd7d365d9e3148a7d24`，再次全套 **1219 passed、1 skipped、0 failed**（24.75 秒），重新部署后真实接话 **47.48 秒、各三次完成、均确认退房**。两轮验收开始时均无已跟踪差异，两端配置哈希均未改变。上下文迁移后的 SQLite 完整性检查通过。完整步骤、模型和证据边界见 [双 bot 验收记录](../../bot-pair-acceptance.md)。后续纯文档提交不作为进程已加载新代码的证据。

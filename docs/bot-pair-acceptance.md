@@ -171,3 +171,13 @@ python scripts/run_bot_pair_acceptance.py /绝对路径/Ooptra /绝对路径/Oop
 - **51.75 秒完成两端各三次自动回复，渠道实际终态各有三个独立完成标识，尝试数 3 / 3、轮数 4 / 3，最终退房确认 `[true, true]`。** 对话由周末散步接续到图书馆、散文和推理小说；末段有一句 ASR 仅识别出短片段，因此不将本轮视为识别质量保证。
 - 原始证据保存在本机 `data/bot-pair-contracts-0037efc.json`、`data/bot-pair-contracts-deployment.json`；包含真实身份与对话，不纳入 Git。本轮未生成新录像。
 - 此后删除已无调用的凭据模板读取旧辅助函数、两份旧 VAD 桩及节流测试辅助函数，清理完成后再次部署同版本双端并验收，记录见下一节。
+
+
+### 2026-11-08 最终旧代码清理后复测（Asia/Shanghai）
+
+- 两端实际运行提交均为 `afafabc14ff15ce6ce931bd7d365d9e3148a7d24`，验收开始时均无已跟踪差异。核对旧进程身份后正常退出并重新启动，新应用 PID 为 94725 / 94780；配置哈希未变，账号、密钥、身份库与历史文件保留。
+- **47.48 秒完成一次开场与六次自动回复，两端各三次实际播放完成，尝试数 3 / 3、轮数 4 / 3，最终退房确认 `[true, true]`。** 双方从阅读话题接续到约定下午两点在图书馆门口见面；没有把模拟响应或供应商生成结束当成渠道播放完成。
+- 清理后的全套 `python -m pytest -q -o faulthandler_timeout=60`：**1219 passed、1 skipped、0 failed**（24.75 秒）。Ruff、Pyright、架构与提交钩子通过。两个实际迁移生成的 `data/voice_memory_context.sqlite3` 均通过 SQLite `quick_check`，历史 JSONL 原件仍保留。
+- 证据：本机 `data/bot-pair-contracts-afafabc.json`、`data/bot-pair-contracts-cleanup-deployment.json`；原始报告不纳入 Git。本轮未生成新录像，历史录像不冒充本轮证据。
+- 结束后两应用继续运行、均已退房；限额、白名单和模型配置保持原样。随后仅提交验收文档，运行代码仍是上述 SHA。
+- 未执行 Gemini Live 云端实机/第三账号人工音质旁听、真实生产更新及恢复；这些路径分别有协议/隔离环境测试，不能据此声称已经完成真实服务验收。OpenAI Realtime 仍是原有明确不支持的后端，不属于本次新增功能。
