@@ -84,11 +84,11 @@ def test_local_keys_do_not_expand_shell_or_override_process_env(tmp_path, monkey
 
 
 @asynccontextmanager
-async def model_servers(*, fail_asr=False, truncate=False, control=False, invalid_answer="", incomplete_asr=False, effort="low", assessment=None, transcript="你好"):
+async def model_servers(*, fail_asr=False, truncate=False, control=False, invalid_answer="", incomplete_asr=False, effort="low", assessment=None, transcript="你好", hold_chat=None):
     state = SimpleNamespace(
         text=[], chat_requests=[], audio_seen=asyncio.Event(), llm_finished=False,
         open_sockets=0, asr_bytes=bytearray(), sockets_idle=asyncio.Event(),
-        first_input=asyncio.Event(), asr_parameters=None, expected_effort=effort,
+        first_input=asyncio.Event(), chat_started=asyncio.Event(), asr_parameters=None, expected_effort=effort,
     )
 
     async def websocket(request):
@@ -160,6 +160,11 @@ async def model_servers(*, fail_asr=False, truncate=False, control=False, invali
         if body.get('response_format'):
             value = {'leave': control, 'volume': None}
             return web.json_response({'choices': [{'message': {'content': json.dumps(value)}}]})
+        state.chat_started.set()
+        if hold_chat is not None:
+            await hold_chat.wait()
+            if request.transport is None or request.transport.is_closing():
+                return web.Response(status=204)
         response = web.StreamResponse(headers={'Content-Type': 'text/event-stream'})
         await response.prepare(request)
 
@@ -694,7 +699,8 @@ def test_unselected_recognized_sentences_remain_visible_when_bot_is_busy(tmp_pat
     from context.models import VoiceTraceQuery
 
     async def run():
-        async with model_servers(transcript='大肥鱼，你在吗？') as (backend, state):
+        release = asyncio.Event()
+        async with model_servers(transcript='大肥鱼，你在吗？', hold_chat=release) as (backend, state):
             agent = make_agent(tmp_path)
             await agent.backend.aclose()
             agent.backend = backend
@@ -704,20 +710,12 @@ def test_unselected_recognized_sentences_remain_visible_when_bot_is_busy(tmp_pat
             agent.settings.cascade_turn_limit = 0
             agent.settings.force_reply_keywords = ['大肥鱼']
             await agent.join('a', 'c')
-            playing, release = asyncio.Event(), asyncio.Event()
-            async def push(pcm, rate, **kwargs):
-                if pcm:
-                    state.audio_seen.set()
-                    playing.set()
-                    await release.wait()
-                return {'ok': True}
-            agent.duplex.push_tts_pcm = push
             async def utterance():
                 await agent._on_remote_pcm('member', b'\x00\x20' * 960, 16000)
                 await agent._on_remote_pcm('member', bytes(1920), 16000)
             try:
                 await utterance()
-                await asyncio.wait_for(playing.wait(), 2)
+                await asyncio.wait_for(state.chat_started.wait(), 2)
                 await utterance()
                 await utterance()
                 async def unselected():
@@ -732,9 +730,11 @@ def test_unselected_recognized_sentences_remain_visible_when_bot_is_busy(tmp_pat
                 # 未被选中的转写仅作排障，不冒充正式对话历史。
                 assert len(agent.memory.as_messages(user_key='oopz:member')) == 1
             finally:
-                release.set()
-                await agent.leave()
-                await agent.close()
+                try:
+                    await agent.leave()
+                finally:
+                    release.set()
+                    await agent.close()
     asyncio.run(run())
 
 
