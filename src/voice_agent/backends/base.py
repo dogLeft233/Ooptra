@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -34,6 +35,25 @@ class VoiceReply:
     sample_rate: int = 24000
     user_key: str = ""
     raw: dict = field(default_factory=dict)
+
+
+class VoiceStreamInterrupted(Exception):
+    """Playback was interrupted or its room session was replaced."""
+
+
+class VoiceStreamError(RuntimeError):
+    """An audible generation failed; do not retry it as an ordinary chat turn."""
+
+
+AudioSink = Callable[[bytes, int], Awaitable[None]]
+
+
+@runtime_checkable
+class StreamingUtterance(Protocol):
+    async def handle_utterance_stream(
+        self, pcm16: bytes, *, sample_rate: int, user_key: str, channel_key: str,
+        on_audio: AudioSink,
+    ) -> VoiceReply: ...
 
 
 class VoiceBackend(ABC):

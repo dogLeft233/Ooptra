@@ -151,7 +151,8 @@ async def diagnose(agent, *, network: bool = False, audio_wav: bytes | None = No
         checks.append({"id": key, "title": title, "state": state, "detail": detail})
     elapsed = {}
     settings = agent.settings
-    mimo = (settings.backend or "").strip().lower() in {"mimo", "mimo_cascade", "cascade", "cascade_mimo"}
+    aliyun = settings.backend == "aliyun_deepseek"
+    mimo = aliyun or (settings.backend or "").strip().lower() in {"mimo", "mimo_cascade", "cascade", "cascade_mimo"}
     add("python", "Python 环境", "pass" if sys.version_info >= (3, 10) else "fail",
         ".".join(map(str, sys.version_info[:3])))
     available = importlib.util.find_spec("playwright") is not None
@@ -174,10 +175,11 @@ async def diagnose(agent, *, network: bool = False, audio_wav: bytes | None = No
         "已连接" if connected else "请先在账号页登录，并确认桥接连接状态")
     key = settings.mimo_api_key if mimo else settings.gemini_api_key
     from voice_agent.backends.gemini_live import live_url_has_key
-    configured = bool(key or (not mimo and live_url_has_key(settings.gemini_base_url)))
+    configured = (bool(settings.dashscope_api_key and settings.deepseek_api_key) if aliyun
+                  else bool(key or (not mimo and live_url_has_key(settings.gemini_base_url))))
     add("credentials", "模型凭据", "pass" if configured else "fail",
         "已配置；有效性由网络检查确认" if configured else "请在语音模型配置中填写密钥")
-    model = settings.mimo_llm_model if mimo else settings.gemini_model
+    model = settings.deepseek_model if aliyun else settings.mimo_llm_model if mimo else settings.gemini_model
     add("model", "模型配置", "pass" if model else "fail", model or "请选择模型")
     valid_rate = 8000 <= settings.sample_rate_in <= 96000 and 8000 <= settings.sample_rate_out <= 96000
     add("sample_rate", "音频采样率", "pass" if valid_rate else "fail",
@@ -224,7 +226,7 @@ async def diagnose(agent, *, network: bool = False, audio_wav: bytes | None = No
                 add("network", "音频模型自检", "fail" if failed else "pass",
                     "部分音频阶段失败，请查看分阶段结果" if failed else "独立短音频自检完成；未进入语音房")
             else:
-                add("network", "模型连接", "pass", "MiMo 对话模型请求成功；ASR 和 TTS 可用性需实际语音或试听确认" if mimo else "Live 会话建立成功；未加入语音房")
+                add("network", "模型连接", "pass", "级联对话模型请求成功；ASR 和 TTS 可用性需实际语音或试听确认" if mimo else "Live 会话建立成功；未加入语音房")
         except asyncio.CancelledError:
             raise
         except Exception as exc:

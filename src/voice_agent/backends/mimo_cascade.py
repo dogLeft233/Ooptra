@@ -11,7 +11,12 @@ import struct
 import wave
 from io import BytesIO
 
-from voice_agent.backends.base import VoiceBackend, VoiceReply
+from voice_agent.backends.base import (
+    VoiceBackend,
+    VoiceReply,
+    VoiceStreamError,
+    VoiceStreamInterrupted,
+)
 from voice_agent.context_bridge import MEMORY_RULES, memory_tools
 from voice_agent.observation import DecisionTrace, VoiceObservation
 from voice_agent.reply_policy import (
@@ -297,6 +302,17 @@ class MimoCascadeBackend(VoiceBackend):
             "Content-Type": "application/json",
         }
 
+    async def _chat_completion(self, body: dict, *, stage: str = "LLM") -> dict:
+        session = await self._http()
+        url = self.settings.mimo_base_url.rstrip("/") + "/chat/completions"
+        async with session.post(
+            url, headers=self._headers(), json=body, proxy=self._proxy_url()
+        ) as resp:
+            data = await resp.json(content_type=None)
+            if resp.status >= 400:
+                raise RuntimeError(f"{stage} failed HTTP {resp.status}")
+        return data
+
     async def asr(self, pcm16: bytes, sample_rate: int) -> str:
         wav = pcm16_to_wav(pcm16, sample_rate)
         b64 = base64.b64encode(wav).decode("ascii")
@@ -388,14 +404,7 @@ class MimoCascadeBackend(VoiceBackend):
                 **tool, "parameters": {"type": "object", "properties": {
                     key: {"type": "string"} for key in tool["parameters"]["properties"]},
                     "required": tool["parameters"]["required"]}}} for tool in memory_tools()]
-        session = await self._http()
-        url = self.settings.mimo_base_url.rstrip("/") + "/chat/completions"
-        async with session.post(
-            url, headers=self._headers(), json=body, proxy=self._proxy_url()
-        ) as resp:
-            data = await resp.json(content_type=None)
-            if resp.status >= 400:
-                raise RuntimeError(f"LLM failed HTTP {resp.status}")
+        data = await self._chat_completion(body)
         choices = data.get("choices") or []
         if not choices:
             return ""
@@ -423,11 +432,7 @@ class MimoCascadeBackend(VoiceBackend):
                         tool_results[call_id] = result
                     messages.append({"role": "tool", "tool_call_id": call.get("id", ""),
                                      "content": json.dumps(result, ensure_ascii=False)})
-                async with session.post(url, headers=self._headers(), json=body,
-                                        proxy=self._proxy_url()) as response:
-                    if response.status >= 400:
-                        raise RuntimeError(f"Memory tool follow-up failed HTTP {response.status}")
-                    data = await response.json(content_type=None)
+                data = await self._chat_completion(body, stage="Memory tool follow-up")
                 choices = data.get("choices") or []
                 if not choices:
                     return ""
@@ -477,14 +482,7 @@ class MimoCascadeBackend(VoiceBackend):
             "stream": False, "thinking": {"type": "disabled"}, "max_tokens": 64,
             "response_format": {"type": "json_object"},
         }
-        session = await self._http()
-        url = self.settings.mimo_base_url.rstrip("/") + "/chat/completions"
-        async with session.post(
-            url, headers=self._headers(), json=body, proxy=self._proxy_url()
-        ) as resp:
-            data = await resp.json(content_type=None)
-            if resp.status >= 400:
-                raise RuntimeError(f"voice intent failed HTTP {resp.status}")
+        data = await self._chat_completion(body, stage="voice intent")
         raw = str((((data.get("choices") or [{}])[0] or {}).get("message") or {}).get("content") or "")
         try:
             decision = parse_control_decision(_parse_decision_json(raw))
@@ -557,12 +555,7 @@ class MimoCascadeBackend(VoiceBackend):
             "thinking": {"type": "disabled"},
             "max_tokens": 128,
         }
-        session = await self._http()
-        url = self.settings.mimo_base_url.rstrip("/") + "/chat/completions"
-        async with session.post(url, headers=self._headers(), json=body, proxy=self._proxy_url()) as resp:
-            data = await resp.json(content_type=None)
-            if resp.status >= 400:
-                raise RuntimeError(f"announcement LLM failed HTTP {resp.status}")
+        data = await self._chat_completion(body, stage="announcement LLM")
         choices = data.get("choices") or []
         raw = str(((choices[0] or {}).get("message") or {}).get("content") or "") if choices else ""
         clean = clean_announcement(raw)
@@ -622,6 +615,8 @@ class MimoCascadeBackend(VoiceBackend):
                     with trace.measure("chat"):
                         control, reply_text = await self.chat_with_intent(text, user_key=user_key)
                     trace.timings["intent"] = trace.timings["chat"]
+                except (VoiceStreamInterrupted, VoiceStreamError):
+                    raise
                 except Exception as exc:
                     # A malformed/failed combined reply must still check semantic control.
                     failed = True

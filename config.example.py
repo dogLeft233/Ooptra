@@ -179,6 +179,19 @@ VOICE_AGENT_CONFIG = {
         "tts_model": "mimo-v2.5-tts",
         "tts_voice": "冰糖",
     },
+    # backend="aliyun_deepseek"：阿里语音识别/合成 + DeepSeek 分句流式回复。
+    # 密钥仅从进程环境或项目根目录 .env.local 读取：
+    # DASHSCOPE_API_KEY=... / DEEPSEEK_API_KEY=...（不要写进前端或提交到 Git）
+    "aliyun_deepseek": {
+        "ws_url": "wss://dashscope.aliyuncs.com/api-ws/v1/inference",
+        # 也可使用业务空间专属地址：
+        # wss://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference
+        "asr_model": "qwen-audio-3.1-asr-flash-message",
+        "tts_model": "qwen-audio-3.1-tts-flash",
+        "tts_voice": "longanhuan_v3.1",
+        "llm_base_url": "https://api.deepseek.com",
+        "llm_model": "deepseek-flash",
+    },
     "gemini": {
         "api_key": "",                # 或 GEMINI_API_KEY
         "base_url": "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",

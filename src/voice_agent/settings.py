@@ -7,6 +7,10 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from dotenv import dotenv_values
+
+from core.paths import project_path
+
 
 def _env(name: str, default: str = "") -> str:
     value = os.environ.get(name)
@@ -73,6 +77,16 @@ class VoiceAgentSettings:
     mimo_tts_model: str = "mimo-v2.5-tts"
     mimo_tts_voice: str = "冰糖"
 
+    # Aliyun ASR/TTS + DeepSeek. Keys never enter the WebUI configuration schema.
+    dashscope_api_key: str = field(default="", repr=False)
+    dashscope_ws_url: str = "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
+    aliyun_asr_model: str = "qwen-audio-3.1-asr-flash-message"
+    aliyun_tts_model: str = "qwen-audio-3.1-tts-flash"
+    aliyun_tts_voice: str = "longanhuan_v3.1"
+    deepseek_api_key: str = field(default="", repr=False)
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_model: str = "deepseek-flash"
+
     # Gemini Live
     gemini_api_key: str = ""
     gemini_base_url: str = (
@@ -113,6 +127,8 @@ def load_voice_agent_settings() -> tuple[VoiceAgentSettings, VoiceApiSettings]:
     mimo = dict(_get(agent_raw, "mimo", {}) or {})
     gemini = dict(_get(agent_raw, "gemini", {}) or {})
     openai = dict(_get(agent_raw, "openai", {}) or {})
+    cascade = dict(_get(agent_raw, "aliyun_deepseek", {}) or {})
+    local = dotenv_values(project_path(".env.local"), interpolate=False)
     keywords = _get(agent_raw, "force_reply_keywords", []) or []
     if isinstance(keywords, str):
         keywords = keywords.split(",")
@@ -148,6 +164,14 @@ def load_voice_agent_settings() -> tuple[VoiceAgentSettings, VoiceApiSettings]:
         mimo_llm_model=str(mimo.get("llm_model", "mimo-v2.6-flash") or "mimo-v2.6-flash"),
         mimo_tts_model=str(mimo.get("tts_model", "mimo-v2.5-tts") or "mimo-v2.5-tts"),
         mimo_tts_voice=str(mimo.get("tts_voice", "冰糖") or "冰糖"),
+        dashscope_api_key=_env("DASHSCOPE_API_KEY", local.get("DASHSCOPE_API_KEY") or ""),
+        deepseek_api_key=_env("DEEPSEEK_API_KEY", local.get("DEEPSEEK_API_KEY") or ""),
+        dashscope_ws_url=str(cascade.get("ws_url") or VoiceAgentSettings.dashscope_ws_url),
+        aliyun_asr_model=str(cascade.get("asr_model") or VoiceAgentSettings.aliyun_asr_model),
+        aliyun_tts_model=str(cascade.get("tts_model") or VoiceAgentSettings.aliyun_tts_model),
+        aliyun_tts_voice=str(cascade.get("tts_voice") or VoiceAgentSettings.aliyun_tts_voice),
+        deepseek_base_url=str(cascade.get("llm_base_url") or VoiceAgentSettings.deepseek_base_url),
+        deepseek_model=str(cascade.get("llm_model") or VoiceAgentSettings.deepseek_model),
         gemini_api_key=_env("GEMINI_API_KEY", str(gemini.get("api_key", "") or "")),
         gemini_base_url=str(gemini.get("base_url", VoiceAgentSettings.gemini_base_url) or VoiceAgentSettings.gemini_base_url),
         gemini_model=str(gemini.get("model", "gemini-2.0-flash-live-001") or "gemini-2.0-flash-live-001"),

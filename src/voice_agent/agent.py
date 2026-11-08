@@ -19,7 +19,12 @@ from pathlib import Path
 from typing import Any
 
 from voice_agent.backends import create_backend
-from voice_agent.backends.base import ConnectionReporter, SessionStarter
+from voice_agent.backends.base import (
+    ConnectionReporter,
+    SessionStarter,
+    StreamingUtterance,
+    VoiceStreamInterrupted,
+)
 from voice_agent.context_bridge import ContextBridge
 from voice_agent.duplex import VoiceDuplex
 from voice_agent.memory import MemoryStore
@@ -103,6 +108,14 @@ _SESSION_FIELDS = {
     "mimo_llm_model",
     "mimo_tts_model",
     "mimo_tts_voice",
+    "dashscope_api_key",
+    "dashscope_ws_url",
+    "aliyun_asr_model",
+    "aliyun_tts_model",
+    "aliyun_tts_voice",
+    "deepseek_api_key",
+    "deepseek_base_url",
+    "deepseek_model",
 }
 
 
@@ -133,6 +146,7 @@ class VoiceAgent:
         self._user_buffers: dict[str, EnergyVad] = {}
         self._task: asyncio.Task | None = None
         self._busy = asyncio.Lock()
+        self._stream_reply_task: asyncio.Task | None = None
         self._speaking = False
         # Live 模式的抢话闸门：一次「模型出声」最多只打断一次。见 _on_remote_pcm。
         self._barge_in_armed = True
@@ -1076,7 +1090,9 @@ class VoiceAgent:
             return
 
         # 级联：VAD 切句
-        if self._speaking and self.settings.barge_in:
+        if (self._speaking and self.settings.barge_in
+                and (not isinstance(self.backend, StreamingUtterance)
+                     or self._barge_in_reached(uid, pcm, sample_rate))):
             await self._interrupt_speaking()
         vad = self._vad_for(uid)
         utterance = vad.feed(pcm)
@@ -1206,6 +1222,9 @@ class VoiceAgent:
         self._speaking = False
         # 记下来：本回合是被抢话打断的，结束时不计冷却（见 _throttled_round）。
         self._barged_in = True
+        stream_task = getattr(self, "_stream_reply_task", None)
+        if stream_task is not None and not stream_task.done():
+            stream_task.cancel()
         if self.duplex is not None:
             try:
                 await self.duplex.stop_tts()
@@ -1229,6 +1248,9 @@ class VoiceAgent:
             return
         async with self._busy:
             if getattr(self, "_announcement_active", False):
+                return
+            if isinstance(self.backend, StreamingUtterance):
+                await self._handle_streamed_reply(uid, pcm, sample_rate)
                 return
             try:
                 reply = await self.backend.handle_utterance(
@@ -1305,6 +1327,89 @@ class VoiceAgent:
             self.context_bridge.record_turn(reply.user_text or "",
                 reply.text if reply.pcm16 and not delivery_failed else "",
                 speaker=uid, interrupted=interrupted)
+
+    async def _handle_streamed_reply(self, uid: str, pcm: bytes, sample_rate: int) -> None:
+        backend, duplex, epoch = self.backend, self.duplex, self._operation_epoch
+        assert isinstance(backend, StreamingUtterance)
+        sent = False
+        failed = False
+        self._barged_in = False
+
+        async def on_audio(data: bytes, rate: int) -> None:
+            nonlocal sent
+            if (self._barged_in or epoch != self._operation_epoch or duplex is None
+                    or duplex is not self.duplex or not self._connection_ready):
+                raise VoiceStreamInterrupted()
+            if not sent:
+                self.turns += 1
+                sent = True
+                self._rearm_barge_in()
+                self._speaking = True
+            frame = max(2, int(rate * 0.04) * 2)
+            for offset in range(0, len(data), frame):
+                if self._barged_in or epoch != self._operation_epoch:
+                    raise VoiceStreamInterrupted()
+                async with self._live_output_lock:
+                    result = await duplex.push_tts_pcm(data[offset:offset + frame], rate)
+                if not result.get("ok"):
+                    raise RuntimeError("语音音频推送失败")
+                await asyncio.sleep(0.02)
+
+        try:
+            stream_task = asyncio.create_task(backend.handle_utterance_stream(
+                pcm, sample_rate=sample_rate, user_key=f"oopz:{uid}",
+                channel_key=f"{self._area}/{self._channel}", on_audio=on_audio,
+            ))
+            self._stream_reply_task = stream_task
+            try:
+                reply = await stream_task
+            except asyncio.CancelledError:
+                if self._barged_in:
+                    raise VoiceStreamInterrupted() from None
+                raise
+            finally:
+                if self._stream_reply_task is stream_task:
+                    self._stream_reply_task = None
+            self.last_user_text = reply.user_text or self.last_user_text
+            if reply.raw.get("voice_control") == "leave":
+                self.request_voice_leave()
+                return
+            if reply.raw.get("voice_control") == "volume":
+                result = await self.apply_voice_volume(reply.raw.get("volume_command"))
+                if not self.output_muted:
+                    await self.speak_text(result.get("message") or "语音输出调整失败")
+                return
+            self.last_reply = reply.text or self.last_reply
+            if sent and duplex is not None:
+                if self._barged_in or epoch != self._operation_epoch:
+                    raise VoiceStreamInterrupted()
+                result = await duplex.push_tts_pcm(b"", reply.sample_rate, finish=True)
+                if not result.get("ok"):
+                    raise RuntimeError("语音音频收尾失败")
+                result = await duplex.wait_tts_complete(30)
+                if not result.get("ok"):
+                    raise RuntimeError("语音播放未正常完成")
+            self.context_bridge.record_turn(
+                reply.user_text, reply.text if sent else "", speaker=uid,
+                interrupted=self._barged_in,
+            )
+            logger.info("流式语音回合完成：已输出音频=%s", sent)
+        except VoiceStreamInterrupted:
+            failed = True
+            logger.info("流式语音回合已打断")
+        except asyncio.CancelledError:
+            failed = True
+            raise
+        except Exception as exc:
+            failed = True
+            self.last_reply = f"[error] {exc}"
+            logger.exception("流式语音回合失败")
+        finally:
+            if epoch == self._operation_epoch:
+                self._speaking = False
+                if failed and duplex is not None and duplex is self.duplex:
+                    with contextlib.suppress(Exception):
+                        await duplex.stop_tts()
 
     async def speak_text(self, text: str) -> dict[str, Any]:
         self._ensure_operations()
