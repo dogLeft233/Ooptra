@@ -712,6 +712,8 @@ def build_voice_routes(
         ("POST", "/memory", memory_post),
         ("DELETE", "/memory", memory_delete),
     ]
+    from webui.voice_library_routes import voice_library_handlers
+    pairs.extend(voice_library_handlers(voice_runtime))
     routes: list[Any] = []
     for method, path, handler in pairs:
         if wrap is not None:

@@ -21,6 +21,7 @@ from dialogue.api import (
     GeneratedAudio,
     PreviewService,
     VoiceBackend,
+    VoiceLibrary,
 )
 
 __all__ = [
@@ -38,6 +39,7 @@ __all__ = [
     "create_mimo_backend",
     "create_openai_backend",
     "create_preview_service",
+    "create_voice_library",
     "live_url_has_key",
     "looks_like_reasoning_leak",
     "open_live_ws",
@@ -106,3 +108,9 @@ def create_preview_service(*, backend_factory=None) -> PreviewService:
     """临时试听供应商工厂；不读取真实房间历史，不创建任何渠道会话。"""
     from dialogue._internal.preview import PreviewService as Service
     return Service(backend_factory)
+
+
+def create_voice_library(*, endpoint: str | None = None) -> VoiceLibrary:
+    """云端音色管理；endpoint 仅供装配/隔离协议测试覆盖，默认沿用语音 WS 的地域域名。"""
+    from dialogue._internal.voice_library import QwenVoiceLibrary
+    return QwenVoiceLibrary(endpoint=endpoint)

@@ -21,6 +21,7 @@ from dialogue.models import (
     LiveEvent,
     LiveSessionRequest,
     LiveSnapshot,
+    ManagedVoice,
     PreviewArtifact,
     PreviewFailure,
     PreviewRequest,
@@ -30,6 +31,8 @@ from dialogue.models import (
     ResolveReceipt,
     ToolRef,
     TranscriptRevision,
+    VoicePage,
+    VoiceSample,
 )
 
 
@@ -233,3 +236,16 @@ class VoiceBackend:
     async def aclose(self) -> None:
         """停止本实例的生成与供应商资源；不触碰渠道房间或写历史。"""
         return None
+
+
+class VoiceLibrary(Protocol):
+    """Qwen 云端音色；不保存原始样本或修改 bot 配置。
+
+    每次操作独占有期限的 HTTP 连接，取消时关闭。创建不重试；超时或取消可能已在云端
+    创建，调用者应先刷新列表。列表每页 100 项，按当前模型筛选；has_more 针对云端原页。
+    创建返回 ID，仅 status=OK 可选用；未就绪时通过刷新查询，不伪称创建即已应用。
+    """
+
+    async def list(self, settings: DialogueSettings, page: int = 0) -> VoicePage: ...
+    async def create(self, settings: DialogueSettings, sample: VoiceSample) -> ManagedVoice: ...
+    async def check(self, settings: DialogueSettings, voice_id: str) -> ManagedVoice: ...

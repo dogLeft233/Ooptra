@@ -80,3 +80,4 @@ jobs:
           node tests/browser/preview.cjs
           node tests/browser/voice-volume.cjs
           node tests/browser/ui-audit.cjs
+          node tests/browser/voice-library.cjs

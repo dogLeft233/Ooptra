@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
 from behavior.models import SpeechIntent, VoiceControlDecision
@@ -290,3 +290,51 @@ class DiagnosticStage:
 @dataclass(frozen=True)
 class DiagnosticResult:
     stages: tuple[DiagnosticStage, ...]
+
+
+@dataclass(frozen=True)
+class VoiceSample:
+    """上传样本；WAV 在本地检查规格，压缩音频由供应商校验声学规格。"""
+
+    prefix: str
+    mime_type: str
+    audio: bytes = field(repr=False)
+
+    def __post_init__(self) -> None:
+        import io
+        import re
+        import wave
+
+        if not isinstance(self.prefix, str) or not re.fullmatch(r"[A-Za-z0-9]{1,10}", self.prefix):
+            raise ValueError("音色名称须为 1到10 个英文字母或数字")
+        if self.mime_type not in {"audio/wav", "audio/mpeg", "audio/mp4"}:
+            raise ValueError("参考音频仅支持 WAV、MP3、M4A")
+        if not isinstance(self.audio, bytes) or not 0 < len(self.audio) <= 10 * 1024 * 1024:
+            raise ValueError("参考音频不能为空，且不得超过 10 MB")
+        if self.mime_type == "audio/wav":
+            try:
+                with wave.open(io.BytesIO(self.audio)) as wav:
+                    if (wav.getsampwidth() != 2 or wav.getframerate() < 16000
+                            or wav.getnchannels() not in {1, 2}
+                            or not 5 <= wav.getnframes() / wav.getframerate() <= 60):
+                        raise ValueError("WAV 需要 16-bit、至少 16 kHz、1到2 声道，时长 5到60 秒")
+                    expected = wav.getnframes() * wav.getnchannels() * 2
+                    if len(wav.readframes(wav.getnframes())) != expected:
+                        raise ValueError("WAV 音频数据不完整")
+            except (wave.Error, EOFError) as exc:
+                raise ValueError("无法读取 WAV 音频") from exc
+
+
+@dataclass(frozen=True)
+class ManagedVoice:
+    voice_id: str
+    target_model: str
+    status: str
+    kind: Literal["system", "custom"] = "custom"
+
+
+@dataclass(frozen=True)
+class VoicePage:
+    voices: tuple[ManagedVoice, ...]
+    page: int
+    has_more: bool
