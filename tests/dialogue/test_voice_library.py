@@ -35,7 +35,8 @@ def sample_wav(seconds=10, rate=24000):
     ('girl', 'audio/wav', sample_wav()[:-2]), ('girl', 'audio/mpeg', b''),
     ('girl', 'audio/mpeg', b'x' * (10 * 1024 * 1024 + 1)),
     ('girl', 'text/plain', b'not audio'),
-])
+], ids=['non_ascii_name', 'long_name', 'broken_wav', 'long_wav', 'short_wav',
+        'low_sample_rate', 'truncated_wav', 'empty_audio', 'oversized_audio', 'unsupported_type'])
 def test_sample_rejects_invalid_input_before_upload(prefix, mime, audio):
     with pytest.raises(ValueError):
         VoiceSample(prefix, mime, audio)
