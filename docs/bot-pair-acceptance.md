@@ -135,3 +135,26 @@ python scripts/run_bot_pair_acceptance.py /绝对路径/Ooptra /绝对路径/Oop
 `data/bot_pair_test_report_previous.json`；本机执行脚本为 `data/run_bot_pair_test.py`，
 复跑命令为 `.venv/bin/python data/run_bot_pair_test.py`。这些文件被 Git 忽略，
 全新检出不包含它们；在其他环境按上述接口步骤准备自己的控制程序，并执行相同停止与清理要求。
+
+### 2026-11-08 重构后复测（Asia/Shanghai）
+
+- 实际运行提交：两端均为 `0f7d62d5a4704e5a3dca209bfc71e11b9e6d6e6b`，
+  测试开始时均无已跟踪文件差异。先核对进程目录、解释器与 PID，再重启两端并确认
+  bootstrap 和 Oopz 就绪；磁盘版本未被当成旧进程已加载新代码的证明。
+- 配置与模型：两端独立账号/状态目录，端口 3090/3091；级联后端、仅监听对方、
+  自动尝试上限 3。ASR `qwen-audio-3.1-asr-flash-message`，
+  LLM `deepseek-flash`，TTS `qwen-audio-3.1-tts-flash`，音色 `longanhuan_v3.1`。
+- 执行：通过仓库的 `scripts/run_bot_pair_acceptance.py` 完成，报告于 17:12:54 写入。
+  **41.22 秒完成一次手动开场和六次有声自动回复，两端各三次，最终退房确认 `[true, true]`。**
+  状态轮数分别为 4/3（A 包含开场）；双方自动尝试均为 3，无第四次自动调用。
+- 双向内容：从公园/河边散步接续到六点桥头碰面及到达后发消息，具有对端音频识别与
+  后续回复证据。开场人名存在「小蓝/小兰、小橙/小程」同音识别偏差，未改变本轮核心意思。
+- 自动验证：1130 项通过、1 项跳过；Ruff、Pyright、ESLint、架构与预览同步检查通过。
+  同一提交远端 Linux Python 3.10/3.13、Windows Python 3.13、lint 和 browser 五项 CI 均通过。
+- 证据：本机 `data/bot-pair-refactor-0f7d62d.json` 保存状态序列、完成次数、耗时、
+  退房及两端提交；未经脱敏的报告不纳入 Git。没有为本轮生成新录像，历史录像不算本轮证据。
+- 第二实例原先三份已跟踪源码补丁保存在该实例 `stash@{0}`，说明为
+  「保存双机器人验收前的旧限额与身份映射补丁」；没有覆盖其账号配置、密钥或身份库。
+- 未验证：Gemini Live 实机路径、第三账号人工音质旁听与全部目标架构契约。
+  本轮通过不表示 bot/duplex 生命周期、上下文事务台账、完整生成任务与维护任务已经迁完。
+  联调结束两应用继续运行，均已退房，仍保留三次接话限额及对端白名单。
