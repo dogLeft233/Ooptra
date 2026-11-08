@@ -8,7 +8,7 @@ from pathlib import Path
 def test_default_discovery_does_not_import_manual_acceptance_scripts(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[2]
     (tmp_path / "pyproject.toml").write_text(
-        (root / "pyproject.toml").read_text(), encoding="utf-8"
+        (root / "pyproject.toml").read_text(encoding="utf-8"), encoding="utf-8"
     )
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_safe.py").write_text("def test_safe(): pass\n", encoding="utf-8")
