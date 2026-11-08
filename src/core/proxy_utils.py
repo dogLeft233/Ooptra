@@ -36,7 +36,7 @@ def _build_proxy_aliases() -> dict[str, str]:
     http_port = _DEFAULT_CLASH_HTTP_PORT
     socks_port = _DEFAULT_CLASH_SOCKS_PORT
     try:
-        from config import PROXY_ALIAS_CONFIG  # type: ignore
+        from config import PROXY_ALIAS_CONFIG
 
         host = str(PROXY_ALIAS_CONFIG.get("host") or host)
         http_port = int(PROXY_ALIAS_CONFIG.get("http_port") or http_port)

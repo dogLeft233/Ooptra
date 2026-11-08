@@ -1,0 +1,21 @@
+# 激活开发虚拟环境并执行 npm ci 后使用，与 CI 共用项目配置。
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: Ruff
+        entry: python -m ruff check
+        language: system
+        types_or: [python, pyi]
+      - id: eslint
+        name: ESLint
+        entry: npm run lint:js
+        language: system
+        files: ^(src/webui/assets/.*\.js|tests/browser/.*\.cjs|eslint\.config\.mjs|package(-lock)?\.json)$
+        pass_filenames: false
+      - id: pyright
+        name: Pyright（含严格解析边界）
+        entry: python -m pyright
+        language: system
+        files: (\.pyi?$|^pyproject\.toml$)
+        pass_filenames: false
