@@ -1,6 +1,8 @@
 """Oopz 房间与音频公开端口适配；不拥有房间或模型状态。"""
 
 import asyncio
+import base64
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, TypeVar
 
@@ -12,6 +14,8 @@ from channels.models import (
     PlatformMember,
     RoomMembership,
     RoomTarget,
+    ScreenCapture,
+    ScreenFrame,
 )
 
 T = TypeVar("T")
@@ -30,6 +34,9 @@ class OopzRoomTransport:
         self._controls = controls
         self._output = output
         self._bound_output: AudioOutput | None = None
+        self._screen_watch = None
+        self._screen_watch_key = None
+        self._screen_watch_at = 0.0
 
     async def join(self, target: RoomTarget) -> str:
         if self._bot is None:
@@ -37,6 +44,56 @@ class OopzRoomTransport:
         self._bound_output = self._output()
         sign = await _external(self._bot.voice.join(area=target.area, channel=target.channel))
         return str(getattr(sign, "rtc_channel_name", ""))
+
+    async def capture_screen(self, session):
+        if self._bot is None:
+            return ScreenCapture("unavailable")
+        started = time.monotonic()
+        members = await self._bot.channels.get_voice_channel_members(session.room_target.area)
+        sharers = [member for member in members.channel_members.get(session.room_target.channel, [])
+                   if member.screen_sharing_state == "OPEN"]
+        if len(sharers) != 1:
+            self._screen_watch = None
+            await self._bot.voice.backend.close_screen()
+            return ScreenCapture("ambiguous_video" if sharers else "no_video")
+        sharer = sharers[0]
+        key = (session, sharer.uid)
+        if self._screen_watch_key != key or self._screen_watch is None or started-self._screen_watch_at > 480:
+            viewer = await self._bot.person.get_self_detail()
+            publisher = await self._bot.person.get_person_detail_full(sharer.uid)
+            params = {"optType": "RECEIVE", "channel": session.room_target.channel,
+                      "dimensions": 2073600, "framerate": 30, "pid": str(viewer.pid),
+                      "anchor": str(publisher.pid)}
+            sign = await self._bot.rest.transport.request_data("GET", "/screenSharing/v2/sign", params=params)
+            if not isinstance(sign, dict) or not all(isinstance(sign.get(field), str) and sign[field]
+                                                    for field in ("roomId", "signPid")):
+                return ScreenCapture("unavailable")
+            self._screen_watch = {"key": session.session_id+":"+sharer.uid,
+                "appId": self._bot.voice.backend.config.agora_app_id, "roomId": sign["roomId"],
+                "token": sign["signPid"], "uid": int(viewer.pid), "publisher": str(int(publisher.pid))}
+            self._screen_watch_key, self._screen_watch_at = key, started
+        raw = await self._bot.voice.backend.capture_screen(self._screen_watch)
+        if isinstance(raw, dict) and raw.get("status") == "unavailable":
+            self._screen_watch = None
+        if not isinstance(raw, dict):
+            return ScreenCapture("unavailable")
+        status = raw.get("status")
+        if status in {"no_video", "ambiguous_video"}:
+            return ScreenCapture(status)
+        if status != "captured":
+            return ScreenCapture("unavailable")
+        encoded = raw.get("jpeg_base64")
+        if not isinstance(encoded, str) or len(encoded) > 1_398_104:
+            return ScreenCapture("unavailable")
+        publisher, width, height = raw.get("publisher_id"), raw.get("width"), raw.get("height")
+        if not isinstance(publisher, str) or type(width) is not int or type(height) is not int:
+            return ScreenCapture("unavailable")
+        try:
+            frame = ScreenFrame(session, publisher,
+                base64.b64decode(encoded, validate=True), width, height, time.monotonic())
+        except (ValueError, TypeError):
+            return ScreenCapture("unavailable")
+        return ScreenCapture("captured", frame)
 
     async def leave(self) -> None:
         if self._bot is not None:

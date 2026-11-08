@@ -48,3 +48,5 @@ python -m pytest -v -o faulthandler_timeout=60
 表达任务覆盖单订阅、背压、首帧前关闭、失败EOS和真实HTTP/WS边界；输入、播放覆盖字节预算、断点、帧序号、取消及未知效果。`tests/app/test_output_commit_lifecycle.py` 验证已受理SQLite线程、切房/取消原scope提交及失败静默回执。配置/维护覆盖跨进程锁、CAS、部分应用、候选gate、handoff、父进程退出凭据与原子归档发布。
 
 已移除的供应商复合入口、私有音频回调、global历史绑定和`.__new__`状态拼装测试，分别由新公开任务/真实应用协议测试承接。测试数量不是完成标准；删除旧实现耦合用例时应注明保留的行为和新验证入口。
+
+共享画面：`tests/channels/test_screen_capture.py` 覆盖原会话、退房取消与 Oopz 数字发布者身份；`tests/browser/screen-frame.cjs` 执行真实 MediaStream 抽帧；`tests/test_aliyun_deepseek.py` 验证当轮图像请求与 TTS 隔离。

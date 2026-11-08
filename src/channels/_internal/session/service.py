@@ -17,6 +17,7 @@ from channels.models import (
     LeaveRoom,
     RoomState,
     RunningAction,
+    ScreenCapture,
     SendText,
     SessionRef,
     SetOutput,
@@ -30,6 +31,8 @@ class RoomChannel:
     def __init__(self, transport: RoomTransport) -> None:
         self._lock = asyncio.Lock()
         self._output_lock = asyncio.Lock()
+        self._capture_lock = asyncio.Lock()
+        self._capture_task = None
         self._pending_io: set[asyncio.Future[Any]] = set()
         self._transport = transport
         self._run_id = uuid4().hex
@@ -43,6 +46,41 @@ class RoomChannel:
         self._results: dict[str, ActionOutcome] = {}
         self._finished: dict[str, float] = {}
         self._tasks: dict[str, tuple[ChannelCommand, asyncio.Task[ActionOutcome]]] = {}
+
+    async def capture_screen(self, session):
+        if self._view.state is not RoomState.JOINED or self._view.session != session:
+            return ScreenCapture("stale_session")
+        capture = getattr(self._transport, "capture_screen", None)
+        if capture is None:
+            return ScreenCapture("unavailable")
+        if self._capture_lock.locked():
+            return ScreenCapture("unavailable")
+        async with self._capture_lock:
+            work = asyncio.create_task(capture(session))
+            self._capture_task = work
+            try:
+                result = await asyncio.wait_for(asyncio.shield(work), 5)
+            except asyncio.CancelledError:
+                if work.cancelled() and (self._view.state is not RoomState.JOINED or self._view.session != session):
+                    return ScreenCapture("stale_session")
+                work.cancel()
+                await asyncio.gather(work, return_exceptions=True)
+                raise
+            except Exception:
+                work.cancel()
+                await asyncio.gather(work, return_exceptions=True)
+                return ScreenCapture("unavailable")
+            finally:
+                if self._capture_task is work:
+                    self._capture_task = None
+        if self._view.state is not RoomState.JOINED or self._view.session != session:
+            return ScreenCapture("stale_session")
+        if not isinstance(result, ScreenCapture):
+            return ScreenCapture("unavailable")
+        if result.frame is not None and (result.frame.session != session
+                or not 0 <= time.monotonic() - result.frame.captured_at <= 3):
+            return ScreenCapture("stale_session")
+        return result
 
     async def play(self, request, frames):
         return await self._playback.play(request, frames)
@@ -261,6 +299,10 @@ class RoomChannel:
             self._view.revision + 1, RoomState.RETIRING, self._view.session, self._view.confirmed
         )
 
+        capture = self._capture_task
+        if capture is not None:
+            capture.cancel()
+            await asyncio.wait_for(asyncio.gather(capture, return_exceptions=True), 1)
         await self._playback.retire()
 
         async def drain() -> None:

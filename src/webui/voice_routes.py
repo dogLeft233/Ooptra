@@ -368,6 +368,20 @@ def build_voice_routes(
             return err(str(exc), 409)
         return ok({"status": voice_runtime.auto_visit.status()})
 
+    async def voice_screen(_request: web.Request) -> web.Response:
+        import base64
+        agent = current_agent()
+        session = agent.channels.snapshot().session
+        if session is None:
+            return ok({"status": "stale_session"})
+        capture = await agent.channels.capture_screen(session)
+        result = {"status": capture.status}
+        if capture.frame is not None:
+            frame = capture.frame
+            result.update(publisher_id=frame.publisher_id, width=frame.width, height=frame.height,
+                          jpeg_base64=base64.b64encode(frame.jpeg).decode("ascii"))
+        return ok(result)
+
     async def voice_join(request: web.Request) -> web.Response:
         agent = current_agent()
         body = await read_json(request)
@@ -690,6 +704,7 @@ def build_voice_routes(
         ("POST", "/voice/astrbot/bindings", context_bindings),
         ("GET", "/health", health),
         ("GET", "/voice/status", voice_status),
+        ("GET", "/voice/screen", voice_screen),
         ("POST", "/voice/diagnostics", voice_diagnostics),
         ("POST", "/voice/preview", voice_preview),
         ("GET", "/voice/preview/prompts", voice_preview_prompts),

@@ -1026,9 +1026,10 @@ function ensureClientDuplexHooks() {
     }
   });
   client.on("user-unpublished", (user, mediaType) => {
+    if (mediaType === "video") window.agoraClearScreen?.();
     if (mediaType === "audio") stopRemoteCapture(String(user.uid));
   });
-  client.on("user-left", (user) => stopRemoteCapture(String(user.uid)));
+  client.on("user-left", (user) => {window.agoraClearScreen?.(); stopRemoteCapture(String(user.uid));});
 }
 
 window.agoraSetListen = async (enabled) => {
@@ -1203,6 +1204,112 @@ window.agoraJoin = async (...args) => {
   }
   return result;
 };
+
+// Only one current publisher: never guess among camera/screen tracks or reuse cached images.
+let screenClient = null;
+let screenKey = "";
+let screenPublisher = "";
+let screenEpoch = 0;
+window.agoraCloseScreen = async () => {
+  screenEpoch++;
+  window.agoraClearScreen();
+  const previous = screenClient;
+  screenClient = null; screenKey = ""; screenPublisher = "";
+  if (previous) {
+    try {await previous.leave();}
+    catch (_) {if (!screenClient) screenClient = previous; return {ok: false};}
+  }
+  return {ok: true};
+};
+window.agoraWatchScreen = async data => {
+  if (screenKey === data.key && screenClient?.connectionState === "CONNECTED") return {ok: true};
+  const closed = await window.agoraCloseScreen();
+  if (!closed.ok) return closed;
+  const epoch = screenEpoch;
+  await loadAgoraSdk();
+  if (screenEpoch !== epoch) return {ok: false};
+  const watching = AgoraRTC.createClient({mode: "live", codec: "vp8"});
+  screenClient = watching;
+  try {
+    await watching.setClientRole("audience");
+    watching.on("user-published", async (user, mediaType) => {
+      if (mediaType === "video" && String(user.uid) === data.publisher) {
+        try {await watching.subscribe(user, "video");} catch (_) {}
+      }
+    });
+    watching.on("user-unpublished", (user, mediaType) => {
+      if (mediaType === "video" && String(user.uid) === data.publisher) window.agoraClearScreen();
+    });
+    if (screenEpoch !== epoch) {await watching.leave(); return {ok: false};}
+    await watching.join(data.appId, data.roomId, data.token, data.uid);
+    if (screenEpoch !== epoch || screenClient !== watching) {
+      await watching.leave(); return {ok: false};
+    }
+    screenKey = data.key; screenPublisher = data.publisher;
+    for (let i = 0; i < 10; i++) {
+      if (watching.remoteUsers.some(user => user.hasVideo && String(user.uid) === data.publisher)) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    return {ok: true};
+  } catch (_) {
+    if (screenClient === watching) await window.agoraCloseScreen();
+    else {try {await watching.leave();} catch (_) {}}
+    return {ok: false};
+  }
+};
+let screenPreview = null;
+window.agoraClearScreen = () => {
+  if (screenPreview) {
+    screenPreview.video.pause(); screenPreview.video.srcObject = null; screenPreview.video.remove(); screenPreview = null;
+  }
+};
+window.agoraCaptureScreen = async () => {
+  const source = screenClient || client;
+  if (!source) {window.agoraClearScreen(); return {status: "unavailable"};}
+  const users = (source.remoteUsers || []).filter(user => user.hasVideo && (!screenClient || String(user.uid) === screenPublisher));
+  if (!users.length) {window.agoraClearScreen(); return {status: "no_video"};}
+  if (users.length !== 1) {window.agoraClearScreen(); return {status: "ambiguous_video"};}
+  const user = users[0];
+  let video;
+  try {
+    if (!user.videoTrack) await source.subscribe(user, "video");
+    const track = user.videoTrack?.getMediaStreamTrack();
+    if (!track || track.readyState !== "live") return {status: "unavailable"};
+    if (screenPreview?.source !== source || screenPreview?.track !== track) {
+      window.agoraClearScreen();
+      video = document.createElement("video");
+      video.muted = true; video.playsInline = true;
+      video.style.cssText = "position:fixed;width:1px;height:1px;opacity:0;pointer-events:none";
+      document.body.append(video);
+      video.srcObject = new MediaStream([track]);
+      screenPreview = {source, track, video};
+    }
+    video = screenPreview.video;
+    let timer;
+    try {
+      await Promise.race([video.play(), new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("frame timeout")), 800);
+      })]);
+    } finally {clearTimeout(timer);}
+    if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) return {status: "unavailable"};
+    if (source !== (screenClient || client) || !(source.remoteUsers || []).includes(user) || !user.hasVideo) return {status: "unavailable"};
+    const scale = Math.min(1, 1920 / Math.max(video.videoWidth, video.videoHeight));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.floor(video.videoWidth * scale));
+    canvas.height = Math.max(1, Math.floor(video.videoHeight * scale));
+    canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+    const jpeg = canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
+    if (!jpeg || jpeg.length > 1398104) return {status: "unavailable"};
+    return {status: "captured", publisher_id: String(user.uid), width: canvas.width, height: canvas.height, jpeg_base64: jpeg};
+  } catch (_) {window.agoraClearScreen(); return {status: "unavailable"};}
+};
+const screenOriginalLeave = window.agoraLeave;
+window.agoraLeave = async (...args) => {
+  const screenResult = await window.agoraCloseScreen();
+  const voiceResult = await screenOriginalLeave(...args);
+  return screenResult.ok ? voiceResult : {ok: false, error: "screen viewer cleanup unconfirmed"};
+};
 </script>
+
 </body>
 </html>

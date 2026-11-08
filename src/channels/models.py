@@ -1,5 +1,6 @@
 """渠道房间契约；不可变引用不等于当前会话仍有效。"""
 
+import math
 from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
@@ -335,3 +336,35 @@ class SendText:
 
 
 ChannelCommand = JoinRoom | LeaveRoom | SetOutput | SendText
+
+
+@dataclass(frozen=True)
+class ScreenFrame:
+    """原会话的一次最新视频帧，JPEG至多1MiB；仅供本轮表达，不是持久记忆。"""
+    session: SessionRef
+    publisher_id: str
+    jpeg: bytes
+    width: int
+    height: int
+    captured_at: float
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.session, SessionRef) or not isinstance(self.publisher_id, str)
+                or not 1 <= len(self.publisher_id) <= 256 or type(self.jpeg) is not bytes
+                or not 4 <= len(self.jpeg) <= 1024 * 1024
+                or not self.jpeg.startswith(b"\xff\xd8") or not self.jpeg.endswith(b"\xff\xd9")
+                or type(self.width) is not int or type(self.height) is not int
+                or not 1 <= self.width <= 1920 or not 1 <= self.height <= 1920
+                or type(self.captured_at) not in {float, int} or not math.isfinite(self.captured_at)):
+            raise ValueError("共享帧须有原会话、发布者、有效尺寸和有界JPEG")
+
+
+@dataclass(frozen=True)
+class ScreenCapture:
+    status: Literal["captured", "no_video", "ambiguous_video", "unavailable", "stale_session"]
+    frame: ScreenFrame | None = None
+
+    def __post_init__(self) -> None:
+        if (self.status not in {"captured", "no_video", "ambiguous_video", "unavailable", "stale_session"}
+                or (self.status == "captured") != isinstance(self.frame, ScreenFrame)):
+            raise ValueError("捕获成功须有画面；不可用时不能携带旧画面")

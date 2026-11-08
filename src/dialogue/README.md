@@ -53,3 +53,7 @@ MiMo、阿里 ASR/DeepSeek/阿里 TTS、Gemini Live 为实际适配。OpenAI Rea
 - [来源绑定](../../tests/dialogue/test_context_binding.py)、[日志隐私](../../tests/dialogue/test_generation_logging.py)、[独立自检](../../tests/test_voice_audio_diagnostics.py)及[试听](../../tests/test_voice_tools.py)验证对应边界。
 
 更换共同能力不变的模型供应商，应主要修改此模块适配与装配配置；调整回复概率、冷却或抢话规则应修改行为模块。真实供应商和 Oopz 时序仍由应用的[双机器人验收](../../docs/bot-pair-acceptance.md)另行证明，协议夹具通过不替代真实模型验收。
+
+## 当前画面输入
+
+`DialogueCapabilities.image_input` 声明图像能力；当前仅配置为 `deepseek-flash` 的阿里/DeepSeek 后端开启。`generate(..., screen=ScreenFrame)` 接受原会话三秒内捕获的可选画面，独占任务固定该帧；其他后端拒绝图像输入。图像只放在本轮 user 的 image_url 内容块，不加入历史、记忆工具结果或 TTS。无画面时维持文字路径，不能声称已看见屏幕。
