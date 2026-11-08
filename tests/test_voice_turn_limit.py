@@ -30,19 +30,13 @@ def test_budget_blocks_concurrent_and_failed_rounds_until_rejoin(tmp_path, monke
             await agent._on_remote_pcm("peer", b"\x01\x00", 16000)
             await agent.leave()
             await agent.join("a", "c")
-            assert agent._cascade_attempts == 0
+            assert agent.status()["cascade_attempts"] == 0
             await agent._handle_utterance_reply("peer", b"\x01\x00", 16000)
             assert len(calls) == 4
         finally:
             await agent.stop()
 
     asyncio.run(run())
-
-
-def test_default_budget_is_unlimited(tmp_path):
-    agent = make_agent(tmp_path)
-    agent._cascade_attempts = 100
-    assert not agent._cascade_limit_reached()
 
 
 def test_peer_filter_resolves_agora_id_using_received_identity(tmp_path, monkeypatch):

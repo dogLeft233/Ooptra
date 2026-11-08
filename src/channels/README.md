@@ -21,6 +21,8 @@
 
 现有语音入口通过 `Channel.execute` 执行进退房，`snapshot/outcome` 查询状态及动作结果；`push_audio` 是过渡期绑定原会话的音频入口。真实状态由内部 [RoomChannel](_internal/session/service.py) 唯一维护，`VoiceAgent` 的旧房间属性仅做只读兼容投影。原有 HTTP/串门入口暂经 VoiceAgent 编排，不要求调用者提前改用未实现的完整命令集。
 
+平台目录现提供独立的 `PlatformDirectory`，通过工厂 `create_oopz_directory(bot)` 绑定一个账号；`joined_areas` 和 `voice_members` 把 SDK 字典/对象别名解析为不可变的域、房间和成员观察。`confirmed` 的空结果与 `unavailable`、`invalid_response` 分开；外部错误正文不会交给调用者。SDK 兼容归一化通过非序列化的 `source_validated` 保留原始成员响应的可信性，目录拒绝被容错清洗掩盖的畸形数据。成员的 `is_self` 和 `is_bot` 在平台边界计算，无法识别的机器人标记为 `None`，不作为真人候选。目录不拥有实际房间状态，也不提供 SDK 对象。自动串门和独处退出只消费这些观察，进房前仍重新查询，并在异步查询和预留后核对目录绑定身份，拒绝旧账号的迟到观察；未知成员状态重置独处窗口。调用及畸形响应验证见 [目录契约测试](../../tests/channels/test_directory_contract.py)。
+
 首个切片已覆盖旧会话拒绝、重复动作、排队取消、进房取消补偿、退房失败、在途推送屏障、换绑迟到结果和不合作传输超时；调用示例及验收见 [渠道契约测试](../../tests/channels/test_room_contract.py)。运行 `python -m pytest tests/channels -q`。
 
 仍待迁移：bot/duplex 异步换绑及释放、手动抢占调度、VoiceAgent 的高层操作锁/控制代次、完整 Play/SendText 及事件流。当前不支持显式 `cancel`；不宣称跨重启去重、完整帧格式校验或播放完成确认。`push_audio` 成功只表示一次传输提交；不替代下一批的播放终态。

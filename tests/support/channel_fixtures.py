@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 from uuid import uuid4
 
+from behavior import create_cascade_attempts
 from channels.models import JoinRoom, RoomTarget
 from voice_agent.agent import VoiceAgent
 from voice_agent.settings import VoiceAgentSettings, VoiceApiSettings
@@ -12,7 +13,10 @@ from voice_agent.settings import VoiceAgentSettings, VoiceApiSettings
 async def establish_room(agent) -> None:
     if not hasattr(agent, "_bot"):
         agent.bind_bot(None)
+    if not hasattr(agent, "_attempt_budget"):
+        agent._attempt_budget = create_cascade_attempts()
     if agent.channels.snapshot().confirmed:
+        agent._attempt_budget.start_session(agent.channels.snapshot().session)
         return
 
     async def join(**kwargs):
@@ -28,6 +32,7 @@ async def establish_room(agent) -> None:
         JoinRoom(uuid4().hex, target, agent.channels.snapshot().revision)
     )
     assert result.status == "completed"
+    agent._attempt_budget.start_session(result.session)
 
 
 class Duplex:

@@ -68,7 +68,6 @@ class _StubVad:
 
 def _agent(utterance: bytes | None = None, **overrides) -> tuple[VoiceAgent, _RecordingBackend]:
     agent = VoiceAgent.__new__(VoiceAgent)
-    agent._cascade_attempts = 0
     overrides.setdefault("reply_probability_percent", 100)
     overrides.setdefault("voice_leave_enabled", False)
     overrides.setdefault("voice_volume_enabled", False)
@@ -136,6 +135,7 @@ def test_newest_utterance_wins_during_the_cooldown(caplog) -> None:
 
     async def run() -> None:
         agent, backend = _agent(reply_cooldown_ms=200)
+        await establish_room(agent)
         _offer(agent, b"first")
         await agent._throttled_round(_take(agent))
         assert backend.seen == [b"first"]
@@ -164,6 +164,7 @@ def test_cooldown_delays_the_next_round(monkeypatch) -> None:
         from voice_agent import agent as agent_module
 
         agent, backend = _agent(reply_cooldown_ms=150)
+        await establish_room(agent)
         now = [100.0]
         waits = []
 
@@ -194,6 +195,7 @@ def test_cooldown_zero_means_no_wait() -> None:
 
     async def run() -> None:
         agent, backend = _agent(reply_cooldown_ms=0)
+        await establish_room(agent)
         started = time.monotonic()
         for payload in (b"a", b"b", b"c"):
             _offer(agent, payload)
@@ -244,6 +246,7 @@ def test_stale_round_is_dropped(caplog) -> None:
 
     async def run() -> None:
         agent, backend = _agent(reply_cooldown_ms=0)
+        await establish_room(agent)
         with caplog.at_level(logging.INFO, logger="voice_agent.agent"):
             _offer(agent, b"old", age=99.0)
             await agent._throttled_round(_take(agent))
@@ -412,6 +415,7 @@ def test_worker_consumes_an_offered_utterance() -> None:
     async def run() -> None:
         spoken = _pcm(int(0.15 * 32768), samples=int(SR * 1.5))
         agent, backend = _agent(spoken, reply_cooldown_ms=0)
+        await establish_room(agent)
         await agent._start_round_worker()
         await agent._on_remote_pcm("u1", spoken, SR)
         for _ in range(50):  # 等 worker 跑完，别用固定 sleep 拖慢套件

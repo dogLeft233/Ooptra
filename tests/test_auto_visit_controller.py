@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from channels import create_oopz_directory
 from voice_agent.auto_visit import AutoVisitController
 from voice_agent.auto_visit_settings import parse_auto_visit_config
 from voice_agent.auto_visit_state import AutoVisitStateStore
@@ -74,6 +75,7 @@ class FakeAgent:
             channels=SimpleNamespace(get_voice_channel_members=self.members),
             areas=SimpleNamespace(get_joined_areas=self.joined_areas),
         )
+        self.directory = create_oopz_directory(self._bot)
 
     async def joined_areas(self):
         return [SimpleNamespace(area_id=area) for area in self.rooms]
@@ -697,4 +699,29 @@ def test_wall_clock_rollback_does_not_extend_domain_cooldown(tmp_path):
         await ctrl._check_once()
         assert agent.joined
         await ctrl.stop()
+    asyncio.run(run())
+
+
+def test_rebound_directory_cannot_admit_from_old_account_observation(tmp_path):
+    async def run():
+        ctrl, agent, _, _, _ = scenario(tmp_path)
+        old = agent._bot
+
+        async def joined():
+            # A binding replacement may occur while a network request is pending.
+            # New account is no longer a member of any configured area.
+            replacement = SimpleNamespace(
+                config=SimpleNamespace(person_uid="replacement"),
+                channels=old.channels,
+                areas=SimpleNamespace(get_joined_areas=lambda: None),
+            )
+            agent.directory = create_oopz_directory(replacement)
+            return [SimpleNamespace(area_id="a")]
+
+        old.areas.get_joined_areas = joined
+        await ctrl._check_once()
+        assert not agent.joined
+        assert not any(call[0] == "join" for call in agent.calls)
+        await ctrl.stop()
+
     asyncio.run(run())

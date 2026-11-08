@@ -124,7 +124,6 @@ class _StubVad:
 
 async def _make_agent(*, live: bool = True) -> tuple[VoiceAgent, FakeDuplex, FakeBackend]:
     agent = VoiceAgent.__new__(VoiceAgent)
-    agent._cascade_attempts = 0
     agent.settings = load_voice_agent_settings()[0]
     # 这三项必须显式写死：CI 的 config.py 由 config.example.py 生成，其中
     # VOICE_AGENT_CONFIG.enabled 为 False —— 那样 _on_remote_pcm 会在第一道门

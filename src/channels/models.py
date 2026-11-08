@@ -116,3 +116,31 @@ class UnknownAction:
 
 
 ActionState = ActionOutcome | RunningAction | UnknownAction
+
+
+@dataclass(frozen=True)
+class PlatformMember:
+    """平台成员事实；无法识别的机器人标记为 None，不能据此选作真人。"""
+
+    uid: str
+    is_bot: bool | None
+    is_self: bool
+
+
+@dataclass(frozen=True)
+class RoomMembership:
+    target: RoomTarget
+    members: tuple[PlatformMember, ...]
+
+
+@dataclass(frozen=True)
+class JoinedAreas:
+    status: Literal["confirmed", "unavailable", "invalid_response"]
+    area_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class AreaMembership:
+    area: str
+    status: Literal["confirmed", "unavailable", "invalid_response"]
+    rooms: tuple[RoomMembership, ...] = ()

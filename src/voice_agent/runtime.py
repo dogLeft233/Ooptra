@@ -9,6 +9,9 @@ from typing import Any
 
 import config as runtime_config
 from core.paths import project_path
+from operations import create_configuration
+from operations.api import Configuration
+from operations.models import OutputVolume
 from voice_agent.agent import VoiceAgent
 from voice_agent.api import VoiceApiServer
 from voice_agent.auto_visit import AutoVisitController
@@ -23,7 +26,10 @@ _API_RESTART_KEYS = ("host", "port")
 
 
 class VoiceRuntime:
-    def __init__(self, *, state_path: str | Path | None = None) -> None:
+    def __init__(
+        self, *, state_path: str | Path | None = None, configuration: Configuration | None = None,
+    ) -> None:
+        self._configuration = configuration if configuration is not None else create_configuration()
         self.agent_settings, self.api_settings = load_voice_agent_settings()
         self.agent = VoiceAgent(self.agent_settings, self.api_settings)
         self.agent.set_output_volume_saver(self._save_output_volume)
@@ -41,9 +47,8 @@ class VoiceRuntime:
         return bool(self.agent_settings.enabled or self.api_settings.enabled)
 
     async def _save_output_volume(self, volume: int) -> None:
-        from webui import config_editor
-
-        await asyncio.to_thread(config_editor.apply_updates, {"voice": {"output_volume": volume}})
+        parsed = OutputVolume(volume)
+        await asyncio.to_thread(self._configuration.save_output_volume, parsed)
 
     def bind_bot(self, bot: Any) -> None:
         self.agent.bind_bot(bot)

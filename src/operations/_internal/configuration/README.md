@@ -1,6 +1,6 @@
 # 配置事务
 
-状态：待实现内部设计；仅供 `operations` 内部使用，不是新的跨模块 API。模块外见 [系统维护](../../README.md)，文件写入机制仍复用 `core.config_file_store`，不复制一份文件锁。现有入口为 `webui.config_editor.apply_updates`、`VoiceRuntime.reload_settings` 及账号/凭据保存路径；本次没有改变这些代码。
+状态：**部分实现**。`service.py` 已提供音量保存，`document.py` 已接管共用 AST 补丁/文档校验；完整版本化事务仍是下述目标设计。内部代码仅供 `operations` 内部使用，不是新的跨模块 API。模块外见 [系统维护](../../README.md)，文件写入机制仍复用 `core.config_file_store`，不复制一份文件锁。WebUI 的通用字段解析、元数据和运行时同步仍在旧编辑器；它复用本模块公开文档操作与 `OutputVolume`，音量规则没有新旧两份。`VoiceRuntime` 使用注入的 `Configuration` 持久化音量。
 
 ## 边界与选择
 
@@ -52,6 +52,10 @@ parsed → acquired mutation gate → checked revision → staged → committed
 
 ## 首批迁移与验证
 
-先提取现有字段解析/文本补丁及保存，用 HTTP 适配保留现有响应；随后替换 `VoiceRuntime._save_output_volume` 的 WebUI 反向导入。涉及凭据写入时保留原文件权限与符号链接行为，不把模型环境密钥搬进 WebUI。
+已迁入通用文本补丁、文档校验和单字段音量保存。`FileConfiguration` 持有文件路径和运行配置读取端口；保存期间复用 `core` 的同进程文件锁，只在文件替换成功后修改音量字段，不覆盖其他运行时环境值。它不持有独立配置副本，且不会在构建/导入时加载配置。音量的十进制字符串兼容解析与 10–100 范围由 `OutputVolume` 唯一维护。旧编辑器仍保留展示元数据以及非音量字段准入；完整请求版本/回执/热应用协调仍待实现。
+
+新增公开入口证据见 `tests/operations/test_configuration.py`；现有 WebUI AST 回归通过兼容转调继续守住同一份算法，未为测试放宽内部导入。音量持久化的异步等待由现有 `VoiceOutputControls` 观察并等完成，取消不使写线程失去拥有者。
+
+后续提取其余字段解析及保存，用 HTTP 适配保留现有响应。涉及凭据写入时保留原文件权限与符号链接行为，不把模型环境密钥搬进 WebUI。
 
 现有证据测试：`tests/test_config_editor.py`、`tests/test_config_file_store.py`、`tests/test_voice_settings_reload.py`、`tests/test_auto_visit_config_editor.py`。新增公开行为测试需验证：非法输入不写；并发版本冲突；保存成功/热应用失败可查询；重试不应用旧版本；提交中请求取消不释放许可；进程重启不沿用旧 applied 状态。用 tmp_path 和模拟运行端口，不写当前配置。此处只是待实现验收，现有测试不证明目标类型/API 已存在。

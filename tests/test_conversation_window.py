@@ -4,10 +4,10 @@ from test_voice_operations import make_agent
 
 
 def test_window_is_per_member_extends_expires_and_clears():
-    from voice_agent.reply_policy import ConversationWindow
+    from behavior import create_reply_policy
 
     now = [100.0]
-    window = ConversationWindow(clock=lambda: now[0])
+    window = create_reply_policy(clock=lambda: now[0])
     assert window.observe("ＯＯＰＴＲＡ，好呀", ["ooptra"], "a", 30)  # noqa: RUF001 -- ASR normalization
     assert not window.observe("继续", [], "b", 30)
     now[0] = 129
@@ -20,9 +20,9 @@ def test_window_is_per_member_extends_expires_and_clears():
 
 
 def test_unknown_member_never_opens_window_and_disabled_clears():
-    from voice_agent.reply_policy import ConversationWindow
+    from behavior import create_reply_policy
 
-    window = ConversationWindow()
+    window = create_reply_policy()
     assert window.observe("ooptra", ["ooptra"], "", 30)
     assert not window.observe("继续", [], "", 30)
     assert window.observe("ooptra", ["ooptra"], "a", 30)

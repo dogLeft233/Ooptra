@@ -11,6 +11,7 @@ import struct
 import wave
 from io import BytesIO
 
+from behavior import create_reply_policy
 from voice_agent.backends.base import (
     VoiceBackend,
     VoiceReply,
@@ -19,12 +20,6 @@ from voice_agent.backends.base import (
 )
 from voice_agent.context_bridge import MEMORY_RULES, memory_tools
 from voice_agent.observation import DecisionTrace, VoiceObservation
-from voice_agent.reply_policy import (
-    ConversationWindow,
-    allow_reply,
-    matches_force_keyword,
-    window_seconds,
-)
 from voice_agent.voice_control import (
     CONTROL_DECISION_FORMAT,
     LEAVE_INTENT_DESCRIPTION,
@@ -277,7 +272,7 @@ class MimoCascadeBackend(VoiceBackend):
         self.memory = memory
         self.observation = VoiceObservation(self.name)
         self.intent_response_valid = True
-        self._conversation = ConversationWindow()
+        self._conversation = create_reply_policy()
         self._session = None  # aiohttp.ClientSession，懒加载
 
     def _proxy_url(self) -> str | None:
@@ -587,9 +582,11 @@ class MimoCascadeBackend(VoiceBackend):
         keywords = list(self.settings.force_reply_keywords)
         percent = self.settings.reply_probability_percent
         control_enabled = self.settings.voice_leave_enabled or self.settings.voice_volume_enabled
-        in_window = self._conversation.observe("", [], user_key, window_seconds(self.settings))
+        window = (self.settings.conversation_window_seconds
+                  if self.settings.conversation_window_enabled else 0)
+        in_window = self._conversation.observe("", [], user_key, window)
         preselected = not control_enabled and not keywords and not in_window
-        if preselected and not allow_reply(percent):
+        if preselected and not self._conversation.select(percent):
             trace.reason = "probability"
             return VoiceReply()
         with trace.measure("asr"):
@@ -599,9 +596,10 @@ class MimoCascadeBackend(VoiceBackend):
         audio_ms = len(pcm16) / 2 / max(1, sample_rate) * 1000.0
         short = control_enabled and audio_ms < max(0, self.settings.min_utterance_ms)
         addressed = False if short else self._conversation.observe(
-            text, keywords, user_key, window_seconds(self.settings))
-        selected = not short and (preselected or addressed or allow_reply(percent))
-        trace.reason = ("short" if short else "keyword" if matches_force_keyword(text, keywords)
+            text, keywords, user_key, window)
+        selected = not short and (preselected or addressed or self._conversation.select(percent))
+        named = self._conversation.matches_keywords(text, keywords)
+        trace.reason = ("short" if short else "keyword" if named
                         else "window" if addressed else "reply" if selected else "probability")
         reply_reason = trace.reason
         reply_text = ""

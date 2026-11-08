@@ -8,10 +8,11 @@ import logging
 import random
 import time
 import uuid
-from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from channels.api import TransportFailure
+from channels.models import PlatformMember
 from voice_agent.auto_visit_settings import AutoVisitConfig, effective_area
 from voice_agent.auto_visit_state import AutoVisitStateStore
 
@@ -25,10 +26,6 @@ class _Clock:
     @staticmethod
     def utcnow() -> datetime:
         return datetime.now(timezone.utc)
-
-
-def _field(value: Any, name: str, default: Any = None) -> Any:
-    return value.get(name, default) if isinstance(value, Mapping) else getattr(value, name, default)
 
 
 class AutoVisitController:
@@ -293,7 +290,7 @@ class AutoVisitController:
             return self._pause_reason or "自动串门记录不可用"
         if not self.agent.settings.enabled:
             return "语音对话未启用"
-        if not self._ready or self.agent._bot is None:
+        if not self._ready:
             return "等待 Oopz 连接就绪"
         if self.agent.status().get("joined"):
             return "当前房间由用户或自动停留控制"
@@ -338,27 +335,16 @@ class AutoVisitController:
             await self._check_once()
             self._schedule_check()
 
-    async def _query_rooms(self, area: str, *, humans_only: bool = True) -> dict[str, list[Any]]:
-        result = await asyncio.wait_for(
-            self.agent._bot.channels.get_voice_channel_members(area=area), timeout=10)
-        grouped = _field(result, "channel_members", None)
-        if grouped is None:
-            grouped = _field(result, "channelMembers", None)
-        if not isinstance(grouped, Mapping):
-            raise ValueError("语音成员响应不是频道列表")
-        self_uid = str(getattr(getattr(self.agent._bot, "config", None), "person_uid", "") or "")
-        rooms = {}
-        for channel, members in grouped.items():
-            if not isinstance(members, list):
-                raise ValueError("语音成员响应不是成员列表")
-            people = []
-            for member in members:
-                uid = str(_field(member, "uid", "") or "")
-                bot = _field(member, "is_bot", _field(member, "isBot", False))
-                if not humans_only or (uid and uid != self_uid and str(bot).lower() not in {"true", "1"}):
-                    people.append(member)
-            rooms[str(channel)] = people
-        return rooms
+    async def _query_rooms(self, area: str, *, humans_only: bool = True) -> dict[str, list[PlatformMember]]:
+        observed = await self.agent.directory.voice_members(area)
+        if observed.status != "confirmed":
+            raise TransportFailure(f"成员查询未确认：{observed.status}")
+        return {
+            room.target.channel: [member for member in room.members
+                                  if not humans_only or (member.uid and not member.is_self
+                                                         and member.is_bot is False)]
+            for room in observed.rooms
+        }
 
     async def _check_once(self) -> None:
         async with self._check_lock:
@@ -366,11 +352,15 @@ class AutoVisitController:
             if self._blocked(snapshot):
                 return
             epoch = self._epoch
+            directory = self.agent.directory
             self._phase = "checking"
             try:
-                joined = await asyncio.wait_for(self.agent._bot.areas.get_joined_areas(), 10)
-                joined_ids = {str(_field(row, "area_id", _field(row, "id", "")))
-                              for row in joined}
+                joined = await directory.joined_areas()
+                if directory is not self.agent.directory or epoch != self._epoch:
+                    return
+                if joined.status != "confirmed":
+                    raise TransportFailure(f"域查询未确认：{joined.status}")
+                joined_ids = set(joined.area_ids)
                 eligible = [area for area in sorted(self.config.areas)
                             if area in joined_ids and effective_area(self.config, area)["enabled"]
                             and self._can_join(area)]
@@ -397,7 +387,8 @@ class AutoVisitController:
                     return
                 channel = self.rng.choice(candidates[area])
                 fresh_rooms = await self._query_rooms(area)
-                if (not fresh_rooms.get(channel) or epoch != self._epoch
+                if (not fresh_rooms.get(channel) or directory is not self.agent.directory
+                        or epoch != self._epoch
                         or self._blocked(self._snapshot())
                         or not effective_area(self.config, area)["enabled"]
                         or not self._can_join(area)):
@@ -405,7 +396,8 @@ class AutoVisitController:
                 visit_id = uuid.uuid4().hex
                 operation_epoch = self.agent.operation_epoch
                 await self._write("reserve", visit_id, area, self.clock.utcnow())
-                if (epoch != self._epoch or self._paused or not self._ready
+                if (directory is not self.agent.directory or epoch != self._epoch
+                        or self._paused or not self._ready
                         or not self.agent.settings.enabled
                         or not effective_area(self.config, area)["enabled"]
                         or self.agent.status().get("joined")):
@@ -482,9 +474,9 @@ class AutoVisitController:
 
     def _room_key(self) -> tuple[int, int, str, str] | None:
         room = self.agent.status()
-        if not self._ready or self.agent._bot is None or not room.get("joined"):
+        if not self._ready or not room.get("joined"):
             return None
-        return (id(self.agent._bot), self.agent.operation_epoch,
+        return (id(self.agent.directory), self.agent.operation_epoch,
                 room.get("area", ""), room.get("channel", ""))
 
     async def _room_empty_confirmed(self) -> bool:
@@ -495,14 +487,12 @@ class AutoVisitController:
         if key is None:
             self._empty_since = None
             return False
-        self_uid = str(getattr(getattr(self.agent._bot, "config", None), "person_uid", "") or "")
 
         async def only_self() -> bool:
             # Include other bots: "no humans" is not the same as "only this bot".
             rooms = await self._query_rooms(key[2], humans_only=False)
             members = rooms.get(key[3], [])
-            return bool(self_uid and len(members) == 1
-                        and str(_field(members[0], "uid", "") or "") == self_uid)
+            return len(members) == 1 and members[0].is_self
 
         try:
             alone = await only_self()
