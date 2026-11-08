@@ -1064,3 +1064,15 @@ form[inert] { opacity: .65; }
 .binding-warning { color: var(--warn-text); font-size: 12px; line-height: 1.6; margin: 12px 0 0; }
 @media (max-width: 1000px) { .binding-layout { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 400px) { .binding-row { padding: 12px; } .binding-route { gap: 6px; grid-template-columns: minmax(0, 1fr) 16px minmax(0, .85fr); } .binding-route strong { font-size: 14px; } }
+
+/* 逐句诊断：长公式、昵称和关联ID均可在窄屏折行。 */
+.voice-trace-card { margin-top: 18px; }
+.voice-trace-toolbar { display: flex; align-items: end; flex-wrap: wrap; gap: 16px; }
+.voice-trace-toolbar .field { min-width: 150px; }
+.voice-trace-list { list-style: none; padding: 0; margin: 14px 0; max-height: 640px; overflow-y: auto; }
+.voice-trace-item { padding: 14px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.voice-trace-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.voice-trace-heading time { color: var(--muted); font-size: 12px; }
+.voice-trace-text { white-space: pre-wrap; margin: 10px 0; }
+.voice-trace-item details { font-size: 12px; }
+.voice-trace-item summary { cursor: pointer; }

@@ -78,6 +78,7 @@ jobs:
         run: |
           node tests/browser/webui.cjs
           node tests/browser/preview.cjs
+          node tests/browser/transcript-timeline.cjs
           node tests/browser/screen-frame.cjs
           node tests/browser/voice-volume.cjs
           node tests/browser/ui-audit.cjs

@@ -86,6 +86,9 @@ class LiveFlow:
         self._metadata[key] = event
         self._sequence += 1
         if not event.internal:
+            if self.observations is not None:
+                self.observations.trace(self.session, key, event.user_key, "recognized", text=event.text,
+                    text_final=complete, reason="awaiting_decision")
             self.context.observe(Observation(f"{key}:{self._sequence}", self.session,
                 self.live.live_session_id, self._sequence, "recognized", event.text,
                 event.user_key, key, complete=complete))
@@ -125,6 +128,8 @@ class LiveFlow:
                     assert isinstance(decision, NoAction)
                     await self.live.resolve_turn(event.proposal, Reject(decision.reason))
                     if self.observations is not None:
+                        self.observations.trace(self.session, self._key(event), event.user_key, "finished",
+                            decision="silent", reason=decision.reason, outcome="skipped")
                         self.observations.record(trigger_id=self._key(event), session_id=self.session.session_id,
                             backend=self.backend.name, reason=decision.reason, outcome="skipped",
                             elapsed_ms=0, timing_mode="live_overlap")
@@ -193,6 +198,11 @@ class LiveFlow:
                         logger.warning('event=voice.playback.failed 推流失败 reason=%s session_id=%s action_id=%s',
                             outcome.reason, self.session.session_id, action_id)
                     if self.observations is not None:
+                        final_trace = self._metadata.get(key, event)
+                        if not final_trace.internal:
+                            self.observations.trace(self.session, key, final_trace.user_key, "finished",
+                                decision="speak", reason="reply", outcome=outcome.status,
+                                elapsed_ms=dict(evidence.timings_ms).get('generation_total', 0))
                         self.observations.record(trigger_id=key, session_id=self.session.session_id,
                             backend=self.backend.name, reason='reply', outcome=outcome.status,
                             elapsed_ms=dict(evidence.timings_ms).get('generation_total', 0),

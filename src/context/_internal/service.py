@@ -23,6 +23,9 @@ from context.models import (
     RecallRequest,
     RememberRequest,
     SituationSnapshot,
+    VoiceTrace,
+    VoiceTracePage,
+    VoiceTraceQuery,
     WriteAuthorization,
 )
 from core.paths import project_path
@@ -52,6 +55,14 @@ class ContextService:
 
     def _revision(self):
         return ContextRevision(self._version, len(self._source_generations), self._ledger.revision())
+
+    def record_voice_trace(self, trace: VoiceTrace) -> None:
+        if self._closed:
+            raise RuntimeError("上下文已关闭")
+        self._ledger.record_voice_trace(trace)
+
+    def voice_traces(self, query: VoiceTraceQuery) -> VoiceTracePage:
+        return self._ledger.voice_traces(query)
 
     def observe(self, observation: Observation) -> ContextRevision:
         if self._closed:

@@ -93,7 +93,7 @@ class BehaviorService:
             assessment = observed.reply_assessment
             named = self._policy.matches_keywords(observed.text, list(settings.keywords))
             if named or assessment.decision == "addressed":
-                allowed, reason = True, "addressed"
+                allowed, reason = True, "keyword" if named else "semantic_addressed"
             elif observed.audio_ms < settings.min_utterance_ms:
                 allowed, reason = False, "too_short"
             else:
@@ -101,7 +101,7 @@ class BehaviorService:
                 reason = "semantic_" + assessment.decision
             result = (Speak(SpeechIntent(uuid4().hex, action_id, trigger.session, trigger.trigger_id,
                         observed.context_version, min(permit.expires_at, self._clock() + settings.lifetime_seconds),
-                        observed.text, trigger.user_key, permit.attempt_id))
+                        observed.text, trigger.user_key, permit.attempt_id), reason=reason)
                       if allowed else NoAction(reason))
         elif observed.audio_ms < settings.min_utterance_ms:
             result = NoAction("too_short")

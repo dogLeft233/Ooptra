@@ -15,6 +15,7 @@ from support.channel_fixtures import establish_room
 from support.dialogue_fixtures import aliyun_backend as AliyunDeepSeekBackend
 from test_voice_operations import make_agent
 
+from app.observation import FlowObservations
 from channels.models import OutputSourceError
 from dialogue import VoiceBackend
 from dialogue.models import VoiceStreamInterrupted
@@ -507,11 +508,26 @@ def test_room_capture_streams_before_cut_and_releases_original_attempt(tmp_path,
                         {'role':'assistant', 'content':'你好。再见。'}]
                     assert state.text == ['你好。', '再见。']
                     assert agent.status()['cascade_attempts'] == 1
+                    from context.models import VoiceTraceQuery
+                    rows = agent.context_service.voice_traces(VoiceTraceQuery()).rows
+                    assert len(rows) == 1
+                    assert rows[0].trace.text == spoken and rows[0].trace.user_key == 'oopz:member'
+                    assert rows[0].trace.outcome == 'completed'
+                    assert rows[0].trace.reason == ('keyword' if end == 'short_name' else 'semantic_contribute')
+                    for _ in range(10):
+                        await agent._on_remote_pcm('member', b'\x00\x20' * 960, 16000)
+                    await agent._on_remote_pcm('member', bytes(1920), 16000)
+                    rows = agent.context_service.voice_traces(VoiceTraceQuery()).rows
+                    assert len(rows) == 2 and rows[0].trace.reason == 'limit_reached'
                     await agent.leave()
                 await asyncio.wait_for(state.sockets_idle.wait(), 1)
                 assert state.open_sockets == 0
                 if end not in {'reply', 'short_name'}:
                     assert not state.chat_requests and not agent.memory.as_messages()
+                    from context.models import VoiceTraceQuery
+                    rows = agent.context_service.voice_traces(VoiceTraceQuery()).rows
+                    assert len(rows) == 1 and rows[0].trace.stage == 'finished'
+                    assert rows[0].trace.outcome == 'not_executed'
             finally:
                 await agent.close()
     asyncio.run(run())
@@ -656,13 +672,98 @@ def test_real_cascade_uses_semantic_decision_and_name_fallback(tmp_path, text, a
                     channel=channel, session=session, trigger_id="input", user_key="any-member",
                     pcm=b"\x01\x00"*16000, sample_rate=16000, limit=0,
                     settings=ReplySettings(probability=percent, keywords=("大肥鱼",)),
-                    interpret_controls=False, current=lambda: True, on_playing=lambda _: None)
+                    interpret_controls=False, current=lambda: True, on_playing=lambda _: None,
+                    observations=FlowObservations(journal=context))
                 assert bool(result.outcome and result.outcome.status == "completed") is expected
                 assert state.audio_seen.is_set() is expected
+                from context.models import VoiceTraceQuery
+                rows = context.voice_traces(VoiceTraceQuery()).rows
+                assert len(rows) == 1 and rows[0].trace.text == text
+                assert rows[0].trace.outcome == ('completed' if expected else 'semantic_silent')
+                assert rows[0].trace.reason == ('keyword' if text.startswith('大肥鱼') else 'semantic_' + assessment)
                 assert [row["role"] for row in context.history.recent()] == (["user", "assistant"] if expected else ["user"])
                 if expected:
                     assert result.reply_text == "你好。再见。"
                     assert "decision" not in "".join(state.text)
             finally:
                 await context.close()
+    asyncio.run(run())
+
+
+def test_unselected_recognized_sentences_remain_visible_when_bot_is_busy(tmp_path):
+    from context.models import VoiceTraceQuery
+
+    async def run():
+        async with model_servers(transcript='大肥鱼，你在吗？') as (backend, state):
+            agent = make_agent(tmp_path)
+            await agent.backend.aclose()
+            agent.backend = backend
+            agent.settings.min_utterance_ms = 60
+            agent.settings.silence_ms = 60
+            agent.settings.reply_cooldown_ms = 0
+            agent.settings.cascade_turn_limit = 0
+            agent.settings.force_reply_keywords = ['大肥鱼']
+            await agent.join('a', 'c')
+            playing, release = asyncio.Event(), asyncio.Event()
+            async def push(pcm, rate, **kwargs):
+                if pcm:
+                    state.audio_seen.set()
+                    playing.set()
+                    await release.wait()
+                return {'ok': True}
+            agent.duplex.push_tts_pcm = push
+            async def utterance():
+                await agent._on_remote_pcm('member', b'\x00\x20' * 960, 16000)
+                await agent._on_remote_pcm('member', bytes(1920), 16000)
+            try:
+                await utterance()
+                await asyncio.wait_for(playing.wait(), 2)
+                await utterance()
+                await utterance()
+                async def unselected():
+                    while True:
+                        rows = agent.context_service.voice_traces(VoiceTraceQuery()).rows
+                        if len(rows) == 3 and sum(row.trace.outcome == 'not_executed' for row in rows) == 2:
+                            return rows
+                        await asyncio.sleep(.01)
+                rows = await asyncio.wait_for(unselected(), 6)
+                assert all(row.trace.text == '大肥鱼，你在吗？' for row in rows)
+                assert sum(row.trace.reason == 'unselected_or_expired' for row in rows) == 2
+                # 未被选中的转写仅作排障，不冒充正式对话历史。
+                assert len(agent.memory.as_messages(user_key='oopz:member')) == 1
+            finally:
+                release.set()
+                await agent.leave()
+                await agent.close()
+    asyncio.run(run())
+
+
+def test_asr_failure_is_visible_and_is_not_reported_as_model_silence(tmp_path):
+    from context.models import VoiceTraceQuery
+
+    async def run():
+        async with model_servers(fail_asr=True) as (backend, _):
+            agent = make_agent(tmp_path)
+            await agent.backend.aclose()
+            agent.backend = backend
+            agent.settings.min_utterance_ms = 60
+            agent.settings.silence_ms = 60
+            await agent.join('a', 'c')
+            try:
+                await agent._on_remote_pcm('member', b'\x00\x20' * 960, 16000)
+                await agent._on_remote_pcm('member', bytes(1920), 16000)
+                async def failed():
+                    while True:
+                        rows = agent.context_service.voice_traces(VoiceTraceQuery()).rows
+                        if rows and rows[0].trace.stage == 'finished':
+                            return rows[0].trace
+                        await asyncio.sleep(0)
+                trace = await asyncio.wait_for(failed(), 2)
+                assert trace.recognition_status == 'failed'
+                assert trace.reason == 'recognition_failed' and trace.text == ''
+                assert trace.outcome == 'streaming_recognition_unavailable'
+                assert not agent.memory.as_messages()
+            finally:
+                await agent.leave()
+                await agent.close()
     asyncio.run(run())

@@ -179,7 +179,7 @@ class VoiceCoordinator:
 
         self._init_throttle()
         from app.observation import FlowObservations
-        self.observations = FlowObservations()
+        self.observations = FlowObservations(journal=self.context_service)
 
     @property
     def platform_bound(self):

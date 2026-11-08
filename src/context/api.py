@@ -24,6 +24,9 @@ from context.models import (
     RpcReceipt,
     RpcResolution,
     SituationSnapshot,
+    VoiceTrace,
+    VoiceTracePage,
+    VoiceTraceQuery,
 )
 
 
@@ -93,6 +96,16 @@ class ContextService(Protocol):
     @property
     def bridge(self) -> SourceBridge: ...
 
+    def record_voice_trace(self, trace: VoiceTrace) -> None:
+        """独立SQLite诊断表按完整会话/input更新；不进入模型历史或outbox。
+
+        原输入身份不可变，阶段不倒退，最终文本不被临时文字覆盖。
+        同步有限事务，关闭后拒绝；失败由调用边界安全记录，不伪造成功。
+        """
+        ...
+    def voice_traces(self, query: VoiceTraceQuery) -> VoiceTracePage:
+        """倒序稳定游标分页，最多100条；刷新/重启保留，从功能启用后开始记录。"""
+        ...
     def observe(self, observation: Observation) -> ContextRevision: ...
     def snapshot(self, scope: RoomTarget) -> SituationSnapshot: ...
     async def prepare_context(self, request: ContextRequest) -> PreparedContext: ...

@@ -38,3 +38,5 @@
 允许依赖 `context.models`、`channels.models` 和公共机制；不导入其他模块实现。内部规则变更保持在本模块，接口/状态归属变化同时维护本页和相应子模块说明。
 
 阿里/DeepSeek 的 `RecognitionObserved.reply_assessment` 携带绑定原会话/输入的语义候选。行为以叫名优先、addressed/contribute允许、silent/invalid/unavailable沉默决定，不再抽样或用固定窗口强制接话；已命名短语可绕过普通最短时长。无语义候选的后端保留原策略。验证见 `tests/behavior/test_semantic_replies.py`。
+
+`Speak.reason` 提供已授权意图的具名原因供控制台关联：语义路径区分keyword、semantic_addressed、semantic_contribute；它不改变许可与执行语义，也不包含模型推理。

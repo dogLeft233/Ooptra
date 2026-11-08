@@ -340,6 +340,7 @@ class ReplySettings:
 @dataclass(frozen=True)
 class Speak:
     intent: SpeechIntent
+    reason: str = ""
 
 
 @dataclass(frozen=True)

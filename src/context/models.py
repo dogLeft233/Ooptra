@@ -275,3 +275,58 @@ class BindingRequest:
         if not isinstance(value, dict) or value.get("action") not in {"list", "save", "delete", "source-save", "source-delete", "source-options"}:
             raise ValueError("不支持的来源管理操作")
         return cls(value["action"], json.dumps(value, ensure_ascii=False))
+
+
+@dataclass(frozen=True)
+class VoiceTrace:
+    """控制台逐句诊断，独立于模型历史；原身份不可变、阶段只能前进。"""
+    session: SessionRef
+    input_ref: str
+    user_key: str
+    stage: Literal["recognizing", "recognized", "deciding", "finished"]
+    text: str = ""
+    text_final: bool = True
+    decision: str = ""
+    reason: str = ""
+    outcome: str = ""
+    elapsed_ms: float = 0
+    recognition_status: Literal["", "pending", "recognized", "no_speech", "failed", "interrupted"] = ""
+
+    def __post_init__(self) -> None:
+        import math
+        if (type(self.session) is not SessionRef or type(self.input_ref) is not str
+                or not self.input_ref.strip() or type(self.user_key) is not str
+                or type(self.stage) is not str or self.stage not in {"recognizing", "recognized", "deciding", "finished"}
+                or type(self.recognition_status) is not str or self.recognition_status not in {"", "pending", "recognized", "no_speech", "failed", "interrupted"}
+                or type(self.text) is not str or len(self.text) > 65536 or type(self.text_final) is not bool
+                or any(type(value) is not str or len(value) > 128 for value in (self.decision, self.reason, self.outcome))
+                or type(self.elapsed_ms) not in {int, float} or not math.isfinite(self.elapsed_ms) or self.elapsed_ms < 0):
+            raise ValueError("语音诊断需要原身份、有效阶段、有限文字与非负耗时")
+
+
+@dataclass(frozen=True)
+class VoiceTraceQuery:
+    scope: RoomTarget | None = None
+    before: int | None = None
+    limit: int = 50
+
+    def __post_init__(self) -> None:
+        if ((self.scope is not None and type(self.scope) is not RoomTarget)
+                or (self.before is not None and (type(self.before) is not int or self.before < 1))
+                or type(self.limit) is not int or not 1 <= self.limit <= 100):
+            raise ValueError("逐句查询需要有效频道、正整数游标、1至100条页长")
+
+
+@dataclass(frozen=True)
+class VoiceTraceEntry:
+    sequence: int
+    recorded_at: float
+    updated_at: float
+    trace: VoiceTrace
+
+
+@dataclass(frozen=True)
+class VoiceTracePage:
+    rows: tuple[VoiceTraceEntry, ...]
+    next_before: int | None
+    total: int
