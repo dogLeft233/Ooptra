@@ -181,3 +181,31 @@ python scripts/run_bot_pair_acceptance.py /绝对路径/Ooptra /绝对路径/Oop
 - 证据：本机 `data/bot-pair-contracts-afafabc.json`、`data/bot-pair-contracts-cleanup-deployment.json`；原始报告不纳入 Git。本轮未生成新录像，历史录像不冒充本轮证据。
 - 结束后两应用继续运行、均已退房；限额、白名单和模型配置保持原样。随后仅提交验收文档，运行代码仍是上述 SHA。
 - 未执行 Gemini Live 云端实机/第三账号人工音质旁听、真实生产更新及恢复；这些路径分别有协议/隔离环境测试，不能据此声称已经完成真实服务验收。OpenAI Realtime 仍是原有明确不支持的后端，不属于本次新增功能。
+
+### 2026-11-08 流式 ASR 与 low 思考复测（Asia/Shanghai）
+
+- 两端 HEAD 均为 `f15dc287a66cabb185607802ddd77797970ab6ff`。已按进程目录、
+  解释器和 PID 重启并确认 bootstrap/Oopz 就绪；部署记录在忽略目录
+  `data/bot-pair-streaming-deployment.json`。实例 B 的已跟踪工作区干净；控制脚本记录
+  实例 A 当时另有 `src/dialogue/__init__.py`、`api.py`、`models.py` 的并行音色库改动。
+  后续该工作继续修改 WebUI 等文件，均未纳入本 PR；本项真实验收是此运行环境的证据，
+  不冒充两端全工作区与提交逐字一致的验收。提交快照的独立自动化结果另列如下。
+- 同一测试频道、独立账号/数据/3090与3091端口；双方只监听对端，三次尝试上限，
+  关闭抢话和语音控制。模型仍为 Message ASR / DeepSeek Flash / Qwen Audio TTS，
+  `longanhuan_v3.1`；适配显式请求 `thinking=enabled`、`reasoning_effort=low`。
+- 一次手动开场、双方各三次自动回复；68.03秒完成，两端尝试均3，总发言增量4/3，
+  两端最终退房确认 `[true, true]`。对话从公园散步接续到读书和饮品，由真实音频驱动，
+  控制器没有逐轮注入文字。报告 `data/bot-pair-streaming-f15dc28.json` 保存完成关联ID。
+- 识别在收到对方音频期间启动；诊断 `asr_finalize`（上传结束至最终识别返回）分别为
+  A：285.8 / 1210.2 / 318.8毫秒，B：339.6 / 264.7 / 259.3毫秒。
+  该数据仍不等于说话结束到首音；本地停顿判定未缩短，开启思考增加的等待也未剔除。
+  脱敏阶段数据保存在 `data/bot-pair-streaming-diagnostics.json`。
+- 提交快照完整 Python 测试1230通过、1跳过；Ruff、Pyright、ESLint、预览同步通过，
+  导出的已暂存快照架构检查通过。本地既有未跟踪空 `src/voice_agent/agent.py` 保留在原处，
+  未纳入快照；直接检查包含该文件的整个工作区仍会正确报告退休目录违规。
+- 本地真实 HTTP/WS 回归证明临时识别不进决策/历史、缺最终转录失败、切句前上传、
+  断点/关闭/队列溢出清理、许可只扣一次，以及独立推理字段/思考标签不会送到TTS。
+  无第三账号人工旁听；未验证真实混音音质、首音延迟目标或所有云端故障路径。
+- 本次未开启额外音频/推理正文采集；验收后两个实例保持退房，保留对端白名单和三轮
+  验收配置，避免无人值守时无限互聊。此前真人配置备份在各实例忽略的
+  `data/pre-streaming-acceptance-config.py`，包含私有配置，不得提交或分享。
