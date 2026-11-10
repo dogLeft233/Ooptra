@@ -1105,8 +1105,6 @@ class VoiceAgent:
                 or getattr(self, "_announcement_active", False) or getattr(self, "_retiring_visit_id", "")
                 or not getattr(self, "_connection_ready", True) or getattr(self, "_voice_suspended", False)):
             return
-        if self._cascade_limit_reached():
-            return
         if not self.settings.enabled or not pcm:
             return
         uid = str(uid or "unknown")
@@ -1169,6 +1167,8 @@ class VoiceAgent:
                 and (not isinstance(self.backend, StreamingUtterance)
                      or self._barge_in_reached(uid, pcm, sample_rate))):
             await self._interrupt_speaking()
+        if self._cascade_limit_reached():
+            return
         vad = self._vad_for(uid)
         utterance = vad.feed(pcm)
         if utterance:
@@ -1298,13 +1298,22 @@ class VoiceAgent:
         # 记下来：本回合是被抢话打断的，结束时不计冷却（见 _throttled_round）。
         self._barged_in = True
         stream_task = getattr(self, "_stream_reply_task", None)
-        if stream_task is not None and not stream_task.done():
-            stream_task.cancel()
-        if self.duplex is not None:
-            try:
-                await self.duplex.stop_tts()
-            except Exception:
-                logger.debug("stop tts on barge-in failed", exc_info=True)
+        # 渠道推送有自己的三秒期限。先等待已受理分片确认，再取消生成，
+        # 避免正常抢话把传输取消为未知状态；停止后不能再入队旧音频。
+        if not hasattr(self, "_live_output_lock"):
+            self._live_output_lock = asyncio.Lock()
+        async with self._live_output_lock:
+            if stream_task is not None and not stream_task.done():
+                stream_task.cancel()
+            if self.duplex is not None:
+                try:
+                    await self.duplex.stop_tts()
+                except Exception:
+                    logger.debug("stop tts on barge-in failed", exc_info=True)
+        # 不持输出锁等待供应商清理：清理可能需要完成音频回调。
+        # 原回合拥有并观察此任务，超过等待预算也不丢弃其引用。
+        if stream_task is not None:
+            await asyncio.wait({stream_task}, timeout=3)
 
     async def _handle_utterance(self, uid: str, pcm: bytes, sample_rate: int) -> None:
         self._ensure_operations()
@@ -1434,6 +1443,8 @@ class VoiceAgent:
                 if self._barged_in or epoch != self._operation_epoch:
                     raise VoiceStreamInterrupted()
                 async with self._live_output_lock:
+                    if self._barged_in or epoch != self._operation_epoch:
+                        raise VoiceStreamInterrupted()
                     result = await self._push_room_pcm(session, data[offset:offset + frame], rate)
                 if not result.get("ok"):
                     raise RuntimeError("语音音频推送失败")

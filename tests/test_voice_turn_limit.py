@@ -68,3 +68,28 @@ def test_peer_filter_resolves_agora_id_using_received_identity(tmp_path, monkeyp
             await agent.stop()
 
     asyncio.run(run())
+
+
+def test_exhausted_budget_still_allows_barge_in_without_new_recognition(tmp_path, monkeypatch):
+    async def run():
+        agent = make_agent(tmp_path)
+        agent.settings.cascade_turn_limit = 1
+        agent.settings.barge_in = True
+        agent._cascade_attempts = 1
+        agent._speaking = True
+        stopped = []
+
+        async def stop():
+            stopped.append(True)
+            return {"ok": True}
+
+        agent.duplex.stop_tts = stop
+        monkeypatch.setattr(agent, "_vad_for", lambda uid: (_ for _ in ()).throw(
+            AssertionError("exhausted budget reached recognition")))
+        await agent._on_remote_pcm("peer", b"\x00\x40" * 320, 16000)
+        assert stopped == [True]
+        assert not agent._speaking
+        assert agent._cascade_attempts == 1
+        await agent.stop()
+
+    asyncio.run(run())

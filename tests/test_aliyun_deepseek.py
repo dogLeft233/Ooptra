@@ -299,3 +299,50 @@ def test_streaming_barge_in_ignores_silence_and_requires_hold_duration(tmp_path)
         agent.duplex.stop_tts.assert_awaited_once()
 
     asyncio.run(run())
+
+
+def test_barge_in_drains_inflight_push_before_stopping_and_room_remains_usable(tmp_path):
+    async def run():
+        agent = make_agent(tmp_path)
+        await establish_room(agent)
+        started, release = asyncio.Event(), asyncio.Event()
+        events = []
+
+        async def push(pcm, rate, **kwargs):
+            started.set()
+            await release.wait()
+            events.append("push")
+            return {"ok": True}
+
+        async def stop():
+            events.append("stop")
+            return {"ok": True}
+
+        agent.duplex.push_tts_pcm = push
+        agent.duplex.stop_tts = stop
+
+        class Backend:
+            async def handle_utterance_stream(self, pcm, *, on_audio, **kwargs):
+                try:
+                    await on_audio(b"\x01\x00" * 4000, 24000)
+                finally:
+                    # 取消清理再次尝试输出，必须被拒绝且不能死锁。
+                    await on_audio(b"\x02\x00", 24000)
+
+        agent.backend = Backend()
+        worker = asyncio.create_task(agent._handle_utterance("member", b"\x00\x00", 16000))
+        await started.wait()
+        interrupt = asyncio.create_task(agent._interrupt_speaking())
+        await asyncio.sleep(0)
+        assert not interrupt.done()
+        release.set()
+        await asyncio.wait_for(asyncio.gather(worker, interrupt), 1)
+        assert events[0] == "push"
+        assert events[1:] and all(event == "stop" for event in events[1:])
+        session = agent.channels.snapshot().session
+        assert agent.channels.snapshot().confirmed
+        assert (await agent._push_room_pcm(session, b"\x03\x00", 24000))["ok"]
+        assert events[-1] == "push"
+        assert events.count("push") == 2
+
+    asyncio.run(run())
