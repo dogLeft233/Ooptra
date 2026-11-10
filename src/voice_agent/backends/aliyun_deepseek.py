@@ -71,6 +71,7 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
 
     def __init__(self, settings, memory) -> None:
         super().__init__(settings, memory)
+        self._stream_owner: asyncio.Task | None = None
         self._audio_sink: AudioSink | None = None
         self._tts_task: asyncio.Task[bytes] | None = None
         self._texts: asyncio.Queue[str | None] | None = None
@@ -207,7 +208,7 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
             return
         if self._texts is None:
             self._texts = asyncio.Queue()
-            self._tts_task = asyncio.create_task(self._synthesize(self._queued_texts()))
+            self._tts_task = asyncio.create_task(self._synthesize(self._queued_texts(), self._audio_sink))
         if self._tts_task is not None and self._tts_task.done():
             await self._tts_task
         await self._texts.put(text)
@@ -217,7 +218,7 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
         while (text := await self._texts.get()) is not None:
             yield text
 
-    async def _synthesize(self, texts: AsyncIterator[str]) -> bytes:
+    async def _synthesize(self, texts: AsyncIterator[str], sink: AudioSink | None = None) -> bytes:
         session = await self._http()
         task_id = uuid4().hex
         async with session.ws_connect(
@@ -251,8 +252,8 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
                         pcm.extend(chunk)
                         if len(pcm) > self.settings.sample_rate_out * 2 * 60:
                             raise RuntimeError("TTS audio exceeded 60 seconds")
-                        if chunk and self._audio_sink is not None:
-                            await self._audio_sink(chunk, self.settings.sample_rate_out)
+                        if chunk and sink is not None:
+                            await sink(chunk, self.settings.sample_rate_out)
                     elif message.type == aiohttp.WSMsgType.TEXT:
                         event = check_event(json.loads(message.data), task_id)
                         if event == "task-finished":
@@ -267,7 +268,7 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
                 await asyncio.gather(sender, return_exceptions=True)
 
     async def tts(self, text: str) -> tuple[bytes, int]:
-        if self._tts_task is not None:
+        if self._tts_task is not None and asyncio.current_task() is self._stream_owner:
             return await self._tts_task, self.settings.sample_rate_out
 
         async def single_text():
@@ -283,6 +284,7 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
         self, pcm16: bytes, *, sample_rate: int, user_key: str, channel_key: str,
         on_audio: AudioSink,
     ) -> VoiceReply:
+        self._stream_owner = asyncio.current_task()
         self._audio_sink = on_audio
         try:
             return await self.handle_utterance(
@@ -298,6 +300,7 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
             await asyncio.gather(task, return_exceptions=True)
         self._texts = None
         self._audio_sink = None
+        self._stream_owner = None
 
     async def aclose(self) -> None:
         await self._clear_stream()

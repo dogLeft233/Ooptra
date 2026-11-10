@@ -301,7 +301,8 @@ def test_streaming_barge_in_ignores_silence_and_requires_hold_duration(tmp_path)
     asyncio.run(run())
 
 
-def test_barge_in_drains_inflight_push_before_stopping_and_room_remains_usable(tmp_path):
+@pytest.mark.parametrize("operation", ["_interrupt_speaking", "stop_current_reply", "round_stop", "manual_stop"])
+def test_barge_in_drains_inflight_push_before_stopping_and_room_remains_usable(tmp_path, operation):
     async def run():
         agent = make_agent(tmp_path)
         await establish_room(agent)
@@ -330,13 +331,23 @@ def test_barge_in_drains_inflight_push_before_stopping_and_room_remains_usable(t
                     await on_audio(b"\x02\x00", 24000)
 
         agent.backend = Backend()
-        worker = asyncio.create_task(agent._handle_utterance("member", b"\x00\x00", 16000))
+        if operation == "manual_stop":
+            agent.backend.tts = AsyncMock(return_value=(b"\x01\x00" * 4000, 24000))
+            worker = asyncio.create_task(agent.speak_text("手动播报"))
+        elif operation == "round_stop":
+            await agent._start_round_worker()
+            worker = agent._round_task
+            agent._offer_utterance("member", b"\x00\x00", 16000)
+        else:
+            worker = asyncio.create_task(agent._handle_utterance("member", b"\x00\x00", 16000))
         await started.wait()
-        interrupt = asyncio.create_task(agent._interrupt_speaking())
+        stopping = "stop_current_reply" if operation.endswith("_stop") else operation
+        interrupt = asyncio.create_task(getattr(agent, stopping)())
         await asyncio.sleep(0)
         assert not interrupt.done()
         release.set()
-        await asyncio.wait_for(asyncio.gather(worker, interrupt), 1)
+        await asyncio.wait_for(asyncio.gather(worker, interrupt, return_exceptions=True), 1)
+        assert interrupt.exception() is None
         assert events[0] == "push"
         assert events[1:] and all(event == "stop" for event in events[1:])
         session = agent.channels.snapshot().session
@@ -344,5 +355,38 @@ def test_barge_in_drains_inflight_push_before_stopping_and_room_remains_usable(t
         assert (await agent._push_room_pcm(session, b"\x03\x00", 24000))["ok"]
         assert events[-1] == "push"
         assert events.count("push") == 2
+
+    asyncio.run(run())
+
+
+def test_manual_speech_uses_own_text_and_never_enters_automatic_audio_sink(tmp_path):
+    async def run():
+        async with model_servers() as (backend, state):
+            agent = make_agent(tmp_path)
+            await establish_room(agent)
+            agent.backend = backend
+            agent.duplex.push_tts_pcm = AsyncMock(return_value={"ok": True})
+            first_audio, release = asyncio.Event(), asyncio.Event()
+            automatic_audio = []
+
+            async def sink(pcm, rate):
+                automatic_audio.append(pcm)
+                first_audio.set()
+                state.audio_seen.set()
+                await release.wait()
+
+            automatic = asyncio.create_task(backend.handle_utterance_stream(
+                b"\x01\x00" * 16000, sample_rate=16000,
+                user_key="member", channel_key="area/channel", on_audio=sink))
+            await first_audio.wait()
+            manual = asyncio.create_task(agent.speak_text("手动播报"))
+            await asyncio.sleep(0)
+            release.set()
+            reply, result = await asyncio.wait_for(asyncio.gather(automatic, manual), 5)
+            assert result["ok"]
+            assert "手动播报" in state.text
+            assert len(automatic_audio) == 4
+            assert len(reply.pcm16) == 12
+            assert result["pcm_bytes"] == 6
 
     asyncio.run(run())

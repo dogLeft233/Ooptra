@@ -767,7 +767,22 @@ class VoiceAgent:
     async def _push_room_pcm(self, session: SessionRef | None, pcm: bytes, rate: int, *, finish: bool = False) -> dict[str, Any]:
         if session is None:
             return {"ok": False, "error": "stale_session"}
-        result = await self.channels.push_audio(session, pcm, rate, finish=finish)
+        # 已受理的传输有渠道自身的三秒期限。取消生成/停止回复只能取消
+        # 等待者，必须观察当前分片终态后再让停止逻辑清队列。
+        push = asyncio.create_task(self.channels.push_audio(session, pcm, rate, finish=finish))
+        try:
+            result = await asyncio.shield(push)
+        except asyncio.CancelledError:
+            while not push.done():
+                try:
+                    await asyncio.shield(push)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not push.cancelled():
+                push.exception()
+            raise
         return {"ok": result.ok, "error": result.reason}
 
     async def _wire_live(self) -> None:
