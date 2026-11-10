@@ -957,8 +957,10 @@ class VoiceAgent:
         aclose = getattr(self.backend, "aclose", None)
         if aclose is not None:
             try:
-                # The session reader may own the output lock while a browser
-                # push is pending. Cancel that reader before taking its lock.
+                # 已禁用旧回合输出。先让渠道三秒推送预算独立完成，
+                # 再关闭 reader；不能让 backend 的关闭期限与推送期限竞赛。
+                async with self._live_output_lock:
+                    pass
                 await asyncio.wait_for(aclose(), 3.0)
             except Exception as exc:
                 return {"ok": False, "error": f"voice session close failed: {exc}"}
@@ -1034,6 +1036,8 @@ class VoiceAgent:
         await self._stop_round_worker()
         await self._cancel_reply_tasks()
         if self.live_mode:
+            async with self._live_output_lock:
+                pass
             await asyncio.wait_for(self.backend.aclose(), 3.0)
         async with self._live_output_lock:
             if self.duplex is not None:

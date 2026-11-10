@@ -96,6 +96,9 @@ async def model_servers(*, fail_asr=False, truncate=False, control=False):
         if body.get('response_format'):
             value = {'leave': control, 'volume': None}
             return web.json_response({'choices': [{'message': {'content': json.dumps(value)}}]})
+        if body.get("tools"):
+            assert body["stream"] is False
+            return web.json_response({"choices": [{"message": {"content": "共享记忆回复。"}}]})
         response = web.StreamResponse(headers={'Content-Type': 'text/event-stream'})
         await response.prepare(request)
 
@@ -388,5 +391,33 @@ def test_manual_speech_uses_own_text_and_never_enters_automatic_audio_sink(tmp_p
             assert len(automatic_audio) == 4
             assert len(reply.pcm16) == 12
             assert result["pcm_bytes"] == 6
+
+    asyncio.run(run())
+
+
+def test_tools_enabled_reply_delivers_fallback_audio_to_stream_owner_only():
+    from voice_agent.context_bridge import ContextBridge
+
+    async def run():
+        async with model_servers() as (backend, state):
+            bridge = ContextBridge()
+            bridge.context = {"ok": True, "provider": "memory_companion"}
+            bridge.tool = AsyncMock(return_value={"ok": True, "context": ""})
+            backend.context_bridge = bridge
+            audio = []
+
+            async def sink(pcm, rate):
+                audio.append(pcm)
+
+            reply = await backend.handle_utterance_stream(
+                b"\x01\x00" * 16000, sample_rate=16000,
+                user_key="oopz:member", channel_key="area/channel", on_audio=sink)
+            assert any(body.get("tools") for body in state.chat_requests)
+            assert state.text == ["共享记忆回复。"]
+            assert b"".join(audio) == reply.pcm16 and reply.pcm16
+            before = list(audio)
+            pcm, _ = await backend.tts("手动播报")
+            assert pcm and state.text[-1] == "手动播报"
+            assert audio == before
 
     asyncio.run(run())

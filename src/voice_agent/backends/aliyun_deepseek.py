@@ -278,7 +278,10 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
 
         if not sanitize_for_tts(text):
             return b"", self.settings.sample_rate_out
-        return await self._synthesize(single_text()), self.settings.sample_rate_out
+        # 带工具的回复走非流式正文，不会创建内部 TTS 任务；仍需向
+        # 当前流式回合交付音频。独立朗读必须继续与该回调隔离。
+        sink = self._audio_sink if asyncio.current_task() is self._stream_owner else None
+        return await self._synthesize(single_text(), sink), self.settings.sample_rate_out
 
     async def handle_utterance_stream(
         self, pcm16: bytes, *, sample_rate: int, user_key: str, channel_key: str,
