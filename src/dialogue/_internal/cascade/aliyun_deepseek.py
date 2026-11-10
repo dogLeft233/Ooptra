@@ -1,7 +1,7 @@
 """Aliyun Message ASR + DeepSeek SSE + bidirectional Qwen Audio TTS.
 
 Keep the existing per-member VAD, reply policy, controls and memory behavior.
-ASR uploads each completed utterance over WebSocket. Ordinary replies stream
+ASR accepts authorized utterance increments over WebSocket. Ordinary replies stream
 sentence by sentence into TTS; PCM reaches the room before the turn finishes.
 """
 
@@ -67,13 +67,14 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
     name = "aliyun_deepseek"
 
     def capabilities(self) -> DialogueCapabilities:
-        return DialogueCapabilities(streaming_utterance=True)
+        return DialogueCapabilities(streaming_utterance=True, streaming_recognition=True)
 
     def __init__(self, settings) -> None:
         super().__init__(settings)
         self._audio_sink: AudioSink | None = None
         self._tts_task: asyncio.Task[bytes] | None = None
         self._texts: asyncio.Queue[str | None] | None = None
+        self._asr_streams = {}
 
     def _headers(self) -> dict[str, str]:
         if not self.settings.deepseek_api_key:
@@ -92,6 +93,15 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
             raise RuntimeError("DashScope closed before starting the task")
         if check_event(json.loads(message.data), task_id) != "task-started":
             raise RuntimeError("DashScope did not acknowledge task start")
+
+    def open_recognition(self, input, permit):
+        from dialogue._internal.cascade.recognition import StreamingRecognition
+        # Single-owner stream; keep ownership until aclose, even after final result.
+        if permit.attempt_id in self._asr_streams or len(self._asr_streams) >= 8:
+            raise ValueError("流式识别尝试重复或容量已满")
+        stream = StreamingRecognition(self, input, permit)
+        self._asr_streams[permit.attempt_id] = stream
+        return stream
 
     async def asr(self, pcm16: bytes, sample_rate: int) -> str:
         if not pcm16:
@@ -139,7 +149,9 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
     async def _chat_completion(self, body: dict, *, stage: str = "LLM") -> dict:
         # Tool and control responses must be completely validated before speech.
         streaming = self._audio_sink is not None and not body.get("response_format") and not body.get("tools")
-        request = {**body, "model": self.settings.deepseek_model, "stream": streaming}
+        request = {**body, "model": self.settings.deepseek_model, "stream": streaming,
+                   "thinking": {"type": "enabled"}, "reasoning_effort": "low",
+                   "max_tokens": max(2048, body.get("max_tokens", 0))}
         session = await self._http()
         async with session.post(
             self.settings.deepseek_base_url.rstrip("/") + "/chat/completions",
@@ -148,7 +160,17 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
             if response.status >= 400:
                 raise RuntimeError(f"DeepSeek {stage} failed HTTP {response.status}")
             if not streaming:
-                return await response.json()
+                data = await response.json()
+                for choice in data.get("choices") or []:
+                    message = choice.get("message") or {}
+                    text = message.get("content")
+                    if text is not None and (not isinstance(text, str) or any(
+                            marker in text.lower() for marker in ("<think", "</think", "<｜", "<|"))):
+                        raise ValueError("Invalid formal answer")
+                    # Tool continuations need the supplier field within this transient task.
+                    if not body.get("tools"):
+                        message.pop("reasoning_content", None)
+                return data
             raw, spoken = "", ""
             finished = False
             async for event in sse_events(response.content):
@@ -159,7 +181,13 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
                 delta = choice.get("delta") or {}
                 if delta.get("tool_calls"):
                     raise RuntimeError("Unexpected tool call in speech stream")
-                raw += delta.get("content") or ""
+                # reasoning_content is never copied, logged, queued or returned as speech.
+                content = delta.get("content")
+                if content is not None and not isinstance(content, str):
+                    raise ValueError("Invalid formal answer delta")
+                raw += content or ""
+                if any(marker in raw.lower() for marker in ("<think", "</think", "<｜", "<|")):
+                    raise ValueError("Reasoning markup in formal answer")
                 if len(raw) > 32768:
                     raise RuntimeError("DeepSeek reply exceeded the stream limit")
                 clean = clamp_reply(sanitize_for_tts(raw))
@@ -272,5 +300,7 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
         self._audio_sink = None
 
     async def aclose(self) -> None:
+        await asyncio.gather(*(stream.aclose() for stream in tuple(self._asr_streams.values())),
+                             return_exceptions=True)
         await self._clear_stream()
         await super().aclose()

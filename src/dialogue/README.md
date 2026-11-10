@@ -9,6 +9,7 @@
 | 能力 | 公开入口与使用约束 | 实现导航 |
 | --- | --- | --- |
 | 级联识别 | `VoiceBackend.recognize` 接收有界 `AudioInput` 与原尝试许可；同尝试重复复用识别结果，异载荷冲突，不调用聊天 | [级联识别与表达](_internal/cascade/README.md) |
+| 流式识别 | `open_recognition` 以空音频头和许可建立 `RecognitionStream`，有界 `feed` / `finish_input` / `result`；临时转录只用于可替换投影，只有最终文本可交决策 | [级联识别与表达](_internal/cascade/README.md) |
 | 控制解释 | `interpret_control` 返回解析后的候选或 `invalid` / `unavailable`；非法模型响应不能当作 NoControl | [级联识别与表达](_internal/cascade/README.md) |
 | 房间表达 | `generate` 返回独占 `ExpressionJob`；固定台词、公告和普通回复显式区分，绑定 `SpeechIntent` 与 `PreparedContext` 的会话/版本 | [级联识别与表达](_internal/cascade/README.md) |
 | 渠道输出适配 | `audio_output(job)` 的 `GeneratedAudio.frames()` 单订阅产生渠道帧；`evidence()` 不消费源、不缓存全量PCM、不代表已播放 | [_internal/output.py](_internal/output.py) |

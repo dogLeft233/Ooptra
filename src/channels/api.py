@@ -244,6 +244,8 @@ class PlatformLogin(Protocol):
 
 
 class AudioIngress(Protocol):
+    @property
+    def generation(self) -> int: ...
     """最多128个成员VAD；缺口清窗口，非法PCM拒绝；listen授权在模型输入之前。"""
 
     def configure(self, policy: AudioInputPolicy) -> None: ...

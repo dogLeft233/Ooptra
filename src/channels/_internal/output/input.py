@@ -16,13 +16,19 @@ class AudioIngress:
         self._resolve = resolve_speaker
         self._buffers = {}
         self._sequence = 0
+        self._generation = 0
 
     def configure(self, policy: AudioInputPolicy) -> None:
         if policy != self._policy:
-            self._buffers.clear()
+            self.reset()
         self._policy = policy
 
+    @property
+    def generation(self) -> int:
+        return self._generation
+
     def reset(self) -> None:
+        self._generation += 1
         self._buffers.clear()
 
     def accept(self, uid: str, pcm: bytes, sample_rate: int) -> IncomingAudio | None:
@@ -40,7 +46,7 @@ class AudioIngress:
         entry = self._buffers.get(audio.user_key)
         if entry is None or entry[0] != audio.sample_rate:
             if len(self._buffers) >= 128:
-                self._buffers.clear()
+                self.reset()
                 return UtteranceResult("gap")
             entry = (audio.sample_rate, EnergyVad(replace(self._policy.vad, sample_rate=audio.sample_rate)))
             self._buffers[audio.user_key] = entry
@@ -49,11 +55,11 @@ class AudioIngress:
             self.reset()
             return UtteranceResult("gap")
         if pcm is None:
-            return UtteranceResult("accumulating")
+            return UtteranceResult("accumulating", stream_pcm16=entry[1].stream_pcm16)
         energy = pcm16_rms(pcm)
         if energy < self._policy.energy_threshold:
             logger.debug("event=channel.input.noise energy=%.4f samples=%d", energy, len(pcm)//2)
             return UtteranceResult("noise")
         if len(pcm) / 2 / audio.sample_rate * 1000 < self._policy.min_utterance_ms:
             return UtteranceResult("too_short")
-        return UtteranceResult("ready", pcm)
+        return UtteranceResult("ready", pcm, entry[1].stream_pcm16)

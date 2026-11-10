@@ -303,10 +303,14 @@ class IncomingAudio:
 
 @dataclass(frozen=True)
 class UtteranceResult:
+    """stream_pcm16 是本次已授权VAD帧增量，包含句末静音；pcm16仅为完整裁尾句。"""
     status: Literal["ready", "accumulating", "noise", "too_short", "gap"]
     pcm16: bytes = b""
+    stream_pcm16: bytes = b""
 
     def __post_init__(self) -> None:
+        if type(self.stream_pcm16) is not bytes or len(self.stream_pcm16) % 2:
+            raise ValueError("流式输入增量须为完整PCM16采样")
         if (self.status not in {"ready", "accumulating", "noise", "too_short", "gap"}
                 or type(self.pcm16) is not bytes or len(self.pcm16) % 2
                 or bool(self.pcm16) != (self.status == "ready")):

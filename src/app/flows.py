@@ -128,11 +128,13 @@ async def run_cascade(*, backend, context, behavior, channel,
                       pcm: bytes, sample_rate: int, limit: int,
                       settings: ReplySettings, interpret_controls: bool,
                       current, on_playing, observations=None, reply_text_to_channel: bool = False,
-                      subtitle_target: RoomTarget | None = None) -> FlowResult:
+                      subtitle_target: RoomTarget | None = None, recognition=None) -> FlowResult:
     """取消必结尝试；执行后的失败使用渠道事实，执行前失败使用NotExecuted。"""
     revision = context.snapshot(session.room_target).revision
-    trigger = AudioReady(trigger_id, session, user_key, revision)
-    permit = behavior.admit(trigger, limit)
+    trigger = recognition.trigger if recognition else AudioReady(trigger_id, session, user_key, revision)
+    if trigger.session != session or trigger.user_key != user_key or trigger.trigger_id != trigger_id:
+        return FlowResult(reason="stale_recognition")
+    permit = recognition.permit if recognition else behavior.admit(trigger, limit)
     if isinstance(permit, AttemptRejected):
         return FlowResult(reason=permit.reason)
     started = time.monotonic()
@@ -145,9 +147,11 @@ async def run_cascade(*, backend, context, behavior, channel,
     commit_started = False
     prepared = recognized = audio = None
     try:
-        recognized = await backend.recognize(
-            AudioInput(trigger_id, session, pcm, sample_rate, user_key, permit.attempt_id), permit)
+        recognized = (await recognition.stream.result() if recognition else await backend.recognize(
+            AudioInput(trigger_id, session, pcm, sample_rate, user_key, permit.attempt_id), permit))
         timings["asr"] = recognized.elapsed_ms
+        if recognition:
+            timings["asr_finalize"] = recognized.finalize_ms
         logger.info("event=voice.asr.completed input_chars=%d audio_seconds=%.1f session_id=%s attempt_id=%s",
                     len(recognized.text), len(pcm)/2/sample_rate, session.session_id, permit.attempt_id)
         if not current():
@@ -240,6 +244,8 @@ async def run_cascade(*, backend, context, behavior, channel,
                     behavior.feedback(actual if isinstance(actual, PlaybackResult) else
                         NotExecuted(intent.action_id, 'execution' if execution_started else 'generation', end_reason))
                 behavior.finish_attempt(AttemptFinished(permit, end_reason, time.monotonic()))
+                if recognition:
+                    recognition.finished = True
                 if observations is not None:
                     observations.record(trigger_id=trigger_id, session_id=session.session_id,
                         backend=backend.name, reason=trace_reason, outcome=end_reason,

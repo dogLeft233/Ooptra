@@ -72,3 +72,17 @@ def test_many_speakers_cannot_accumulate_unbounded_vad_memory():
         audio = ingress.accept(f"member-{number}", b"\0\x40"*32768, 16000)
         results.append(ingress.cut(audio).status)
     assert results[-1] == "gap"
+
+
+def test_authorized_audio_is_available_while_utterance_is_still_open():
+    ingress = create_audio_ingress(AudioInputPolicy(
+        min_utterance_ms=30, vad=VadvConfig(silence_ms=60)), resolve_speaker=lambda uid: uid)
+    voice = b'\x00\x20' * 480
+    audio = ingress.accept('peer', voice, 16000)
+    result = ingress.cut(audio)
+    assert result.status == 'accumulating'
+    assert result.stream_pcm16 == voice
+    silence = ingress.accept('peer', bytes(1920), 16000)
+    ended = ingress.cut(silence)
+    assert ended.status == 'ready' and ended.pcm16 == voice
+    assert ended.stream_pcm16 == bytes(1920)

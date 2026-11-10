@@ -39,6 +39,7 @@ class LiveLimits:
 class DialogueCapabilities:
     live: bool = False
     streaming_utterance: bool = False
+    streaming_recognition: bool = False
     fixed_speech: bool = True
 
 
@@ -72,12 +73,21 @@ class Recognition:
     reason: str = ""
 
     elapsed_ms: float = 0.0
+    finalize_ms: float = 0.0
 
     def __post_init__(self) -> None:
         if self.status not in {"recognized", "no_speech", "failed"}:
             raise ValueError("未知识别结果")
         if self.status == "recognized" and not self.text.strip():
             raise ValueError("成功识别须有文字")
+
+
+@dataclass(frozen=True)
+class TranscriptRevision:
+    """同sentence_id覆盖显示；只有final可供决策和持久历史。"""
+    sentence_id: int
+    text: str
+    final: bool
 
 
 @dataclass(frozen=True)
