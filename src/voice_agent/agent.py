@@ -963,7 +963,12 @@ class VoiceAgent:
             # 播放确认由应用任务拥有，不占用模型接收循环。满载时明确降级，
             # 不把缺少确认的草稿写成回复；停止/切房通过 _reply_tasks 统一取消回收。
             if len(self._completion_tasks) >= 8:
-                self._playbacks.discard(completed_playback)
+                try:
+                    # 满载只保留输入事实，并背压当前reader；不新增排空/提交后台任务。
+                    if not result.internal and result.user_text and session is not None:
+                        await submission.record(input_turn)
+                finally:
+                    self._playbacks.discard(completed_playback)
                 logger.warning("event=voice.history.capacity_rejected session_id=%s", session.session_id if session else "")
                 return
             task = asyncio.create_task(complete(), name="voice-output-confirmation")

@@ -30,7 +30,8 @@ class TurnSubmission(Protocol):
     """绑定原来源的一次提交；首次record固定事实，重复调用共享真实结果。
 
     取消等待会观察已受理磁盘工作完成后传播，不撤销或重新提交。
-    持久化失败会在首次与后续等待中抛出；不承诺跨JSONL/outbox原子事务。
+    两存储分别尝试；本地失败为主，外部失败以显式cause保留；仅外部失败时本地完成后抛出。
+    失败优先于等待取消，首次与后续等待均抛同一失败；不承诺跨JSONL/outbox原子事务。
     """
     async def record(self, turn: ConfirmedTurn) -> RecordReceipt: ...
 

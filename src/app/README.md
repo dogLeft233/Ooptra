@@ -47,3 +47,5 @@ quiesce 保留管理交接通路；成功后 operations 持久化 handoff，再�
 先迁移 `main`/`VoiceRuntime` 中为第一条房间控制路径必需的装配；不把整个 `VoiceAgent` 原样改名为 AppRuntime。随后用实际切片增加级联/Live流程，旧入口只留响应/协议兼容适配。
 
 集成测试放 `tests/integration/`，使用五模块公开端口替身与模块行为测试互补，不能只断言内部方法调用次数。需覆盖：文字/语音单一路由、准备失败释放行为名额、切房旧流程清理、重复终态不重复记录、生成流关闭级联、维护停止失败不执行切换。现有入口证据测试包括 `tests/test_auto_visit_integration.py`、`tests/test_voice_operations.py`、`tests/test_voice_settings_reload.py`；新端口与公开契约仍待实现验证。
+
+当前Live播放确认最多8个后台任务；满载仍通过原scope `TurnSubmission` 提交当前用户输入，对模型reader施加背压，不新建确认任务或保存未确认助手文字。停止时既有确认任务的输入收尾与此路径共用上下文提交能力，未实现跨文件共同事务。

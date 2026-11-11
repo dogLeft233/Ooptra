@@ -483,3 +483,60 @@ def test_live_drain_cancel_preserves_only_input_in_original_scope(tmp_path, oper
             await agent.leave()
             await agent.backend.aclose()
     asyncio.run(run())
+
+
+
+def test_live_completion_capacity_keeps_ninth_input_with_bounded_backpressure(tmp_path):
+    async def run():
+        from support.context_fixtures import prepare_source
+        agent = make_voice_agent(tmp_path)
+        playback, socket = Playback(), LiveSocket()
+        drains = asyncio.Queue()
+        released = asyncio.Event()
+        async def connect(*args, **kwargs):
+            return socket
+        async def drain(timeout=30):
+            await drains.put(True)
+            await released.wait()
+            return {"ok": True}
+        from behavior import create_reply_policy
+        agent.settings.backend = "gemini_live"
+        agent.settings.gemini_api_key = "synthetic"
+        agent.backend = create_gemini_backend(agent.settings, agent.memory,
+            reply_policy=create_reply_policy(), connector=connect)
+        agent.live_mode = True
+        agent.bind_duplex(playback)
+        playback.wait_tts_complete = drain
+        await agent.join("area", "room")
+        await prepare_source(agent.context_bridge, {"ok": True, "provider": "memory_companion",
+            "memory_scopes": [{"umo": "original"}]}, "area", "room")
+        await agent._wire_live()
+        try:
+            for index in range(9):
+                await socket.deliver({"serverContent": {
+                    "inputTranscription": {"text": f"question {index}"},
+                    "outputTranscription": {"text": f"unconfirmed answer {index}"},
+                    "modelTurn": {"parts": [{"inlineData": {
+                        "data": base64.b64encode(b"\x00\x40" * 480).decode(),
+                        "mimeType": "audio/pcm;rate=24000"}}]}, "turnComplete": True}})
+                if index < 8:
+                    await asyncio.wait_for(drains.get(), 1)
+            assert len(agent._completion_tasks) == 8
+            assert drains.empty(), "overflow must not create another playback confirmation task"
+            await agent.leave()
+            rows = agent.memory.as_messages()
+            assert len(rows) == 9
+            assert all(row["role"] == "user" for row in rows)
+            assert sorted(row["content"] for row in rows) == [f"question {index}" for index in range(9)]
+            commits = [event for event in json.loads(
+                (tmp_path / "astrbot_voice_outbox.json").read_text(encoding="utf-8"))
+                       if event["operation"] == "commit"]
+            assert len(commits) == 9
+            assert len({event["request_id"] for event in commits}) == 9
+            assert all(event["payload"]["reply_text"] == "" for event in commits)
+            assert all(event["scope"]["memory_scopes"] == [{"umo": "original"}] for event in commits)
+        finally:
+            released.set()
+            await agent.leave()
+            await agent.backend.aclose()
+    asyncio.run(run())

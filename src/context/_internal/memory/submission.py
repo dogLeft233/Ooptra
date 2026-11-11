@@ -13,11 +13,22 @@ class TurnSubmission:
         self._task: asyncio.Task[RecordReceipt] | None = None
 
     async def _persist(self, turn: ConfirmedTurn) -> RecordReceipt:
-        self._recorder(turn.user_text, turn.reply_text,
-                       interrupted=turn.confirmation in {"interrupted", "failed", "unknown"})
-        if self._history is None:
-            return RecordReceipt(False, False)
-        return await asyncio.to_thread(self._history.record, turn)
+        external_failure: Exception | None = None
+        try:
+            self._recorder(turn.user_text, turn.reply_text,
+                           interrupted=turn.confirmation in {"interrupted", "failed", "unknown"})
+        except Exception as exc:
+            external_failure = exc
+        try:
+            receipt = (await asyncio.to_thread(self._history.record, turn)
+                       if self._history is not None else RecordReceipt(False, False))
+        except Exception as exc:
+            if external_failure is not None:
+                raise exc from external_failure
+            raise
+        if external_failure is not None:
+            raise external_failure
+        return receipt
 
     async def record(self, turn: ConfirmedTurn) -> RecordReceipt:
         if self._task is None:
