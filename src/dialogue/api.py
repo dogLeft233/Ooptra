@@ -7,6 +7,7 @@ from typing import Any, Protocol, runtime_checkable
 from behavior.models import VoiceControlDecision, VolumeCommand
 from dialogue.models import (
     AudioSink,
+    CompletedInput,
     DialogueCapabilities,
     GeneratedTurn,
     RecognitionSink,
@@ -169,7 +170,19 @@ class StreamingUtterance(Protocol):
 
 
 @runtime_checkable
-class LiveDialogue(SessionStarter, ConnectionReporter, Protocol):
+class LiveInputRetirement(Protocol):
+    def detach_completed_input(self) -> CompletedInput | None:
+        """同步原子取走至多一份已turnComplete的用户事实并丢弃其缓存回复。
+
+        一次性、无I/O及取消点；不交付内部公告、显式提示或尚未结束的片段，不等待未来转录。
+        已在晚转录窗口内收到的修订包含在事实中，撤销后不能重放旧缓存。
+        调用方须在原会话/来源失效前绑定并收尾该事实。
+        """
+        ...
+
+
+@runtime_checkable
+class LiveDialogue(SessionStarter, ConnectionReporter, LiveInputRetirement, Protocol):
     """持续模型会话；输出回调只交付生成证据，实际播放/历史提交由应用负责。
 
     回调应及时返回；GeneratedTurn 包含普通回复与内部公告的文字及生成终态，回调返回前不得清除该证据。耗时的播放确认由应用拥有的有界任务调用渠道 Playback 处理。aclose 撤销供应商

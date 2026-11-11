@@ -49,3 +49,5 @@ quiesce 保留管理交接通路；成功后 operations 持久化 handoff，再�
 集成测试放 `tests/integration/`，使用五模块公开端口替身与模块行为测试互补，不能只断言内部方法调用次数。需覆盖：文字/语音单一路由、准备失败释放行为名额、切房旧流程清理、重复终态不重复记录、生成流关闭级联、维护停止失败不执行切换。现有入口证据测试包括 `tests/test_auto_visit_integration.py`、`tests/test_voice_operations.py`、`tests/test_voice_settings_reload.py`；新端口与公开契约仍待实现验证。
 
 当前Live播放确认最多8个后台任务；满载仍通过原scope `TurnSubmission` 提交当前用户输入，对模型reader施加背压，不新建确认任务或保存未确认助手文字。停止时既有确认任务的输入收尾与此路径共用上下文提交能力，未实现跨文件共同事务。
+
+停止、退房、来源刷新和生成配置重建在撤销原回调前取走生成公开的完成输入，并固定原scope `TurnSubmission`。同步 `bind_bot` 同样先绑定旧存储/来源，再换渠道；输入提交与旧duplex关闭共用受管理的生命周期任务集合，由异步停止/进退房等待并观察失败。无运行loop不建输入任务；无完成缓存不创建提交任务。

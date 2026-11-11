@@ -328,6 +328,8 @@ def test_live_announcement_records_confirmed_assistant_without_human_input(tmp_p
         socket.send = send
         agent.settings.backend = "gemini_live"
         agent.settings.gemini_api_key = "synthetic-key"
+        agent.settings.reply_probability_percent = 0
+        agent.settings.force_reply_keywords = ["机器人"]
         async def connect(*args, **kwargs):
             return socket
         from behavior import create_reply_policy
@@ -347,6 +349,7 @@ def test_live_announcement_records_confirmed_assistant_without_human_input(tmp_p
             result = await asyncio.wait_for(pending, 1)
             assert result["ok"], result
             assert playback.pushed > 0
+            assert agent.backend.detach_completed_input() is None
             assert agent.memory.as_messages() == [{"role": "assistant", "content": "大家好"}]
             rows = [json.loads(line) for line in (tmp_path / "memory.jsonl").read_text(encoding="utf-8").splitlines()]
             assert len(rows) == 1 and rows[0]["role"] == "assistant"
@@ -539,4 +542,159 @@ def test_live_completion_capacity_keeps_ninth_input_with_bounded_backpressure(tm
             released.set()
             await agent.leave()
             await agent.backend.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("operation,completed,expired", [
+    ("stop", True, False), ("leave", True, False), ("refresh", True, False),
+    ("bind", True, False), ("stop", False, False), ("stop", True, True),
+])
+def test_pending_keyword_input_is_retired_before_live_binding_changes(tmp_path, monkeypatch, operation, completed, expired):
+    async def run():
+        from types import SimpleNamespace
+
+        from support.context_fixtures import prepare_source
+
+        from context import create_memory
+        from dialogue.models import LiveLimits
+        agent = make_voice_agent(tmp_path)
+        playback, socket = Playback(), LiveSocket()
+        first_connection = True
+        async def connect(*args, **kwargs):
+            nonlocal first_connection
+            if first_connection:
+                first_connection = False
+                return socket
+            return LiveSocket()
+        from behavior import create_reply_policy
+        agent.settings.backend = "gemini_live"
+        agent.settings.gemini_api_key = "synthetic"
+        agent.settings.reply_probability_percent = 0
+        agent.settings.force_reply_keywords = ["机器人"]
+        agent.settings.conversation_window_enabled = False
+        agent.backend = create_gemini_backend(agent.settings, agent.memory,
+            reply_policy=create_reply_policy(), connector=connect)
+        agent.backend.limits = LiveLimits(late_transcription_seconds=.02 if expired else 2)
+        agent.live_mode = True
+        agent.bind_duplex(playback)
+        await agent.join("area", "room")
+        await prepare_source(agent.context_bridge, {"ok": True, "provider": "memory_companion",
+            "memory_scopes": [{"umo": "original"}]}, "area", "room")
+        await agent._wire_live()
+        original_history = agent.memory
+        entered, released = threading.Event(), threading.Event()
+        worker_task = None
+        try:
+            agent.backend.note_input_speaker("speaker")
+            message = {"inputTranscription": {"text": "完整问句"},
+                "outputTranscription": {"text": "must never play cached assistant"},
+                "modelTurn": {"parts": [{"inlineData": {
+                    "data": base64.b64encode(b"\x00\x40" * 480).decode(),
+                    "mimeType": "audio/pcm;rate=24000"}}]}}
+            if completed:
+                message["turnComplete"] = True
+            await socket.deliver({"serverContent": message})
+            if expired:
+                deadline = asyncio.Event()
+                asyncio.get_running_loop().call_later(.03, deadline.set)
+                await deadline.wait()
+            if completed:
+                await socket.deliver({"serverContent": {"inputTranscription": {
+                    "text": "过期片段" if expired else "追加说明"}}})
+            assert playback.pushed == 0
+            if operation == "stop":
+                await agent.stop_current_reply()
+            elif operation == "leave":
+                await agent.leave()
+            elif operation == "refresh":
+                async def worker():
+                    while True:
+                        for event in await agent.context_bridge.poll(wait=0):
+                            if event["operation"] == "prepare":
+                                agent.context_bridge.resolve(event["request_id"], {"ok": True,
+                                    "provider": "memory_companion", "memory_scopes": [{"umo": "new"}]})
+                        await asyncio.sleep(0)
+                worker_task = asyncio.create_task(worker())
+                await agent.refresh_astrbot_context()
+            else:
+                original_record = original_history.record
+                def blocked_record(turn):
+                    entered.set()
+                    assert released.wait(3)
+                    return original_record(turn)
+                monkeypatch.setattr(original_history, "record", blocked_record)
+                async def leave():
+                    pass
+                agent.bind_bot(SimpleNamespace(voice=SimpleNamespace(backend=object(), leave=leave)))
+                agent.memory = create_memory(str(tmp_path / "new-history.jsonl"))
+                await prepare_source(agent.context_bridge, {"ok": True, "provider": "memory_companion",
+                    "memory_scopes": [{"umo": "new"}]}, "new-area", "new-room")
+                assert await asyncio.to_thread(entered.wait, 1)
+                stopping = asyncio.create_task(agent.stop())
+                await asyncio.sleep(0)
+                assert not stopping.done(), "close must wait for the retained original-scope write"
+                released.set()
+                await asyncio.wait_for(stopping, 1)
+                assert agent.memory.as_messages() == []
+            expected = [] if not completed else [{"role": "user", "content":
+                "完整问句" if expired else "完整问句追加说明"}]
+            assert original_history.as_messages() == expected
+            assert playback.pushed == 0
+            outbox_path = tmp_path / "astrbot_voice_outbox.json"
+            outbox = json.loads(outbox_path.read_text(encoding="utf-8")) if outbox_path.exists() else []
+            commits = [event for event in outbox if event["operation"] == "commit"]
+            assert len(commits) == int(completed)
+            if completed:
+                assert commits[0]["scope"]["memory_scopes"] == [{"umo": "original"}]
+                assert commits[0]["payload"]["reply_text"] == ""
+        finally:
+            released.set()
+            if worker_task is not None:
+                worker_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await worker_task
+            await agent.leave()
+            await agent.backend.aclose()
+    asyncio.run(run())
+
+
+
+def test_public_retirement_keeps_complete_input_during_cached_audio_release(tmp_path):
+    async def run():
+        from behavior import create_reply_policy
+        from context import create_memory
+        from operations.models import VoiceAgentSettings
+        socket = LiveSocket()
+        async def connect(*args, **kwargs):
+            return socket
+        backend = create_gemini_backend(VoiceAgentSettings(gemini_api_key="synthetic",
+            reply_probability_percent=0, force_reply_keywords=["机器人"], conversation_window_enabled=False),
+            create_memory(str(tmp_path / "history.jsonl")), reply_policy=create_reply_policy(), connector=connect)
+        entered, released = asyncio.Event(), asyncio.Event()
+        generated = []
+        async def audio(pcm, rate):
+            entered.set()
+            await released.wait()
+        backend.set_audio_out(audio)
+        backend.set_generated_out(generated.append)
+        await backend.start_session()
+        try:
+            await socket.deliver({"serverContent": {
+                "inputTranscription": {"text": "完整问句"},
+                "outputTranscription": {"text": "cached assistant draft"},
+                "modelTurn": {"parts": [{"inlineData": {
+                    "data": base64.b64encode(b"\x00\x40" * 480).decode(),
+                    "mimeType": "audio/pcm;rate=24000"}}]}, "turnComplete": True}})
+            delivery = asyncio.create_task(socket.deliver({"serverContent": {
+                "inputTranscription": {"text": "机器人追加说明"}}}))
+            await asyncio.wait_for(entered.wait(), 1)
+            fact = backend.detach_completed_input()
+            released.set()
+            await delivery
+            assert fact is not None and fact.user_text == "完整问句机器人追加说明"
+            assert backend.detach_completed_input() is None
+            assert generated == [], "retirement must not deliver the cached assistant as a completed reply"
+        finally:
+            released.set()
+            await backend.aclose()
     asyncio.run(run())

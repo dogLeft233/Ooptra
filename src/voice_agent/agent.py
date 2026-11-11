@@ -54,6 +54,7 @@ from core.audio import pcm16_rms
 from dialogue import create_backend
 from dialogue.api import (
     ConnectionReporter,
+    LiveInputRetirement,
     SessionStarter,
     StreamingUtterance,
 )
@@ -165,9 +166,8 @@ class VoiceAgent:
         self.live_mode = _is_live_backend(self.backend)
         self.duplex: Duplex | None = None
         self.output_controls = VoiceOutputControls(settings, lambda: self.duplex, lambda: self._joined)
-        #: 正在收尾的旧 duplex。bind_bot 是同步上下文，close() 只能交给事件循环；
-        #: 留引用是为了有地方 await，也避免「Task exception was never retrieved」。
-        self._duplex_close_tasks: set[asyncio.Task] = set()
+        #: 同步换绑受理的原scope输入和旧duplex收尾；异步停止/进退房等待并观察异常。
+        self._lifecycle_tasks: set[asyncio.Task] = set()
         self._vad = self._make_vad()
         self._user_buffers: dict[str, VoiceActivityDetector] = {}
         self._task: asyncio.Task | None = None
@@ -416,6 +416,59 @@ class VoiceAgent:
         task = self._task
         return task is not None and not task.done()
 
+    def _detach_live_input(self) -> tuple[TurnSubmission, ConfirmedTurn] | None:
+        if not self.live_mode or not isinstance(self.backend, LiveInputRetirement):
+            return None
+        session = self.channels.snapshot().session
+        if session is None:
+            return None
+        fact = self.backend.detach_completed_input()
+        if fact is None:
+            return None
+        submission = create_turn_submission(self.memory, self._ensure_context_bridge(), speaker=fact.user_key)
+        key = fact.user_key if fact.user_key.startswith("oopz:") else f"oopz:{fact.user_key}"
+        return submission, ConfirmedTurn(fact.user_text, "", "interrupted", user_key=key,
+            channel_key=f"{session.room_target.area}/{session.room_target.channel}")
+
+    def _retire_live_input(self) -> None:
+        pending = self._detach_live_input()
+        if pending is not None:
+            session = self.channels.snapshot().session
+            self._track_lifecycle_task(asyncio.create_task(
+                pending[0].record(pending[1]), name="voice-retired-input"),
+                session_id=session.session_id if session else "")
+
+    def _track_lifecycle_task(self, task: asyncio.Task, *, session_id: str = "") -> None:
+        if not hasattr(self, "_lifecycle_tasks"):
+            self._lifecycle_tasks = set()
+        self._lifecycle_tasks.add(task)
+        def observed(done: asyncio.Task) -> None:
+            self._lifecycle_tasks.discard(done)
+            if not done.cancelled() and done.exception() is not None:
+                logger.error("event=voice.lifecycle.failed session_id=%s task=%s",
+                             session_id, done.get_name(), exc_info=done.exception())
+        task.add_done_callback(observed)
+
+    async def _await_lifecycle_tasks(self) -> None:
+        cancelled = False
+        failure: Exception | None = None
+        for task in tuple(getattr(self, "_lifecycle_tasks", ())):
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    cancelled = True
+                except Exception:
+                    break
+            try:
+                task.result()
+            except Exception as exc:
+                failure = failure or exc
+        if failure is not None:
+            raise failure
+        if cancelled:
+            raise asyncio.CancelledError
+
     def bind_bot(self, bot: Any) -> None:
         """换绑 Oopz bot —— **连同它的浏览器 transport 一起**。
 
@@ -433,6 +486,12 @@ class VoiceAgent:
         而且只有重启进程才能恢复（重启桥接会再切一次）。
         """
         if bot is not getattr(self, "_bot", None):
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None:
+                self._retire_live_input()
             old_channel = getattr(self, "_channels", None)
             new_voice = getattr(bot, "voice", None)
             new_transport = getattr(new_voice, "backend", None)
@@ -447,6 +506,7 @@ class VoiceAgent:
         self._drop_stale_duplex()
 
     async def _drain_retired_channels(self) -> str | None:
+        await self._await_lifecycle_tasks()
         retired = getattr(self, "_retired_channels", [])
         while retired:
             channel = retired[0]
@@ -484,8 +544,7 @@ class VoiceAgent:
         except RuntimeError:
             return
         task = loop.create_task(duplex.close(), name="voice-duplex-close")
-        self._duplex_close_tasks.add(task)
-        task.add_done_callback(self._duplex_close_tasks.discard)
+        self._track_lifecycle_task(task)
 
     def bind_duplex(self, duplex: Duplex) -> None:
         self.duplex = duplex
@@ -568,6 +627,9 @@ class VoiceAgent:
         if not changed:
             return []
         changed_set = set(changed)
+        if changed_set & (_MEMORY_FIELDS | _SESSION_FIELDS | {"backend"}):
+            self._retire_live_input()
+            await self._await_lifecycle_tasks()
         notes: list[str] = []
 
         if "output_volume" in changed_set:
@@ -1048,6 +1110,7 @@ class VoiceAgent:
                 return {"ok": False, "error": "stale visit"}
             was_joined = self._joined
             event = VoiceOperation("leave", source, self._area, self._channel, self._visit_id)
+            self._retire_live_input()
             self._operation_epoch += 1
             result = await self._leave_locked(source=source)
             if result["ok"]:
@@ -1058,12 +1121,13 @@ class VoiceAgent:
         return result
 
     async def _leave_locked(self, *, source: str = "system") -> dict[str, Any]:
+        self._retire_live_input()
+        self._operation_epoch += 1
         retired_error = await self._drain_retired_channels()
         if retired_error is not None:
             return {"ok": False, "error": retired_error}
         if source == "system":
             self._voice_suspended = True
-        self._operation_epoch += 1
         await self._stop_round_worker()
         await self._cancel_reply_tasks()
         self._discard_live_audio = True
@@ -1151,7 +1215,9 @@ class VoiceAgent:
             await self._stop_reply_locked(restart=True)
 
     async def _stop_reply_locked(self, *, restart: bool) -> None:
+        self._retire_live_input()
         self._operation_epoch += 1
+        await self._await_lifecycle_tasks()
         self._discard_live_audio = True
         await self._stop_round_worker()
         await self._cancel_reply_tasks()

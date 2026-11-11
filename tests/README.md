@@ -49,3 +49,5 @@ python -m pytest -v -o faulthandler_timeout=60
 Live 排空取消：`tests/test_voice_history_outcomes.py` 经真实模型消息、阻塞渠道排空与真实 JSONL/outbox，覆盖停止、退房及来源刷新，确保仅保留原scope输入。阻塞提交回归通过取消事件握手同步，兼容 Python 3.10，不依赖 `Task.cancelling`。
 
 两存储故障矩阵：`tests/context/test_turn_submission.py` 使用真实不可写目标路径覆盖外部失败、本地失败、双失败及取消/重复等待；`tests/test_voice_history_outcomes.py` 用九轮真实Live消息和八个阻塞排空确认，验证满载输入背压及九份原scope历史/outbox，无未确认助手记录。
+
+关闭前完成输入：`tests/test_voice_history_outcomes.py` 覆盖关键词等待期间stop/leave/refresh/同步bind保留原scope用户事实，bind阻塞真实写入验证close等待；未turnComplete片段不保存，真实晚转录窗口过期不拼接旧轮或释放缓存助手。

@@ -47,6 +47,17 @@ class LiveLimits:
 
 
 @dataclass(frozen=True)
+class CompletedInput:
+    """已观察到模型回合结束的用户输入；不包含缓存助手或播放证明。"""
+    user_text: str
+    user_key: str = ""
+
+    def __post_init__(self) -> None:
+        if type(self.user_text) is not str or not self.user_text.strip() or type(self.user_key) is not str:
+            raise ValueError("完成输入须包含完整用户文字及合法来源标识")
+
+
+@dataclass(frozen=True)
 class GeneratedTurn:
     """模型回合证据。text 是草稿，selected 不代表已播放；持久化由应用核实执行结果。"""
     user_text: str = ""

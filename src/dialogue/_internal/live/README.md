@@ -80,3 +80,5 @@ allowed → interrupted / failed
 现有证据为 `GeminiLiveBackend._handle_server_msg/_reset_session/close`、`VoiceAgent._wire_live` 以及 `tests/test_conversation_window.py`、`tests/test_gemini_session_lifecycle.py`、`tests/test_live_turn_lifecycle.py`、`tests/test_astrbot_live_context.py`。当前实现仍在后端内协调概率/窗口许可；策略实例由行为注入，MemoryStore/ContextBridge 写入已全部移出生成。完整提议/许可与有界 dispatcher 仍待落地，不能称为本文全部边界已成立。
 
 首个切片使用现有 JSON 消息夹具构造真实适配的隔离试验：reader/dispatcher/闸门保留真实代码，替换网络和行为端口，断言未获批输出为零、ID/修订不串轮、字节上限、晚转录兼容、关闭无悬空任务。直接记忆写入已移除；后续继续迁出后端中的策略协调。该试验通过才开始替换现有 Live 通路；真实模型与房间的时序/延迟仍须按语音联调验收实测，不用夹具通过冒充供应商验证。
+
+当前撤销能力 `detach_completed_input` 原子移交已完成缓存轮次的用户事实并丢弃助手缓存，重复取出为空。晚转录窗口仍由生成判断：窗口内到达修订可拼回该完成轮，过期后的片段不附到已撤销轮；尚未turnComplete的收集片段不作为完成输入交付。取消、来源刷新与换绑的真实消息回归见 `tests/test_voice_history_outcomes.py`。

@@ -132,7 +132,7 @@ def _make_agent() -> VoiceAgent:
     agent.settings.barge_in = True
     agent.settings.listen_only_uids = []
     agent.duplex = None
-    agent._duplex_close_tasks = set()
+    agent._lifecycle_tasks = set()
     agent.backend = FakeBackend()
     agent.live_mode = True
     agent._bot = None
@@ -162,7 +162,7 @@ async def _tidy(agent: VoiceAgent) -> None:
 
 async def _settle(agent: VoiceAgent) -> None:
     """等 bind_bot 交给事件循环的那次 close() 真正跑完（不等就是不确定的）。"""
-    await asyncio.gather(*agent._duplex_close_tasks, return_exceptions=True)
+    await asyncio.gather(*agent._lifecycle_tasks, return_exceptions=True)
 
 
 # ----------------------------------------------------------------------

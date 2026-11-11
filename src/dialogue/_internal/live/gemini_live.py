@@ -30,7 +30,13 @@ from core.audio import pcm16_rms
 from dialogue._internal.memory_tools import MEMORY_RULES, memory_tools
 from dialogue._internal.observation import DecisionTrace, VoiceObservation
 from dialogue.api import HistoryReader, VoiceBackend
-from dialogue.models import DialogueCapabilities, GeneratedTurn, LiveLimits, VoiceReply
+from dialogue.models import (
+    CompletedInput,
+    DialogueCapabilities,
+    GeneratedTurn,
+    LiveLimits,
+    VoiceReply,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -643,10 +649,16 @@ class GeminiLiveBackend(VoiceBackend):
         self._deferred_audio_bytes = 0
         self._deferred_audio_overflow = False
 
-    async def _discard_completed_reply(self) -> None:
+    def detach_completed_input(self) -> CompletedInput | None:
         pending, self._completed_reply = self._completed_reply, None
         self._policy_generation += 1
-        if pending is not None and pending.user_text:
+        if pending is None or not pending.user_text.strip():
+            return None
+        return CompletedInput(pending.user_text, pending.user_key)
+
+    async def _discard_completed_reply(self) -> None:
+        pending = self.detach_completed_input()
+        if pending is not None:
             await self._emit_generated(GeneratedTurn(user_text=pending.user_text,
                                                      user_key=pending.user_key))
 
@@ -667,8 +679,7 @@ class GeminiLiveBackend(VoiceBackend):
         window = (self.settings.conversation_window_seconds
                   if self.settings.conversation_window_enabled else 0)
         self._conversation.observe(pending.user_text, pending.keywords, pending.user_key, window)
-        # Detach before awaiting callbacks. A reset/new command invalidates this generation.
-        self._completed_reply = None
+        # 保留唯一完成输入直到交付；撤销可在音频回调等待期间原子取走它。
         generation = self._policy_generation
         self._set_reply_active(True)
         try:
@@ -689,6 +700,7 @@ class GeminiLiveBackend(VoiceBackend):
                 if asyncio.iscoroutine(result):
                     await result
             if generation == self._policy_generation:
+                self._completed_reply = None
                 await self._emit_generated(GeneratedTurn(
                     pending.user_text, pending.reply_text, pending.user_key, selected=True))
         finally:
@@ -937,6 +949,7 @@ class GeminiLiveBackend(VoiceBackend):
             self._set_reply_active(False)
             self._turns += 1
             keep_pending = (self._reply_allowed is False and self._turn_keywords
+                            and not (self._announcement or self._explicit_turn)
                             and not self._keyword_quarantine and not self._deferred_audio_overflow
                             and bool(self._deferred_audio) and not server.get("interrupted"))
             if keep_pending:

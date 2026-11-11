@@ -102,3 +102,5 @@ Live实现 → 私有供应商窄端口、本地轮次/闸门
 级联 `VoiceBackend.handle_utterance` 与流式 `StreamingUtterance` 的可选 `on_recognition` 在最终识别完成时同步交付本次输入，取消不撤销已交付事实。应用将取消后的输入交给已绑定的上下文记录端口；生成仍不直接追加权威历史。此回调仅属于本次调用，不使用共享的最后转写字段。自动合成的任务及音频 sink 固定所属调用，独立 `tts(text)` 不复用自动任务或其回调。
 
 应用对非流式生成等待和播放取消同样收尾已识别输入；Live 内部公告在渠道确认播放成功后统一提交助手文本，不制造用户记录。`tests/test_voice_history_outcomes.py` 通过真实 JSONL、模型阶段取消及 Live 消息验证这些行为。
+
+Live撤销前通过公开 `LiveInputRetirement.detach_completed_input` 同步交付至多一份 `CompletedInput`。仅交付已观察到turnComplete的用户事实，含窗口内已到达转录；一次取出即清除该轮缓存助手与迟到恢复权限，不等待未来片段、不交付未完成轮次。生成仍不写历史；应用在失效原回调前绑定原scope提交。
