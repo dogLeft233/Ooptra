@@ -16,6 +16,7 @@ import aiohttp
 
 from voice_agent.backends.base import (
     AudioSink,
+    RecognitionSink,
     VoiceReply,
     VoiceStreamError,
     VoiceStreamInterrupted,
@@ -285,13 +286,14 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
 
     async def handle_utterance_stream(
         self, pcm16: bytes, *, sample_rate: int, user_key: str, channel_key: str,
-        on_audio: AudioSink,
+        on_audio: AudioSink, on_recognition: RecognitionSink | None = None,
     ) -> VoiceReply:
         self._stream_owner = asyncio.current_task()
         self._audio_sink = on_audio
         try:
             return await self.handle_utterance(
                 pcm16, sample_rate=sample_rate, user_key=user_key, channel_key=channel_key,
+                on_recognition=on_recognition,
             )
         finally:
             await self._clear_stream()

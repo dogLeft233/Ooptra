@@ -46,14 +46,17 @@ class VoiceStreamError(RuntimeError):
 
 
 AudioSink = Callable[[bytes, int], Awaitable[None]]
+RecognitionSink = Callable[[str], None]
 
 
 @runtime_checkable
 class StreamingUtterance(Protocol):
     async def handle_utterance_stream(
         self, pcm16: bytes, *, sample_rate: int, user_key: str, channel_key: str,
-        on_audio: AudioSink,
-    ) -> VoiceReply: ...
+        on_audio: AudioSink, on_recognition: RecognitionSink | None = None,
+    ) -> VoiceReply:
+        """识别完成即同步通知本次调用者；取消后已通知的输入仍有效。"""
+        ...
 
 
 class VoiceBackend(ABC):

@@ -671,6 +671,9 @@ class VoiceAgent:
                     raise RuntimeError("voice operation superseded by manual control")
                 if source == "auto" and self._joined:
                     raise RuntimeError("voice room occupied; automatic join cannot replace it")
+                area, channel = self._resolve_target(area, channel)
+                if not area or not channel:
+                    raise RuntimeError("缺少 area/channel，请在配置或调用参数中指定")
                 if self._joined:
                     old = VoiceOperation("leave", "system", self._area, self._channel, self._visit_id)
                     result = await self._leave_locked()
@@ -1445,7 +1448,14 @@ class VoiceAgent:
         assert isinstance(backend, StreamingUtterance)
         sent = False
         failed = False
+        record_turn = self.context_bridge.bind_turn(speaker=uid)
+        recognized_text = ""
+        recorded = False
         self._barged_in = False
+
+        def on_recognition(text: str) -> None:
+            nonlocal recognized_text
+            recognized_text = text
 
         async def on_audio(data: bytes, rate: int) -> None:
             nonlocal sent
@@ -1472,7 +1482,7 @@ class VoiceAgent:
         try:
             stream_task = asyncio.create_task(backend.handle_utterance_stream(
                 pcm, sample_rate=sample_rate, user_key=f"oopz:{uid}",
-                channel_key=f"{self._area}/{self._channel}", on_audio=on_audio,
+                channel_key=f"{self._area}/{self._channel}", on_audio=on_audio, on_recognition=on_recognition,
             ))
             self._stream_reply_task = stream_task
             try:
@@ -1503,10 +1513,11 @@ class VoiceAgent:
                 result = await duplex.wait_tts_complete(30)
                 if not result.get("ok"):
                     raise RuntimeError("语音播放未正常完成")
-            self.context_bridge.record_turn(
-                reply.user_text, reply.text if sent else "", speaker=uid,
+            record_turn(
+                reply.user_text, reply.text if sent else "",
                 interrupted=self._barged_in,
             )
+            recorded = True
             logger.info("流式语音回合完成：已输出音频=%s", sent)
         except VoiceStreamInterrupted:
             failed = True
@@ -1519,6 +1530,8 @@ class VoiceAgent:
             self.last_reply = f"[error] {exc}"
             logger.exception("流式语音回合失败")
         finally:
+            if not recorded and recognized_text:
+                record_turn(recognized_text, "", interrupted=True)
             if epoch == self._operation_epoch:
                 self._speaking = False
                 if failed and duplex is not None and duplex is self.duplex:

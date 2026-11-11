@@ -421,3 +421,46 @@ def test_tools_enabled_reply_delivers_fallback_audio_to_stream_owner_only():
             assert audio == before
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("operation", ["barge", "stop"])
+def test_interrupted_stream_keeps_recognized_input_under_original_identity(tmp_path, operation):
+    from voice_agent.context_bridge import ContextBridge
+
+    async def run():
+        async with model_servers() as (backend, state):
+            agent = make_agent(tmp_path)
+            await agent.join("original-area", "original-room")
+            backend.memory = agent.memory
+            agent.backend = backend
+            bridge = ContextBridge(outbox_path=tmp_path / "outbox.json")
+            bridge.context = {"ok": True, "umo": "original-scope"}
+            backend.context_bridge = agent.context_bridge = bridge
+            audible = asyncio.Event()
+
+            async def push(*args, **kwargs):
+                audible.set()
+                return {"ok": True}
+
+            agent.duplex.push_tts_pcm = push
+            worker = asyncio.create_task(agent._handle_utterance("original-member", b"\x01\x00" * 16000, 16000))
+            await audible.wait()
+            assert not state.llm_finished
+            if operation == "barge":
+                await agent._interrupt_speaking()
+            else:
+                await agent.stop_current_reply()
+            await asyncio.gather(worker, return_exceptions=True)
+            state.audio_seen.set()
+            rows = agent.memory.recent(user_key="oopz:original-member")
+            assert [(row["role"], row["content"]) for row in rows] == [("user", "你好")]
+            assert rows[0]["channel_key"] == "original-area/original-room"
+            commits = list(bridge.outbox.values())
+            assert len(commits) == 1
+            assert commits[0]["payload"]["user_text"] == "你好"
+            assert commits[0]["payload"]["reply_text"] == ""
+            assert commits[0]["payload"]["speaker"] == "original-member"
+            assert commits[0]["payload"]["interrupted"] is True
+            assert bridge.history == [{"role": "user", "content": "你好"}]
+
+    asyncio.run(run())

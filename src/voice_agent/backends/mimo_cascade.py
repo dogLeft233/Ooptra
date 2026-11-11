@@ -12,6 +12,7 @@ import wave
 from io import BytesIO
 
 from voice_agent.backends.base import (
+    RecognitionSink,
     VoiceBackend,
     VoiceReply,
     VoiceStreamError,
@@ -568,10 +569,11 @@ class MimoCascadeBackend(VoiceBackend):
         sample_rate: int,
         user_key: str = "",
         channel_key: str = "",
+        on_recognition: RecognitionSink | None = None,
     ) -> VoiceReply:
         trace = DecisionTrace(self.observation)
         try:
-            return await self._decide_utterance(pcm16, sample_rate, user_key, channel_key, trace)
+            return await self._decide_utterance(pcm16, sample_rate, user_key, channel_key, trace, on_recognition)
         except asyncio.CancelledError:
             trace.reason, trace.outcome = "interrupted", "skipped"
             raise
@@ -581,7 +583,8 @@ class MimoCascadeBackend(VoiceBackend):
         finally:
             trace.finish()
 
-    async def _decide_utterance(self, pcm16, sample_rate, user_key, channel_key, trace):
+    async def _decide_utterance(self, pcm16, sample_rate, user_key, channel_key, trace,
+                                on_recognition: RecognitionSink | None = None):
         if not pcm16:
             return VoiceReply()
         keywords = list(self.settings.force_reply_keywords)
@@ -596,94 +599,108 @@ class MimoCascadeBackend(VoiceBackend):
             text = await self.asr(pcm16, sample_rate)
         if not text.strip():
             return VoiceReply(user_text=text)
-        audio_ms = len(pcm16) / 2 / max(1, sample_rate) * 1000.0
-        short = control_enabled and audio_ms < max(0, self.settings.min_utterance_ms)
-        addressed = False if short else self._conversation.observe(
-            text, keywords, user_key, window_seconds(self.settings))
-        selected = not short and (preselected or addressed or allow_reply(percent))
-        trace.reason = ("short" if short else "keyword" if matches_force_keyword(text, keywords)
-                        else "window" if addressed else "reply" if selected else "probability")
-        reply_reason = trace.reason
-        reply_text = ""
-        failed = False
-        needs_chat = not control_enabled
-        control = VoiceControlDecision()
-        if control_enabled:
-            if selected:
-                try:
-                    trace.timing_mode = "combined_intent_chat"
-                    with trace.measure("chat"):
-                        control, reply_text = await self.chat_with_intent(text, user_key=user_key)
-                    trace.timings["intent"] = trace.timings["chat"]
-                except (VoiceStreamInterrupted, VoiceStreamError):
-                    raise
-                except Exception as exc:
-                    # A malformed/failed combined reply must still check semantic control.
-                    failed = True
-                    needs_chat = True
-                    trace.reason, trace.outcome = "error", "error"
-                    trace.timing_mode = "stages"
-                    logger.warning(
-                        "语音意图与聊天合并请求失败（%s），改用独立意图判断",
-                        type(exc.__cause__ or exc).__name__,
-                    )
-            if not selected or failed:
-                try:
-                    with trace.measure("intent"):
-                        control = await asyncio.wait_for(self.detect_control_intent(text), 5.0)
-                    if not self.intent_response_valid:
+        if on_recognition is not None:
+            on_recognition(text)
+        input_recorded = False
+
+        def record_input():
+            nonlocal input_recorded
+            if not input_recorded:
+                self.memory.append("user", text, user_key=user_key, channel_key=channel_key)
+                input_recorded = True
+
+        try:
+            audio_ms = len(pcm16) / 2 / max(1, sample_rate) * 1000.0
+            short = control_enabled and audio_ms < max(0, self.settings.min_utterance_ms)
+            addressed = False if short else self._conversation.observe(
+                text, keywords, user_key, window_seconds(self.settings))
+            selected = not short and (preselected or addressed or allow_reply(percent))
+            trace.reason = ("short" if short else "keyword" if matches_force_keyword(text, keywords)
+                            else "window" if addressed else "reply" if selected else "probability")
+            reply_reason = trace.reason
+            reply_text = ""
+            failed = False
+            needs_chat = not control_enabled
+            control = VoiceControlDecision()
+            if control_enabled:
+                if selected:
+                    try:
+                        trace.timing_mode = "combined_intent_chat"
+                        with trace.measure("chat"):
+                            control, reply_text = await self.chat_with_intent(text, user_key=user_key)
+                        trace.timings["intent"] = trace.timings["chat"]
+                    except (VoiceStreamInterrupted, VoiceStreamError):
+                        raise
+                    except Exception as exc:
+                        # A malformed/failed combined reply must still check semantic control.
+                        failed = True
+                        needs_chat = True
+                        trace.reason, trace.outcome = "error", "error"
+                        trace.timing_mode = "stages"
+                        logger.warning(
+                            "语音意图与聊天合并请求失败（%s），改用独立意图判断",
+                            type(exc.__cause__ or exc).__name__,
+                        )
+                if not selected or failed:
+                    try:
+                        with trace.measure("intent"):
+                            control = await asyncio.wait_for(self.detect_control_intent(text), 5.0)
+                        if not self.intent_response_valid:
+                            failed = True
+                            trace.reason, trace.outcome = "error", "error"
+                        else:
+                            # A fresh, valid decision permits ordinary chat again. Never
+                            # speak the malformed combined result or bypass a control.
+                            failed = False
+                            trace.reason, trace.outcome = reply_reason, "skipped"
+                    except Exception:
                         failed = True
                         trace.reason, trace.outcome = "error", "error"
+                        logger.warning("语音控制意图识别失败，本轮不执行控制", exc_info=True)
+                if control.leave or control.volume is not None:
+                    record_input()
+                    if ((control.leave and not self.settings.voice_leave_enabled)
+                            or (control.volume is not None and not self.settings.voice_volume_enabled)):
+                        # A disabled control is never converted into a spoken promise.
+                        trace.reason, trace.outcome = "control_disabled", "skipped"
+                        return VoiceReply(user_text=text, user_key=user_key)
+                    trace.reason, trace.outcome = "control", "control"
+                    if control.leave:
+                        raw = {"voice_control": "leave"}
                     else:
-                        # A fresh, valid decision permits ordinary chat again. Never
-                        # speak the malformed combined result or bypass a control.
-                        failed = False
-                        trace.reason, trace.outcome = reply_reason, "skipped"
-                except Exception:
-                    failed = True
-                    trace.reason, trace.outcome = "error", "error"
-                    logger.warning("语音控制意图识别失败，本轮不执行控制", exc_info=True)
-            if control.leave or control.volume is not None:
-                self.memory.append("user", text, user_key=user_key, channel_key=channel_key)
-                if ((control.leave and not self.settings.voice_leave_enabled)
-                        or (control.volume is not None and not self.settings.voice_volume_enabled)):
-                    # A disabled control is never converted into a spoken promise.
-                    trace.reason, trace.outcome = "control_disabled", "skipped"
-                    return VoiceReply(user_text=text, user_key=user_key)
-                trace.reason, trace.outcome = "control", "control"
-                if control.leave:
-                    raw = {"voice_control": "leave"}
-                else:
-                    volume = control.volume
-                    assert volume is not None  # The decision above contains exactly one control.
-                    command: dict[str, str | int] = {"action": volume.action}
-                    if volume.value is not None:
-                        command["value"] = volume.value
-                    raw = {"voice_control": "volume", "volume_command": command}
-                return VoiceReply(user_text=text, user_key=user_key, raw=raw)
-        if not selected or failed:
-            if not short:
-                self.memory.append("user", text, user_key=user_key, channel_key=channel_key)
-            return VoiceReply(user_text=text, user_key=user_key)
-        if needs_chat:
-            with trace.measure("chat"):
-                reply_text = await self.chat(text, user_key=user_key)
-        # Read old history first; store this turn only after completing the model request.
-        self.memory.append("user", text, user_key=user_key, channel_key=channel_key)
-        if not reply_text.strip():
-            trace.reason = "empty"
-            return VoiceReply(user_text=text, user_key=user_key)
-        self.memory.append("assistant", reply_text, user_key=user_key, channel_key=channel_key)
-        with trace.measure("tts"):
-            pcm_out, rate_out = await self.tts(reply_text)
-            pcm_out = resample_pcm16(pcm_out, rate_out, self.settings.sample_rate_out)
-        if not pcm_out:
-            trace.reason = "empty"
-        else:
-            trace.outcome = "replied"
-        return VoiceReply(user_text=text, text=reply_text, pcm16=pcm_out,
-                          sample_rate=self.settings.sample_rate_out,
-                          user_key=user_key, raw={"stored": True})
+                        volume = control.volume
+                        assert volume is not None  # The decision above contains exactly one control.
+                        command: dict[str, str | int] = {"action": volume.action}
+                        if volume.value is not None:
+                            command["value"] = volume.value
+                        raw = {"voice_control": "volume", "volume_command": command}
+                    return VoiceReply(user_text=text, user_key=user_key, raw=raw)
+            if not selected or failed:
+                if not short:
+                    record_input()
+                return VoiceReply(user_text=text, user_key=user_key)
+            if needs_chat:
+                with trace.measure("chat"):
+                    reply_text = await self.chat(text, user_key=user_key)
+            # Read old history first; store this turn only after completing the model request.
+            record_input()
+            if not reply_text.strip():
+                trace.reason = "empty"
+                return VoiceReply(user_text=text, user_key=user_key)
+            with trace.measure("tts"):
+                pcm_out, rate_out = await self.tts(reply_text)
+                pcm_out = resample_pcm16(pcm_out, rate_out, self.settings.sample_rate_out)
+            if not pcm_out:
+                trace.reason = "empty"
+            else:
+                trace.outcome = "replied"
+            self.memory.append("assistant", reply_text, user_key=user_key, channel_key=channel_key)
+            return VoiceReply(user_text=text, text=reply_text, pcm16=pcm_out,
+                              sample_rate=self.settings.sample_rate_out,
+                              user_key=user_key, raw={"stored": True})
+        except (asyncio.CancelledError, VoiceStreamInterrupted):
+            record_input()
+            raise
 
     async def aclose(self) -> None:
         self._conversation.clear()
