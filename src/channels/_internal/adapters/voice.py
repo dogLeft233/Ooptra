@@ -85,6 +85,9 @@ class OopzRoomTransport:
         if drain is None:
             return AudioPushResult(False, "confirmation_unavailable")
         result = await _external(drain(timeout))
+        controls = self._controls() if self._controls else None
+        if controls is not None and controls.muted:
+            return AudioPushResult(False, "output_muted")
         if not isinstance(result, dict) or result.get("ok") is not True:
             return AudioPushResult(False, "drain_failed")
         return AudioPushResult(True)
@@ -93,6 +96,9 @@ class OopzRoomTransport:
         output = self._bound_output
         if output is None:
             return AudioPushResult(False, "output_unavailable")
+        controls = self._controls() if self._controls else None
+        if controls is not None and controls.muted:
+            return AudioPushResult(False, "output_muted")
         result = await _external(output.push_tts_pcm(pcm, rate, finish=finish))
         if not isinstance(result, dict) or result.get("ok") is not True:
             return AudioPushResult(False, "transport_failed")

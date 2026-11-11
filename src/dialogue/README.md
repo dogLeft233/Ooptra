@@ -44,6 +44,8 @@ MiMo、阿里 ASR/DeepSeek/阿里 TTS、Gemini Live 为实际适配。OpenAI Rea
 
 ## 验证与变化范围
 
+`requires_session_restart` 集中维护供应商连接配置的失效规则；应用只消费是否重建的结论，再协调跨模块停止和重开。供应商字段变化不再要求修改应用自己的字段表。
+
 - [表达任务测试](../../tests/dialogue/test_expression_jobs.py)：单订阅、64KiB切分、有界取消、源失败，以及首帧之前关闭仍回收供应商。
 - [Live 许可测试](../../tests/dialogue/test_live_permissions.py)：未许可零输出、重复/旧版许可、Hold后晚转录放行、客户端中断保留连接、队列溢出与期限失败。
 - [控制解释测试](../../tests/dialogue/test_control_interpretation.py)：真实HTTP JSON模式、合法/非法候选、外部失败与响应隐私。

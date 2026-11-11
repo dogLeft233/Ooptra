@@ -34,4 +34,8 @@ resolve_control仅转换实际结果，不执行SDK。scheduled仅表示已安�
 
 ## 验证
 
+获批轮次在 `turnComplete` 后仍收集同轮晚转录，窗口到期才交付 `turn_finished` 和输出终态。`astrbot_remember` 可先触发同一有界输入窗口，以免工具等待依赖工具响应的 `turnComplete`；定稿通过 `input_finalized` 交应用和上下文。`authorize_input` 只接收同 ProposalRef、原 ContextRef 的定稿授权，独立于已批准表达快照；来源失效或等待超时安全拒绝，内部台词不能取得写授权。首次连接在 setup 确认后注入绑定工具端口提供的初始 `memory_context`，不制造新用户回合。
+
+`LiveSessionRequest.limits` 省略时采用后端构造时配置的限制，显式请求优先。未许可提议的硬截止不因工具请求或晚转录延长。输入定稿计时器和工具等待由会话持有并在关闭时回收；应用等待定稿仍受原播放期限约束，供应商失败会先交付带真实原因的定稿终态，关闭前唤醒应用；取消和失败也不把临时输入提前作为完整记录提交。
+
 [公开许可测试](../../../../tests/dialogue/test_live_permissions.py)守未授权零输出、重复/修订许可、完成后的晚转录、客户端打断、容量与期限；[连接生命周期](../../../../tests/test_gemini_session_lifecycle.py)、[工具控制](../../../../tests/test_voice_volume_intents.py)、[AstrBot真实事务工具](../../../../tests/test_astrbot_live_context.py)验证对应边界。真实网络和 Oopz 音频质量仍由应用双机器人验收记录；测试夹具不是实际Gemini平台验收。

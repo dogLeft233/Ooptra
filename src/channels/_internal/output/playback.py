@@ -253,7 +253,8 @@ class PlaybackExecutor:
             finished = await bounded(self._push(request.session, b"", rate, finish=True))
             if not finished.ok:
                 raise ValueError(finished.reason or "finish_failed")
-            drained = await bounded(self._drain(min(30, max(0, request.deadline - time.monotonic()))))
+            drain_budget = min(30, max(0, request.deadline - time.monotonic()))
+            drained = await self._bounded(self._drain(drain_budget), drain_budget)
             if not drained.ok or self._current() != request.session:
                 raise ValueError(drained.reason or "drain_failed")
             if request.deadline <= time.monotonic():

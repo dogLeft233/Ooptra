@@ -14,6 +14,7 @@ from dialogue._internal.cascade.mimo_cascade import (
     wav_to_pcm16,
 )
 from dialogue._internal.live.gemini_live import build_live_url, live_url_has_key
+from dialogue._internal.reconfiguration import requires_session_restart
 from dialogue._internal.ws_transport import _AiohttpWs, open_live_ws
 from dialogue.api import (
     DialogueSettings,
@@ -42,6 +43,7 @@ __all__ = [
     "looks_like_reasoning_leak",
     "open_live_ws",
     "pcm16_to_wav",
+    "requires_session_restart",
     "resample_pcm16",
     "sanitize_asr",
     "sanitize_for_tts",

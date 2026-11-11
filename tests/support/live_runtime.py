@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from app.voice import VoiceCoordinator
 from dialogue import create_gemini_backend
+from dialogue.models import LiveLimits
 from operations.models import VoiceAgentSettings, VoiceApiSettings
 
 
@@ -126,7 +127,7 @@ async def make_live_agent(tmp_path, *, subtitle_target=None, **overrides):
         return socket
     await agent.backend.aclose()
     agent.backend = create_gemini_backend(agent.settings,
-                                         connector=connect)
+                                         connector=connect, limits=LiveLimits(late_transcription_seconds=.1))
     playback = Playback()
     playback.text_messages = text_messages
     agent.bind_duplex(playback)

@@ -21,9 +21,9 @@ from __future__ import annotations
 
 import struct
 
-from app.voice import _MIN_UTTERANCE_RMS
 from channels import create_vad
 from channels.api import VoiceActivityDetector
+from channels.models import UTTERANCE_ENERGY_THRESHOLD as _MIN_UTTERANCE_RMS
 from channels.models import VadvConfig
 from core.audio import pcm16_rms
 

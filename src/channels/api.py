@@ -119,6 +119,17 @@ class OutputSettings(Protocol):
     output_volume: int
 
 
+class InputSettings(Protocol):
+    """渠道输入窗口和监听设置；不包含接话概率或模型配置。"""
+    sample_rate_in: int
+    silence_ms: int
+    max_utterance_ms: int
+    min_utterance_ms: int
+    listen_only_uids: list[str]
+    voice_leave_enabled: bool
+    voice_volume_enabled: bool
+
+
 class Duplex(Protocol):
     """有界音频采集和播放适配；创建者负责 start/close。
 

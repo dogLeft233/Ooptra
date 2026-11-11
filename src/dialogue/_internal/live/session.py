@@ -46,6 +46,11 @@ class _Turn:
     job: ExpressionJob | None = None
     timer: asyncio.Task | None = None
     internal: bool = False
+    input_ready: asyncio.Event = field(default_factory=asyncio.Event)
+    authorization_ready: asyncio.Event = field(default_factory=asyncio.Event)
+    input_timer: asyncio.Task | None = None
+    authorized_context: Any = None
+    authorized_tools: Any = None
 
 
 class LiveSession:
@@ -57,6 +62,7 @@ class LiveSession:
 
     def __init__(self, backend, request: LiveSessionRequest) -> None:
         self._backend, self.request = backend, request
+        self._limits = request.limits or backend.limits
         self.live_session_id = uuid4().hex
         self._events: asyncio.Queue[LiveEvent] = asyncio.Queue(128)
         self._claimed = False
@@ -111,10 +117,17 @@ class LiveSession:
         if self._state in {"closed", "failed"}:
             return
         self._state, self._reason = "failed", reason
-        self._closed.set()
         if self._turn is not None:
-            self._turn.state = "failed"
-            self._turn.provider_done.set()
+            turn = self._turn
+            unfinished = turn.state in {"pending", "allowed"}
+            turn.state = "failed"
+            turn.provider_done.set()
+            turn.input_ready.set()
+            if unfinished:
+                self._publish(LiveEvent("turn_finished", self.request.session, turn.ref,
+                    turn.user_text, turn.speaker, action_id=turn.action_id, reason=reason,
+                    internal=turn.internal))
+        self._closed.set()
         # 独立关闭任务，不能让provider reader取消并await自己。
         self._spawn(self._backend.close())
 
@@ -162,7 +175,7 @@ class LiveSession:
         self._sequence += 1
         now = time.monotonic()
         turn = _Turn(ProposalRef(self.live_session_id, str(self._sequence), 0),
-                     now + self.request.limits.late_transcription_seconds, now + 60,
+                     now + self._limits.late_transcription_seconds, now + 60,
                      context=self.request.context, tools=self._tools,
                      speaker=self._speaker, internal=internal)
         self._turn = turn
@@ -180,6 +193,47 @@ class LiveSession:
     def _propose(self, turn: _Turn, kind: Literal["proposed", "updated"]) -> None:
         self._publish(LiveEvent(kind, self.request.session, turn.ref, turn.user_text,
                                turn.speaker, turn.deadline, internal=turn.internal))
+
+    def _finalize_input(self, turn: _Turn) -> None:
+        if not turn.input_ready.is_set():
+            turn.input_ready.set()
+            if not turn.provider_done.is_set() and turn.state == "allowed":
+                self._publish(LiveEvent("input_finalized", self.request.session, turn.ref,
+                    turn.user_text, turn.speaker, action_id=turn.action_id, internal=turn.internal))
+        if turn.provider_done.is_set() and turn.state == "allowed":
+            turn.state = "completed"
+            if turn.timer is not None and turn.timer is not asyncio.current_task():
+                turn.timer.cancel()
+            self._publish(LiveEvent("turn_finished", self.request.session, turn.ref,
+                turn.user_text, turn.speaker, action_id=turn.action_id, reason="completed",
+                internal=turn.internal))
+
+    def _schedule_input_finalization(self, turn: _Turn) -> None:
+        if turn.input_ready.is_set():
+            self._finalize_input(turn)
+        elif turn.input_timer is None:
+            async def finalize():
+                await asyncio.sleep(self._limits.late_transcription_seconds)
+                self._finalize_input(turn)
+            turn.input_timer = self._spawn(finalize())
+
+    async def authorize_input(self, ref: ProposalRef, prepared, *, tools=None) -> ResolveReceipt:
+        """只补交同轮定稿输入的工具授权，不替换已批准表达的上下文。"""
+        turn = self._turns.get(ref.turn_id)
+        if (self._closed.is_set() or ref.live_session_id != self.live_session_id or turn is None
+                or ref != turn.ref or not turn.input_ready.is_set()):
+            return ResolveReceipt("stale")
+        if prepared is None or prepared.context_ref != turn.context.context_ref:
+            turn.authorization_ready.set()
+            return ResolveReceipt("stale")
+        expected_input = f"{self.live_session_id}:{turn.ref.turn_id}"
+        if any(grant.input_ref != expected_input or grant.context_ref != prepared.context_ref
+               for grant in prepared.authorized_write_grants):
+            turn.authorization_ready.set()
+            return ResolveReceipt("stale")
+        turn.authorized_context, turn.authorized_tools = prepared, tools
+        turn.authorization_ready.set()
+        return ResolveReceipt("applied")
 
     async def _expire(self, turn: _Turn) -> None:
         while turn.state in {"pending", "allowed"}:
@@ -222,6 +276,8 @@ class LiveSession:
             return ResolveReceipt("held")
         if isinstance(permission, Reject):
             turn.state = "rejected"
+            if turn.timer is not None:
+                turn.timer.cancel()
             turn.buffered_bytes = 0
             while not turn.audio.empty():
                 turn.audio.get_nowait()
@@ -234,6 +290,8 @@ class LiveSession:
             return ResolveReceipt("stale")
         turn.action_id, turn.state = intent.action_id, "allowed"
         turn.deadline = min(intent.deadline, turn.expression_deadline)
+        if turn.provider_done.is_set():
+            self._schedule_input_finalization(turn)
         async def produce(emit):
             try:
                 while True:
@@ -259,6 +317,7 @@ class LiveSession:
                             await asyncio.gather(getter, done, return_exceptions=True)
                 if turn.state not in {"allowed", "completed"}:
                     raise RuntimeError("Live turn failed")
+                await turn.input_ready.wait()
                 await emit("text_final", text=turn.text)
             finally:
                 if turn.state == "allowed" and not turn.provider_done.is_set():
@@ -278,6 +337,11 @@ class LiveSession:
         if turn is None or turn.state not in {"pending", "allowed", "completed"}:
             return
         turn.state = "interrupted"
+        if turn.timer is not None:
+            turn.timer.cancel()
+        if turn.input_timer is not None:
+            turn.input_timer.cancel()
+        self._finalize_input(turn)
         while not turn.audio.empty():
             turn.audio.get_nowait()
         turn.buffered_bytes = 0
@@ -309,10 +373,20 @@ class LiveSession:
                 await self._backend._send({"toolResponse": {"functionResponses": [{
                     "id": call["id"], "name": call["name"], "response": result}]}})
 
-    async def _memory_tool(self, call, tools, prepared, speaker):
+    async def _memory_tool(self, call, tools, prepared, speaker, turn=None):
         generation = self._generation
         key = call["id"]
         try:
+            if call["name"] == "astrbot_remember" and turn is not None and not turn.internal:
+                self._schedule_input_finalization(turn)
+                try:
+                    await asyncio.wait_for(turn.authorization_ready.wait(),
+                                           max(0, turn.expression_deadline-time.monotonic()))
+                except asyncio.TimeoutError:
+                    turn.authorization_ready.set()
+                tools, prepared, speaker = turn.authorized_tools, turn.authorized_context, turn.speaker
+                if turn.state not in {"allowed", "completed"}:
+                    tools = None
             if tools is None:
                 result = {"ok": False, "error": "Memory authorization unavailable"}
             else:
@@ -416,7 +490,8 @@ class LiveSession:
                 turn = self._turn
                 tools = (None if turn is not None and turn.internal else
                          turn.tools if turn is not None else self._tools)
-                task = self._spawn(self._memory_tool(call, tools, turn.context if turn is not None else self.request.context, self._speaker))
+                task = self._spawn(self._memory_tool(call, tools, turn.context if turn is not None else self.request.context,
+                                                     turn.speaker if turn is not None else self._speaker, turn))
                 self._memory_jobs[key] = task
                 def release(done, call_id=key):
                     if self._memory_jobs.get(call_id) is done:
@@ -472,9 +547,14 @@ class LiveSession:
         model_turn = server.get("modelTurn") or {}
         turn = self._turn
         if turn is not None and turn.provider_done.is_set():
-            if not model_turn and not output_text and input_text and turn.state == "pending":
+            if input_text and turn.input_ready.is_set():
+                self._last = turn
+                turn = self._turn = None
+            elif not model_turn and not output_text and input_text and turn.state in {"pending", "allowed"}:
                 pass  # 可证明属于待许可已完成轮次的晚转录。
             elif model_turn or output_text:
+                if turn.state == "allowed":
+                    self._finalize_input(turn)
                 if turn.state == "pending":
                     turn.state = "superseded"
                     self._publish(LiveEvent("turn_finished", self.request.session, turn.ref,
@@ -485,7 +565,7 @@ class LiveSession:
             turn = self._new_turn()
         if turn is None:
             return
-        if input_text:
+        if input_text and not turn.input_ready.is_set():
             turn.user_text += input_text
             if turn.state == "pending":
                 turn.ref = ProposalRef(self.live_session_id, turn.ref.turn_id, turn.ref.revision + 1)
@@ -505,7 +585,7 @@ class LiveSession:
             except (ValueError, TypeError):
                 self._fail("invalid_provider_audio")
                 return
-            if turn.buffered_bytes + len(pcm) > self.request.limits.deferred_audio_bytes:
+            if turn.buffered_bytes + len(pcm) > self._limits.deferred_audio_bytes:
                 turn.state = "failed"
                 turn.provider_done.set()
                 self._fail("audio_capacity")
@@ -530,16 +610,16 @@ class LiveSession:
             turn.provider_done.set()
             if turn.state == "pending":
                 turn.deadline = min(turn.deadline, time.monotonic()
-                                    + self.request.limits.late_transcription_seconds)
+                                    + self._limits.late_transcription_seconds)
                 if turn.timer is not None:
                     turn.timer.cancel()
                 turn.timer = self._spawn(self._expire(turn))
                 self._propose(turn, "updated")
             elif turn.state == "allowed":
-                turn.state = "completed"
-                self._publish(LiveEvent("turn_finished", self.request.session, turn.ref,
-                    turn.user_text, turn.speaker, action_id=turn.action_id, reason="completed",
-                    internal=turn.internal))
+                if turn.internal:
+                    self._finalize_input(turn)
+                else:
+                    self._schedule_input_finalization(turn)
             self._speaker = ""
             self._speakers.clear()
 
@@ -581,6 +661,8 @@ class LiveSession:
             if turn.state in {"pending", "allowed"}:
                 turn.state = "cancelled"
             turn.provider_done.set()
+            turn.input_ready.set()
+            turn.authorization_ready.set()
             if turn.job is not None:
                 await turn.job.aclose()
         tasks = [task for task in tuple(self._tasks) if task is not asyncio.current_task()]

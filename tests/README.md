@@ -45,6 +45,8 @@ python -m pytest -v -o faulthandler_timeout=60
 
 ## 完整契约回归
 
+PR 审查反例入口：[静音和长排空](channels/test_review_playback.py)、[Live 定稿、记忆授权及断连](app/test_live_input_finalization.py)、[级联控制原行动结算](app/test_cascade_control_identity.py)。均使用真实渠道、上下文或应用流程，仅替代外部平台和模型传输；不能替代真实房间及双 bot 声学验收。
+
 表达任务覆盖单订阅、背压、首帧前关闭、失败EOS和真实HTTP/WS边界；输入、播放覆盖字节预算、断点、帧序号、取消及未知效果。`tests/app/test_output_commit_lifecycle.py` 验证已受理SQLite线程、切房/取消原scope提交及失败静默回执。配置/维护覆盖跨进程锁、CAS、部分应用、候选gate、handoff、父进程退出凭据与原子归档发布。
 
 已移除的供应商复合入口、私有音频回调、global历史绑定和`.__new__`状态拼装测试，分别由新公开任务/真实应用协议测试承接。测试数量不是完成标准；删除旧实现耦合用例时应注明保留的行为和新验证入口。

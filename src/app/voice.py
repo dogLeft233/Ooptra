@@ -14,7 +14,6 @@ import logging
 import os
 import time
 from collections.abc import Awaitable, Callable
-from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -25,20 +24,25 @@ from behavior import (
     create_reply_scheduler,
 )
 from behavior.models import (
-    VOICE_CONTROL_MIN_MS,
+    NotExecuted,
     ScheduledReply,
     SpeechActivity,
     VolumeCommand,
     resolve_volume_command,
 )
-from channels import create_audio_ingress, create_voice_binding
+from channels import (
+    create_audio_ingress,
+    create_voice_binding,
+    input_policy_changed,
+    voice_input_policy,
+)
 from channels import create_output_controls as VoiceOutputControls
 from channels.api import Channel, Duplex, PlatformDirectory
-from channels.models import AudioInputPolicy, JoinRoom, LeaveRoom, RoomTarget, VadvConfig
+from channels.models import ActionOutcome, JoinRoom, LeaveRoom, RoomTarget, SetOutput, VadvConfig
 from channels.models import RoomOperation as VoiceOperation
-from context import create_context_service
+from context import create_voice_context, storage_configuration_changed
 from core.audio import pcm16_rms
-from dialogue import create_backend
+from dialogue import create_backend, requires_session_restart
 from dialogue.api import (
     ConnectionReporter,
 )
@@ -54,11 +58,6 @@ def _is_live_backend(backend: Any) -> bool:
 #: 抢话门限所用的能量阈值。与 ``EnergyVad`` 的默认值同源：低于这个电平的帧
 #: 不计入「有人在说话」，所以一声咳嗽/键盘声不会开始累计时长。
 _BARGE_IN_ENERGY = VadvConfig.energy_threshold
-
-#: 级联模式下，整段 utterance 的平均 RMS 低于此值就判定为「不是人话」，直接丢弃、
-#: 不送 ASR。取值来自真实录音分布（1305 个 1 秒窗：真说话 0.03~0.22，误触发带
-#: 0.012~0.02），卡在两者之间。见 ``_on_remote_pcm`` 里的详细说明。
-_MIN_UTTERANCE_RMS = 0.02
 
 #: 一条回合在信箱里等到超过「冷却时长 + 这个秒数」就丢弃，不再回。
 #: 单槽信箱已经保证只留最新的一条，所以「过期」只可能是用户说完就安静了 ——
@@ -94,37 +93,6 @@ def _dump_remote_pcm(uid: str, pcm: bytes, sample_rate: int) -> None:
     _pcm_dump["ts"].write(f"{time.monotonic():.3f}\t{uid}\t{len(pcm)}\t{sample_rate}\n")
     _pcm_dump["ts"].flush()
 
-# 改了这些字段就必须重建记忆 / VAD / 已建立的模型会话，否则旧值继续生效
-_MEMORY_FIELDS = {"memory_path", "memory_max_turns"}
-_VAD_FIELDS = {"sample_rate_in", "silence_ms", "max_utterance_ms"}
-_SESSION_FIELDS = {
-    "voice_volume_enabled",
-    "voice_leave_enabled",
-    "persona",
-    "proxy",
-    "gemini_api_key",
-    "gemini_base_url",
-    "gemini_model",
-    "gemini_voice",
-    "openai_api_key",
-    "openai_base_url",
-    "openai_realtime_model",
-    "openai_voice",
-    "mimo_api_key",
-    "mimo_base_url",
-    "mimo_asr_model",
-    "mimo_llm_model",
-    "mimo_tts_model",
-    "mimo_tts_voice",
-    "dashscope_api_key",
-    "dashscope_ws_url",
-    "aliyun_asr_model",
-    "aliyun_tts_model",
-    "aliyun_tts_voice",
-    "deepseek_api_key",
-    "deepseek_base_url",
-    "deepseek_model",
-}
 
 
 class VoiceCoordinator:
@@ -147,9 +115,7 @@ class VoiceCoordinator:
         self._binding = create_voice_binding(bot, on_audio=self._on_remote_pcm,
                                               controls=lambda:self.output_controls,
                                               on_gap=lambda _uid:self.ingress.reset())
-        self.context_service = create_context_service(
-            settings.memory_path, max_turns=settings.memory_max_turns,
-            outbox_path=Path(settings.memory_path).with_name("astrbot_voice_outbox.json"))
+        self.context_service = create_voice_context(settings.memory_path, max_turns=settings.memory_max_turns)
         self.memory = self.context_service.history
         self.memory.set_persona(settings.persona)
         self.backend = create_backend(settings)
@@ -414,9 +380,8 @@ class VoiceCoordinator:
             await asyncio.shield(self._close_task)
             self._close_task = None
         if self._context_closed:
-            self.context_service = create_context_service(self.settings.memory_path,
-                max_turns=self.settings.memory_max_turns,
-                outbox_path=Path(self.settings.memory_path).with_name("astrbot_voice_outbox.json"))
+            self.context_service = create_voice_context(self.settings.memory_path,
+                max_turns=self.settings.memory_max_turns)
             self.memory, self.context_bridge = self.context_service.history, self.context_service.bridge
             self.memory.set_persona(self.settings.persona)
             self._context_closed = False
@@ -485,12 +450,7 @@ class VoiceCoordinator:
                 logger.warning("语音会话重连失败：%s", exc)
 
     def _input_policy(self):
-        minimum = self.settings.min_utterance_ms
-        if self.settings.voice_leave_enabled or self.settings.voice_volume_enabled:
-            minimum = min(minimum, VOICE_CONTROL_MIN_MS)
-        return AudioInputPolicy(VadvConfig(sample_rate=self.settings.sample_rate_in,
-            silence_ms=self.settings.silence_ms, max_utterance_ms=self.settings.max_utterance_ms),
-            tuple(self.settings.listen_only_uids), minimum, _MIN_UTTERANCE_RMS)
+        return voice_input_policy(self.settings)
 
     async def refresh(self, changed: list[str]) -> list[str]:
         # 音量只改播放增益；不取消播报，也不等待进退房或重建模型会话。
@@ -514,13 +474,11 @@ class VoiceCoordinator:
         if "output_volume" in changed_set:
             notes.append(await self._apply_output_volume())
 
-        if _MEMORY_FIELDS & changed_set:
+        if storage_configuration_changed(changed_set):
             await self._stop_reply_locked(restart=False)
             if hasattr(self, "context_service"):
                 await self.context_service.close()
-            self.context_service = create_context_service(
-                self.settings.memory_path, max_turns=self.settings.memory_max_turns,
-                outbox_path=Path(self.settings.memory_path).with_name("astrbot_voice_outbox.json"))
+            self.context_service = create_voice_context(self.settings.memory_path, max_turns=self.settings.memory_max_turns)
             self.memory = self.context_service.history
             self.context_bridge = self.context_service.bridge
             if self._joined:
@@ -530,7 +488,7 @@ class VoiceCoordinator:
             self.memory.set_persona(self.settings.persona)
             notes.append("记忆存储已重建")
 
-        if _VAD_FIELDS & changed_set:
+        if input_policy_changed(changed_set):
             self.ingress.configure(self._input_policy())
             notes.append("断句参数已重建")
 
@@ -552,7 +510,7 @@ class VoiceCoordinator:
                 await self._stop_round_worker()
             notes.append("语音后端已切换")
 
-        session_dirty = bool(_SESSION_FIELDS & changed_set) or "backend" in changed_set
+        session_dirty = requires_session_restart(changed_set)
         if not session_dirty:
             return notes
 
@@ -1107,13 +1065,25 @@ class VoiceCoordinator:
                     self.last_user_text = result.user_text or self.last_user_text
                     self.last_reply = result.reply_text or self.last_reply
                     if result.control is not None:
-                        control = result.control.control
+                        action = result.control
+                        control = action.control
                         if control.leave:
-                            self.request_voice_leave()
+                            if not self.request_voice_leave(action_id=action.action_id, expected_session=session):
+                                self.behavior.feedback(NotExecuted(action.action_id, "control", "not_scheduled"))
                         elif control.volume is not None:
-                            applied = await self._apply_volume_command(control.volume)
-                            if not self.output_muted:
-                                await self.speak_text(applied.get("message") or "语音输出调整失败")
+                            volume, muted = resolve_volume_command(control.volume, self.output_controls.snapshot()["volume"])
+                            outcome = None
+                            try:
+                                outcome = await self.channels.execute(SetOutput(action.action_id, session, volume, muted))
+                            finally:
+                                if not isinstance(outcome, ActionOutcome):
+                                    outcome = self.channels.outcome(action.action_id)
+                                self.behavior.feedback(outcome if isinstance(outcome, ActionOutcome) else
+                                    NotExecuted(action.action_id, "control", "not_executed"))
+                            if current() and not self.output_muted:
+                                await self.speak_text("语音输出已调整" if outcome.status == "completed" else "语音输出调整失败")
+                elif result.control is not None:
+                    self.behavior.feedback(NotExecuted(result.control.action_id, "control", "superseded"))
             except Exception:
                 logger.exception("event=voice.flow.failed session_id=%s", session.session_id)
 

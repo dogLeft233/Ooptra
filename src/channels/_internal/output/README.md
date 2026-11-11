@@ -34,4 +34,6 @@ Duplex 不向模块外暴露浏览器 transport。操作失败报告安全原因
 
 ## 验证
 
+源读取、音频提交和 finish 使用至多十秒的单次预算；drain 独立使用至多三十秒，并共同受原请求绝对截止约束。输出处于静音时返回 `output_muted`，不把零音量排空记为已确认发声。`voice_input_policy` 统一拥有控制短句下限及噪声门槛；应用不另维护该规则。
+
 [输入契约](../../../../tests/channels/test_input_contract.py)、[duplex 生命周期](../../../../tests/channels/test_duplex_lifecycle.py)、[播放契约](../../../../tests/channels/test_playback_contract.py)和原 VAD/排空/音量回归，只替代外部 PCM/浏览器传输。新增反例实际证明字节总预算、跨线程断点、未开始取消、源失败、deadline、未知范围和停止复用屏障；生产声学效果仍需真实双 bot 验收。

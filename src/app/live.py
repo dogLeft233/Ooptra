@@ -49,6 +49,7 @@ class LiveFlow:
         self._cancelled_controls = set()
         self._active_turns = set()
         self._failures = []
+        self._finalized = {}
 
     async def start(self):
         prepared = await self.context.prepare_context(ContextRequest(self.session))
@@ -83,6 +84,7 @@ class LiveFlow:
             if removable is not None:
                 self._metadata.pop(removable, None)
                 self._prepared.pop(removable, None)
+                self._finalized.pop(removable, None)
         self._metadata[key] = event
         self._sequence += 1
         if not event.internal:
@@ -137,8 +139,11 @@ class LiveFlow:
                 self._outputs.add(task)
                 task.add_done_callback(self._observe)
                 task.add_done_callback(self._outputs.discard)
-            elif event.kind == "turn_finished" and event.proposal is not None:
-                await self._prepare(event, complete=True)
+            elif event.kind in {"input_finalized", "turn_finished"} and event.proposal is not None:
+                prepared = await self._prepare(event, complete=True)
+                await self.live.authorize_input(event.proposal, prepared,
+                    tools=self.context.tools(prepared) if prepared is not None else None)
+                self._finalized.setdefault(self._key(event), asyncio.Event()).set()
             elif event.kind == "control_proposed":
                 if event.tool_ref in self._control_tasks:
                     continue
@@ -174,9 +179,13 @@ class LiveFlow:
         confirmed = False
         text_outcome, text_reason = None, "not_executed"
         failure = 'playback_failed'
+        deadline = time.monotonic() + 60
         try:
             outcome = await self.channel.play(PlaybackRequest(action_id, self.session,
-                job.generation_id, time.monotonic() + 60), audio.frames())
+                job.generation_id, deadline), audio.frames())
+            if not self._closed:
+                await asyncio.wait_for(self._finalized.setdefault(key, asyncio.Event()).wait(),
+                                       max(0, deadline-time.monotonic()))
         except asyncio.CancelledError:
             failure = 'cancelled'
             raise
@@ -359,5 +368,6 @@ class LiveFlow:
         self._metadata.clear()
         self._prepared.clear()
         self._control_commands.clear()
+        self._finalized.clear()
         if self._failures:
             raise RuntimeError('Live流程存在未确认的失败：' + ','.join(self._failures))

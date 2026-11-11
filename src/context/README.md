@@ -32,6 +32,8 @@
 
 ## 生命周期与验证
 
+语音装配使用 `create_voice_context`，由上下文模块拥有旧 outbox 文件命名和导入约定；`storage_configuration_changed` 判定何时需要重建存储。应用只在停止相关流程后关闭并重建，不拼装数据库或 outbox 路径。
+
 同步 `observe/record_output` 是有限本地事务，异步装配可按顺序交给线程；不得并发无序安装观察。`close` 拒绝新请求、结束短 RPC/轮询，等待台账锁释放；不等待第三方在线。原始文件、数据库迁移与降级出口见 [memory](./_internal/memory/README.md)。
 
 公开行为测试：`python -m pytest -q tests/context tests/test_astrbot_context_bridge.py tests/test_astrbot_live_context.py tests/test_memory_recent.py`。覆盖真实 SQLite 回滚、重启、同键冲突、满载补受理、原来源、逐目标重试、增量输入、授权伪造/撤销和旧文件导出。原协议测试继续验证切房、取消、peer 与持久化故障。模块只允许引用 `channels.models` 和公共技术机制。

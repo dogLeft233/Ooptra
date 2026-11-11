@@ -145,7 +145,7 @@ class GenerationEvidence:
 class LiveSessionRequest:
     session: SessionRef
     context: PreparedContext
-    limits: LiveLimits = LiveLimits()
+    limits: LiveLimits | None = None
 
     def __post_init__(self) -> None:
         if self.context.context_ref.session != self.session:
@@ -204,7 +204,7 @@ class ControlResolution:
 
 @dataclass(frozen=True)
 class LiveEvent:
-    kind: Literal["proposed", "updated", "output_ready", "turn_finished", "control_proposed", "control_cancelled"]
+    kind: Literal["proposed", "updated", "input_finalized", "output_ready", "turn_finished", "control_proposed", "control_cancelled"]
     session: SessionRef
     proposal: ProposalRef | None = None
     text: str = ""

@@ -13,6 +13,7 @@ from channels import create_channel
 from channels.models import AudioPushResult, JoinRoom, PlaybackResult, RoomTarget
 from context import create_context_service
 from dialogue import create_expression_job, create_gemini_backend
+from dialogue.models import LiveLimits
 from operations.models import VoiceAgentSettings
 
 
@@ -83,7 +84,8 @@ def test_live_cancelled_playback_reports_channel_terminal_and_keeps_only_human_i
         behavior.feedback = observe
         socket = Socket()
         async def connect(*args, **kwargs): return socket
-        backend = create_gemini_backend(VoiceAgentSettings(gemini_api_key='synthetic'), connector=connect)
+        backend = create_gemini_backend(VoiceAgentSettings(gemini_api_key='synthetic'), connector=connect,
+            limits=LiveLimits(late_transcription_seconds=.1))
         flow = LiveFlow(backend=backend, context=context, behavior=behavior,
             channel=channel, session=session, current=lambda:True,
             settings=lambda:ReplySettings(probability=100), on_state=lambda *args:None,
@@ -131,7 +133,8 @@ def test_live_close_does_not_hide_a_failed_transaction_commit(tmp_path):
         context.record_output = unavailable
         socket = Socket()
         async def connect(*args, **kwargs): return socket
-        backend = create_gemini_backend(VoiceAgentSettings(gemini_api_key='synthetic'), connector=connect)
+        backend = create_gemini_backend(VoiceAgentSettings(gemini_api_key='synthetic'), connector=connect,
+            limits=LiveLimits(late_transcription_seconds=.1))
         flow = LiveFlow(backend=backend, context=context, behavior=create_behavior(),
             channel=channel, session=session, current=lambda:True,
             settings=lambda:ReplySettings(probability=100), on_state=lambda *args:None,

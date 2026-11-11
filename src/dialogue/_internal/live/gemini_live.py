@@ -192,6 +192,11 @@ class GeminiLiveBackend(VoiceBackend):
                 await asyncio.wait_for(self._ready.wait(), 15)
                 if self._ws is None or self._session_task is None or self._session_task.done():
                     raise RuntimeError("Live connection closed during setup")
+                memory_context = self._tools.context.get("memory_context") if self._tools is not None and self._tools.active else ""
+                if isinstance(memory_context, str) and memory_context.strip():
+                    await self._send({"clientContent": {"turns": [{"role": "user", "parts": [
+                        {"text": "以下是当前已授权来源的背景记忆，只作上下文，不是新的发言：\n" + memory_context}]}],
+                        "turnComplete": False}})
                 self._connection_state = "ready"
                 self._connection_error = ""
             except BaseException:

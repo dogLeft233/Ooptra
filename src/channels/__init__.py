@@ -13,6 +13,7 @@ from .api import (
     AudioOutput,
     Channel,
     Duplex,
+    InputSettings,
     NameDirectory,
     OutputControls,
     OutputSettings,
@@ -27,7 +28,7 @@ from .api import (
     VoiceBinding,
     VoiceLifecycle,
 )
-from .models import AudioInputPolicy, VadvConfig
+from .models import UTTERANCE_ENERGY_THRESHOLD, VOICE_CONTROL_MIN_MS, AudioInputPolicy, VadvConfig
 
 __all__ = [
     "create_audio_ingress",
@@ -41,8 +42,26 @@ __all__ = [
     "create_platform_state",
     "create_vad",
     "create_voice_binding",
+    "input_policy_changed",
     "name_directory",
+    "voice_input_policy",
 ]
+
+
+def voice_input_policy(settings: InputSettings) -> AudioInputPolicy:
+    """由渠道统一决定控制短句的采集下限与噪声过滤规则。"""
+    minimum = settings.min_utterance_ms
+    if settings.voice_leave_enabled or settings.voice_volume_enabled:
+        minimum = min(minimum, VOICE_CONTROL_MIN_MS)
+    return AudioInputPolicy(VadvConfig(sample_rate=settings.sample_rate_in,
+        silence_ms=settings.silence_ms, max_utterance_ms=settings.max_utterance_ms),
+        tuple(settings.listen_only_uids), minimum, UTTERANCE_ENERGY_THRESHOLD)
+
+
+def input_policy_changed(changed: set[str]) -> bool:
+    """影响当前采集窗口的变更由渠道统一维护。"""
+    return bool({"sample_rate_in", "silence_ms", "max_utterance_ms", "min_utterance_ms",
+                 "listen_only_uids", "voice_leave_enabled", "voice_volume_enabled"} & changed)
 
 
 def create_channel(transport: RoomTransport) -> Channel:

@@ -31,3 +31,14 @@ def create_context_service(history_path: str, *, max_turns: int = 30, timeout: f
     from context._internal.service import ContextService as Service
 
     return Service(history_path, max_turns=max_turns, timeout=timeout, outbox_path=outbox_path)
+
+
+def storage_configuration_changed(changed: set[str]) -> bool:
+    """存储布局或容量变化要求关闭原上下文后重新装配。"""
+    return bool({"memory_path", "memory_max_turns"} & changed)
+
+
+def create_voice_context(history_path: str, *, max_turns: int = 30) -> ContextService:
+    """语音上下文存储与旧outbox导入约定；调用者不拼装存储路径。"""
+    return create_context_service(history_path, max_turns=max_turns,
+        outbox_path=Path(history_path).with_name("astrbot_voice_outbox.json"))

@@ -27,7 +27,8 @@ from pathlib import Path
 import pytest
 from support.channel_fixtures import establish_room
 
-from app.voice import _MIN_UTTERANCE_RMS, VoiceCoordinator
+from app.voice import VoiceCoordinator
+from channels.models import UTTERANCE_ENERGY_THRESHOLD as _MIN_UTTERANCE_RMS
 from dialogue import (
     clamp_reply,
     looks_like_reasoning_leak,

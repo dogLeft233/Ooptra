@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
+from channels.models import VOICE_CONTROL_MIN_MS as VOICE_CONTROL_MIN_MS
 from channels.models import SessionRef
 from context.models import ContextRevision
 
@@ -187,7 +188,6 @@ def resolve_volume_command(command: VolumeCommand, current: int) -> tuple[int | 
     return None, command.action == "mute"
 
 
-VOICE_CONTROL_MIN_MS = 250
 
 
 @dataclass(frozen=True)

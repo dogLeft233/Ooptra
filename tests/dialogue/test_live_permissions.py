@@ -107,6 +107,21 @@ async def open_session(*, limits=None):
     return socket, await backend.open_live(request), prepared
 
 
+def test_live_setup_injects_prepared_source_memory_before_new_input():
+    async def scenario():
+        socket = Socket()
+        async def connect(*args, **kwargs): return socket
+        backend = create_gemini_backend(VoiceAgentSettings(gemini_api_key="synthetic"), connector=connect)
+        session = SessionRef("run", "bind", "session", RoomTarget("a", "c"))
+        prepared = PreparedContext(ContextRef(session, 1, "source"), ContextRevision(0), "", ())
+        tools = SimpleNamespace(active=True, context={"memory_context": "组内记忆：喜欢茶"})
+        live = await backend.open_live(LiveSessionRequest(session, prepared), tools=tools)
+        assert socket.sent[1]["clientContent"]["turns"][0]["parts"][0]["text"].endswith("组内记忆：喜欢茶")
+        assert socket.sent[1]["clientContent"]["turnComplete"] is False
+        await live.aclose()
+    asyncio.run(scenario())
+
+
 def audio_message(pcm=b"\1\0"):
     return {"serverContent": {"modelTurn": {"parts": [{"inlineData": {
         "data": base64.b64encode(pcm).decode(), "mimeType": "audio/pcm;rate=24000"}}]}}}

@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
 
+UTTERANCE_ENERGY_THRESHOLD = .02
+VOICE_CONTROL_MIN_MS = 250
+
 
 class RoomState(Enum):
     IDLE = "idle"
