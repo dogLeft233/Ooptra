@@ -263,9 +263,12 @@ async def run_cascade(*, backend, context, behavior, channel,
         return FlowResult(recognized.text, evidence.text, outcome,
                           text_outcome=text_outcome, text_reason=text_reason)
     except asyncio.CancelledError:
+        end_reason = 'interrupted'
         if intent is not None and execution_started:
             result = channel.playback(intent.action_id)
             if isinstance(result, PlaybackResult):
+                # 历史提交等待被取消不改变已完成的渠道播放事实。
+                end_reason = result.status
                 if not feedback_sent:
                     behavior.feedback(result)
                     feedback_sent = True
@@ -279,7 +282,6 @@ async def run_cascade(*, backend, context, behavior, channel,
                     commit_started = True
                     await commit_output(context, OutputRecord(intent.action_id, session,
                         turn, result, prepared.context_ref, trigger_id))
-        end_reason = 'interrupted'
         raise
     finally:
         try:

@@ -19,13 +19,14 @@ let voiceTraceNext = null;
 let voiceTraceGeneration = 0;
 let voiceTraceBusy = false;
 let voiceTraceGap = null;
+let voiceTracePendingCursor = 0;
 let voiceTraceTarget = '';
 let voiceTraceStatus = null;
 
 function resetVoiceTraces() {
   voiceTraceGeneration++;
   voiceTraceRows.clear(); voiceTraceNext = null;
-  voiceTraceBusy = false; voiceTraceGap = null;
+  voiceTraceBusy = false; voiceTraceGap = null; voiceTracePendingCursor = 0;
   const list = $('voice-trace-list');
   if (list) list.replaceChildren();
 }
@@ -122,6 +123,25 @@ async function refreshVoiceTraces(st, {older = false} = {}) {
       // Keep the earlier gap's lower boundary when multiple suspended refreshes
       // create disjoint loaded pages; the ordinary older-history cursor is separate.
       voiceTraceGap = {before: data.next_before, until: voiceTraceGap?.until ?? newestKnown};
+    }
+    if (!older) {
+      // At most one extra bounded page per refresh. Rotate through loaded unfinished
+      // rows outside the newest page; do not change history/gap cursors or add rows.
+      const refreshed = new Set(rows.map(row => row.sequence));
+      const pending = [...voiceTraceRows.values()]
+        .filter(row => (row.stage !== 'finished' || !row.text_final) && !refreshed.has(row.sequence))
+        .sort((a, b) => a.sequence - b.sequence);
+      const anchor = pending.find(row => row.sequence > voiceTracePendingCursor) || pending[0];
+      if (anchor) {
+        const pendingQuery = new URLSearchParams(query);
+        pendingQuery.set('before', String(anchor.sequence + 1));
+        const updates = await api('/api/voice/transcripts?' + pendingQuery);
+        if (generation !== voiceTraceGeneration) return;
+        for (const row of updates.rows || []) {
+          if (voiceTraceRows.has(row.sequence)) voiceTraceRows.set(row.sequence, row);
+        }
+        voiceTracePendingCursor = anchor.sequence;
+      }
     }
     text('voice-trace-status', '已载入 ' + voiceTraceRows.size + ' / ' + (data.total || 0) + ' 句 · 自动更新');
     renderVoiceTraces();
