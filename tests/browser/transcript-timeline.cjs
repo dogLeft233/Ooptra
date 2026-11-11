@@ -47,8 +47,8 @@ const server = http.createServer((req, res) => {
         const before = Number(url.searchParams.get('before') || 10000);
         let filtered = rows.filter(row => row.sequence < before).map(row => ({...row}));
         if (!completed && before > 52) filtered[0] = {...filtered[0], stage: 'deciding', outcome: 'pending'};
-        if (!url.searchParams.has('area')) filtered.unshift({...rows[0], sequence: 99, speaker_name: '另一频道成员', area: 'elsewhere', channel: 'other', text: '其他频道记录'});
-        result = {rows: filtered.slice(0, 50), next_before: filtered.length > 50 ? filtered[49].sequence : null, total: url.searchParams.has('area') ? 52 : 53};
+        if (!url.searchParams.has('area')) filtered.unshift({...rows[0], sequence: 9999, speaker_name: '另一频道成员', area: 'elsewhere', channel: 'other', text: '其他频道记录'});
+        result = {rows: filtered.slice(0, 50), next_before: filtered.length > 50 ? filtered[49].sequence : null, total: rows.length + (url.searchParams.has('area') ? 0 : 1)};
       }
       await route.fulfill({json: {ok: true, ...result}});
     });
@@ -73,10 +73,21 @@ const server = http.createServer((req, res) => {
     await page.locator('#voice-trace-more').click();
     await page.waitForFunction(() => document.querySelectorAll('#voice-trace-list > li').length === 52);
     assert(await page.locator('#voice-trace-more').isHidden());
+    rows.unshift(...Array.from({length: 60}, (_, i) => ({...rows[0], sequence: 112 - i,
+      input_ref: 'new-' + (112 - i), text: '新到达的第 ' + (112 - i) + ' 句'})));
+    await page.locator('#voice-trace-refresh').click();
+    await page.waitForFunction(() => document.querySelector('#voice-trace-status').textContent.includes('/ 112'));
+    assert.equal(await list.locator('li').count(), 102);
+    assert(await page.locator('#voice-trace-more').isVisible(), 'newest page must retain a cursor for the ten missing sentences');
+    await page.locator('.voice-trace-card').screenshot({path: path.join(artifacts, '03-gap.png')});
+    await page.locator('#voice-trace-more').click();
+    await page.waitForFunction(() => document.querySelectorAll('#voice-trace-list > li').length === 112);
+    assert(await page.locator('#voice-trace-more').isHidden());
+    await page.locator('.voice-trace-card').screenshot({path: path.join(artifacts, '04-gap-filled.png')});
     fail = true;
     await page.locator('#voice-trace-refresh').click();
     await page.waitForFunction(() => document.querySelector('#voice-trace-status').textContent.includes('读取失败'));
-    assert.equal(await list.locator('li').count(), 52);
+    assert.equal(await list.locator('li').count(), 112);
     fail = false;
     // 切换范围后，迟到的当前频道请求不能覆盖全部频道。
     hold = true;

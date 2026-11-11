@@ -18,14 +18,14 @@ let voiceTraceRows = new Map();
 let voiceTraceNext = null;
 let voiceTraceGeneration = 0;
 let voiceTraceBusy = false;
-let voiceTraceLoadedOlder = false;
+let voiceTraceGap = null;
 let voiceTraceTarget = '';
 let voiceTraceStatus = null;
 
 function resetVoiceTraces() {
   voiceTraceGeneration++;
   voiceTraceRows.clear(); voiceTraceNext = null;
-  voiceTraceBusy = false; voiceTraceLoadedOlder = false;
+  voiceTraceBusy = false; voiceTraceGap = null;
   const list = $('voice-trace-list');
   if (list) list.replaceChildren();
 }
@@ -86,7 +86,7 @@ function renderVoiceTraces() {
     details.append(summary, meta); item.append(heading, transcript, reason, details); host.append(item);
   }
   const more = $('voice-trace-more');
-  if (more) { more.hidden = voiceTraceNext == null; more.disabled = voiceTraceBusy; }
+  if (more) { more.hidden = (voiceTraceGap?.before ?? voiceTraceNext) == null; more.disabled = voiceTraceBusy; }
 }
 
 async function refreshVoiceTraces(st, {older = false} = {}) {
@@ -97,7 +97,7 @@ async function refreshVoiceTraces(st, {older = false} = {}) {
   const target = scope === 'all' ? 'all' : (state.area && state.channel ? state.area + '/' + state.channel : 'none');
   if (target !== voiceTraceTarget) { resetVoiceTraces(); voiceTraceTarget = target; }
   if (target === 'none') { text('voice-trace-status', '当前没有频道，请选择全部频道查看历史'); renderVoiceTraces(); return; }
-  if (voiceTraceBusy || (older && voiceTraceNext == null)) return;
+  if (voiceTraceBusy || (older && (voiceTraceGap?.before ?? voiceTraceNext) == null)) return;
   const generation = voiceTraceGeneration;
   voiceTraceBusy = true;
   const refresh = $('voice-trace-refresh'), more = $('voice-trace-more');
@@ -105,13 +105,24 @@ async function refreshVoiceTraces(st, {older = false} = {}) {
   if (more) more.disabled = true;
   const query = new URLSearchParams({limit: '50'});
   if (target !== 'all') { query.set('area', state.area); query.set('channel', state.channel); }
-  if (older) query.set('before', String(voiceTraceNext));
+  const fillingGap = older ? voiceTraceGap : null;
+  if (older) query.set('before', String(fillingGap?.before ?? voiceTraceNext));
+  let newestKnown = 0;
+  for (const sequence of voiceTraceRows.keys()) newestKnown = Math.max(newestKnown, sequence);
   try {
     const data = await api('/api/voice/transcripts?' + query);
     if (generation !== voiceTraceGeneration) return;
-    for (const row of data.rows || []) voiceTraceRows.set(row.sequence, row);
-    if (older || !voiceTraceLoadedOlder) voiceTraceNext = data.next_before ?? null;
-    if (older) voiceTraceLoadedOlder = true;
+    const rows = data.rows || [];
+    for (const row of rows) voiceTraceRows.set(row.sequence, row);
+    if (fillingGap) {
+      if (rows.some(row => row.sequence <= fillingGap.until) || data.next_before == null) voiceTraceGap = null;
+      else fillingGap.before = data.next_before;
+    } else if (older || !newestKnown) voiceTraceNext = data.next_before ?? null;
+    else if (rows.length && rows.every(row => row.sequence > newestKnown) && data.next_before != null) {
+      // Keep the earlier gap's lower boundary when multiple suspended refreshes
+      // create disjoint loaded pages; the ordinary older-history cursor is separate.
+      voiceTraceGap = {before: data.next_before, until: voiceTraceGap?.until ?? newestKnown};
+    }
     text('voice-trace-status', '已载入 ' + voiceTraceRows.size + ' / ' + (data.total || 0) + ' 句 · 自动更新');
     renderVoiceTraces();
   } catch (error) {

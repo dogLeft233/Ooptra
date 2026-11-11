@@ -144,6 +144,12 @@ class LiveFlow:
                 task.add_done_callback(self._outputs.discard)
             elif event.kind == "turn_finished" and event.proposal is not None:
                 await self._prepare(event, complete=True)
+                if self.observations is not None and not event.internal and not event.action_id:
+                    # 无许可/无播放的轮次以明确生成结束证据关闭诊断；有行动的轮次
+                    # 仍由渠道播放结果提供终态，不能把生成完成当作播放成功。
+                    self.observations.trace(self.session, self._key(event), event.user_key, "finished",
+                        text=event.text, decision="silent", reason=event.reason or "not_executed",
+                        outcome="not_executed")
             elif event.kind == "control_proposed":
                 if event.tool_ref in self._control_tasks:
                     continue
