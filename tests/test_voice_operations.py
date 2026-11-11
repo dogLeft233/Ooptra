@@ -4,49 +4,9 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+from support.channel_fixtures import make_voice_agent as make_agent
 
-from voice_agent.agent import VoiceAgent
-from voice_agent.settings import VoiceAgentSettings, VoiceApiSettings, load_voice_agent_settings
-
-
-class Duplex:
-    transport = None
-
-    async def enable_listen(self, enabled=True):
-        return {"ok": True}
-
-    async def stop_tts(self):
-        return {"ok": True}
-
-    async def wait_tts_complete(self, timeout):
-        return {"ok": True}
-
-    async def close(self):
-        return None
-
-
-def make_agent(tmp_path):
-    class Voice:
-        backend = None
-        leaves = 0
-        fail_leave = False
-
-        async def join(self, **kwargs):
-            await asyncio.sleep(0)
-            return SimpleNamespace(rtc_channel_name="rtc")
-
-        async def leave(self):
-            if self.fail_leave:
-                raise RuntimeError("leave failed")
-            self.leaves += 1
-
-    agent = VoiceAgent(VoiceAgentSettings(
-        enabled=True, backend="mimo_cascade", reply_probability_percent=100, voice_leave_enabled=False,
-        voice_volume_enabled=False,
-        memory_path=str(tmp_path / "memory.jsonl")
-    ), VoiceApiSettings(), bot=SimpleNamespace(voice=Voice()))
-    agent.duplex = Duplex()
-    return agent
+from voice_agent.settings import load_voice_agent_settings
 
 
 @pytest.mark.parametrize("operation", ["leave", "stop_current_reply"])
@@ -387,4 +347,29 @@ def test_retirement_blocks_new_remote_input_without_stopping_current_reply(tmp_p
         assert agent._pending is None
         await agent.leave()
         assert not agent._retiring_visit_id
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("default_area", ["", "configured-other-area"])
+def test_join_with_omitted_area_keeps_current_domain_before_leaving(tmp_path, monkeypatch, default_area):
+    import config
+
+    async def run():
+        monkeypatch.setitem(config.OOPZ_CONFIG, "default_area", default_area)
+        agent = make_agent(tmp_path)
+        targets = []
+
+        async def join(**kwargs):
+            targets.append(kwargs)
+            return SimpleNamespace(rtc_channel_name="rtc")
+
+        monkeypatch.setattr(agent._bot.voice, "join", join)
+        await agent.join("current-area", "old-room")
+        result = await agent.join(channel="new-room")
+        assert result["ok"]
+        assert agent.channels.snapshot().session.room_target.area == "current-area"
+        assert agent.channels.snapshot().session.room_target.channel == "new-room"
+        assert len(targets) == 2
+        await agent.leave()
+
     asyncio.run(run())

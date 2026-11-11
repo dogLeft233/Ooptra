@@ -259,11 +259,12 @@ FIELD_SPECS: dict[str, dict[str, dict[str, Any]]] = {
         },
         "backend": {
             "type": "select",
-            "label": "Live 模型厂商",
+            "label": "语音对话后端",
             "tier": "basic",
             "options": [
                 {"value": "gemini_live", "label": "Gemini Live（语音进语音出）"},
                 {"value": "mimo_cascade", "label": "MiMo 级联（ASR→LLM→TTS）"},
+                {"value": "aliyun_deepseek", "label": "阿里语音 + DeepSeek（流式级联）"},
                 {"value": "openai_realtime", "label": "OpenAI Realtime（骨架）"},
             ],
             "hint": "选择厂商后出现对应的模型与音色预设",
@@ -335,6 +336,32 @@ FIELD_SPECS: dict[str, dict[str, dict[str, Any]]] = {
             ],
             "allow_custom": True,
             "hint": "下拉预设音色，或选「自定义」填入任意音色名",
+        },
+        "aliyun_deepseek.ws_url": {
+            "type": "str", "label": "阿里语音 WebSocket 地址", "tier": "basic",
+            "vendor": "aliyun_deepseek",
+            "default": "wss://dashscope.aliyuncs.com/api-ws/v1/inference",
+            "hint": "密钥仅在服务器 .env.local 配置 DASHSCOPE_API_KEY 和 DEEPSEEK_API_KEY，保存后生效。",
+        },
+        "aliyun_deepseek.asr_model": {
+            "type": "str", "label": "阿里 ASR 模型", "tier": "basic",
+            "vendor": "aliyun_deepseek", "default": "qwen-audio-3.1-asr-flash-message",
+        },
+        "aliyun_deepseek.tts_model": {
+            "type": "str", "label": "阿里 TTS 模型", "tier": "basic",
+            "vendor": "aliyun_deepseek", "default": "qwen-audio-3.1-tts-flash",
+        },
+        "aliyun_deepseek.tts_voice": {
+            "type": "str", "label": "阿里 TTS 音色", "tier": "basic",
+            "vendor": "aliyun_deepseek", "default": "longanhuan_v3.1",
+        },
+        "aliyun_deepseek.llm_base_url": {
+            "type": "str", "label": "DeepSeek 接口地址", "tier": "basic",
+            "vendor": "aliyun_deepseek", "default": "https://api.deepseek.com",
+        },
+        "aliyun_deepseek.llm_model": {
+            "type": "str", "label": "DeepSeek 模型", "tier": "basic",
+            "vendor": "aliyun_deepseek", "default": "deepseek-flash",
         },
         # ── MiMo 级联厂商预设 ──
         "mimo.api_key": {

@@ -31,7 +31,7 @@
 | 功能 | 使用方式 |
 | --- | --- |
 | 文字桥接 | Oopz 群聊、私聊通过 OneBot v11 反向 WebSocket 连接 AstrBot |
-| 实时语音 | Gemini Live 音频输入与输出；MiMo 提供 ASR → LLM → TTS 级联 |
+| 实时语音 | Gemini Live；MiMo 级联；阿里 ASR/TTS + DeepSeek 分句流式回复 |
 | AstrBot 人格 | 单选映射会话跟随人格，也可手选 AstrBot 内置人格 |
 | 双向记忆 | 多选映射会话，查询与写回全部选中会话，逐目标确认和重试 |
 | 房间管理 | 手动进退房、自动串门、成员状态、抢话、关键词接话、音量与临时闭麦 |
@@ -76,12 +76,15 @@ python launcher.py
 
 ## 开始语音对话
 
-1. 在「配置 → 语音模型」开启语音，选择 Gemini Live 或 MiMo 级联。
+1. 在「配置 → 语音模型」开启语音，选择 Gemini Live、MiMo 或阿里语音 + DeepSeek。
 2. 填写对应密钥、模型和音色。
 3. 在「语音台 → 会话控制」选择域和频道，然后进房。
 4. 使用「自检与试听」先检查环境、音色及进退房台词。
 
 默认语音回复概率为 30%。强制关键词、连续追问窗口、监听成员范围和抢话门限均可配置。手动开口、语音退房、音量和临时闭麦规则见[语音指南](docs/voice-guide.md)。OpenAI Realtime 尚未接入。
+
+阿里语音 + DeepSeek 的密钥从进程环境或项目根目录 `.env.local` 读取：
+`DASHSCOPE_API_KEY`、`DEEPSEEK_API_KEY`。密钥不进入前端配置；模型与流式行为见[接入说明](docs/voice-guide.md#阿里-asrtts-与-deepseek)。
 
 ## 与 QQ 群共享人格和记忆
 

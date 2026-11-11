@@ -24,6 +24,7 @@ def clean_announcement(text: str) -> str:
 
 async def run_announcement(agent: Any, kind: str, template: str, visit_id: str | None, epoch: int,
                             timeout: float) -> dict[str, Any]:
+    session = agent.channels.snapshot().session
     agent._announcement_active = True
     agent._announcement_collecting = False
     agent._announcement_done.clear()
@@ -71,11 +72,11 @@ async def run_announcement(agent: Any, kind: str, template: str, visit_id: str |
             for offset in range(0, len(pcm), chunk):
                 check_current()
                 async with agent._live_output_lock:
-                    result = await agent.duplex.push_tts_pcm(pcm[offset:offset + chunk], rate)
+                    result = await agent._push_room_pcm(session, pcm[offset:offset + chunk], rate)
                 if not result.get("ok"):
                     raise RuntimeError(result.get("error") or "audio push failed")
                 await asyncio.sleep(0.02)
-            result = await agent.duplex.push_tts_pcm(b"", rate, finish=True)
+            result = await agent._push_room_pcm(session, b"", rate, finish=True)
             if not result.get("ok"):
                 raise RuntimeError(result.get("error") or "audio finish failed")
             agent._reply_generating = False

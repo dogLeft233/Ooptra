@@ -50,7 +50,7 @@ class PreviewService:
             raise ValueError("正在生成试听，请稍后重试")
         fresh = dataclasses.replace(settings)
         if voice:
-            fresh.mimo_tts_voice = fresh.gemini_voice = voice
+            fresh.mimo_tts_voice = fresh.gemini_voice = fresh.aliyun_tts_voice = voice
         backend = create_backend(fresh, EphemeralMemory())
         async with self._lock:
             try:
@@ -65,7 +65,7 @@ class PreviewService:
                     await asyncio.gather(cleanup, return_exceptions=True)
 
     async def _generate(self, backend, settings, kind: str, text: str) -> dict:
-        if settings.backend in {"mimo", "mimo_cascade", "cascade", "cascade_mimo"}:
+        if settings.backend in {"mimo", "mimo_cascade", "cascade", "cascade_mimo", "aliyun_deepseek"}:
             actual = text if kind == "voice" else await backend.rewrite_announcement(kind, text)
             pcm, rate = await backend.tts(actual)
         else:

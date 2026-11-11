@@ -5,6 +5,7 @@ import io
 import wave
 
 import pytest
+from support.channel_fixtures import establish_room
 from test_voice_operations import make_agent
 
 
@@ -24,7 +25,7 @@ def test_sample_probe_is_independent_and_reports_individual_stages(tmp_path, mon
     async def run():
         agent = make_agent(tmp_path)
         agent.settings.mimo_api_key = "test"
-        agent._joined = True
+        await establish_room(agent)
         agent.memory.append("user", "existing room memory", user_key="member")
         before = agent.memory.recent()
         calls = []

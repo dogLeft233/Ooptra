@@ -59,7 +59,42 @@ bot 只监听当前加入的频道；`listen_only_uids` 留空时接收房间主
 | --- | --- | --- |
 | Gemini Live | `gemini_live`（默认） | 语音进、语音出；需要 Live 模型配额与可达的网络 |
 | MiMo 级联 | `mimo_cascade` | ASR → LLM → TTS；延迟通常更高 |
+| 阿里语音 + DeepSeek | `aliyun_deepseek` | 阿里 Message ASR、DeepSeek、阿里 Qwen Audio TTS；回复分句合成、音频边收边播 |
 | OpenAI Realtime | `openai_realtime` | 仅有骨架，暂不可用 |
+
+### 阿里 ASR/TTS 与 DeepSeek
+
+安装更新后的 `requirements.txt` 和语音可选依赖。在项目根目录创建被 Git 忽略的
+`.env.local`，写入以下两项；Linux/macOS 建议执行 `chmod 600 .env.local`。
+
+```dotenv
+DASHSCOPE_API_KEY=你的北京地域百炼密钥
+DEEPSEEK_API_KEY=你的DeepSeek密钥
+```
+
+进程环境中的同名变量优先于文件。文件按数据解析，不执行 shell，不进行变量展开；
+只有这两个模型密钥会自动加载。不要将密钥写进前端、示例配置或版本库。
+修改密钥后重新保存语音配置或重启程序。控制台只管理模型、音色和接口地址，不返回这两个密钥。
+
+在「配置 → 语音模型」选择「阿里语音 + DeepSeek（流式级联）」并开启语音，默认使用：
+
+- ASR：`qwen-audio-3.1-asr-flash-message`，16 kHz 单声道 PCM；
+- LLM：`deepseek-flash`，非思考模式；
+- TTS：`qwen-audio-3.1-tts-flash`，音色 `longanhuan_v3.1`，PCM 输出。
+
+阿里接口可设置为对应业务空间的北京地域专属 WebSocket 地址；默认公共北京地址。
+模型权限、地域与额度需与密钥匹配。先在「自检与试听」验证，再进入语音房。
+
+输入仍由本地 VAD 按成员切句，完成一句后通过 WebSocket 发送给 ASR，**尚未持续流式识别**。
+正常回复通过 DeepSeek SSE 按完整句送入双向流式 TTS，音频到达后即推送房间，
+不等待整轮合成结束。控制意图先单独验证，控制 JSON 不进入 TTS。
+若启用 AstrBot 记忆工具，涉及工具的 LLM 结果先完整处理，再流式输出 TTS 音频。
+抢话达到配置门限后会取消当前生成并清空播放；退房、换房与停用会回收在途任务。
+手动「直接朗读」、独立试听及进退房台词仍使用完整短音频返回。
+
+参考：[ASR WebSocket](https://help.aliyun.com/zh/model-studio/qwen-asr-message-websocket-api)、
+[TTS WebSocket](https://help.aliyun.com/zh/model-studio/qwen-audio-tts-websocket-api)、
+[DeepSeek Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/)。
 
 快捷开口需要已经进房：Gemini 显示「AI 语音回答」，将文字作为当前对话的一轮输入；MiMo 显示「直接朗读」，不经过语言模型。
 
@@ -220,3 +255,10 @@ DELETE /memory
 
 例如 [astrbot_plugin_ooptra](https://github.com/Eason4869/astrbot_plugin_ooptra) 默认接入 WebUI 端口，令牌填写 `WEBUI_CONFIG.token`；
 独立端口也填写同一个 Token；旧 `VOICE_API_CONFIG.token` 与 `VOICE_API_TOKEN` 不再读取。绑定所需域与频道 ID 在「会话控制」复制。
+
+
+## 双机器人有界联调
+
+双实例隔离配置、`cascade_turn_limit` 的额度语义、同频道复测步骤、停止与退房要求，
+统一见 [双机器人语音联调验收](bot-pair-acceptance.md)。该文档同时保存首次实测结论和回放证据，
+作为语音功能的验收标准之一。

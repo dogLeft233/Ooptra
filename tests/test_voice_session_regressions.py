@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
+from support.channel_fixtures import establish_room
 from test_gemini_session_lifecycle import FakeLiveWs
 
 from voice_agent.agent import VoiceAgent
@@ -69,7 +70,8 @@ def make_agent(tmp_path, **kwargs):
 def test_active_live_configuration_sends_fresh_setup(opened, tmp_path, field, value):
     async def run():
         agent = make_agent(tmp_path)
-        agent._joined = True
+        await establish_room(agent)
+        await establish_room(agent)
         await agent._wire_live()
         await agent.backend.start_session()
         setattr(agent.settings, field, value)
@@ -97,7 +99,7 @@ def test_active_live_configuration_sends_fresh_setup(opened, tmp_path, field, va
 def test_failed_live_refresh_does_not_claim_success(opened, tmp_path):
     async def run():
         agent = make_agent(tmp_path)
-        agent._joined = True
+        await establish_room(agent)
         await agent.backend.start_session()
         agent.settings.gemini_api_key = ""
         try:
@@ -148,6 +150,7 @@ def test_failed_live_join_exits_room_and_cleans_state(monkeypatch, tmp_path, can
 def test_live_barge_in_drops_remaining_audio_until_next_turn(monkeypatch, tmp_path):
     async def run():
         agent = make_agent(tmp_path, barge_in_hold_ms=20)
+        await establish_room(agent)
         await agent._wire_live()
 
         async def discard_input(*args):
@@ -183,6 +186,7 @@ def test_cascade_silence_keeps_intentional_forced_interruption(tmp_path):
 def test_live_barge_in_clears_audio_whose_push_is_still_pending(monkeypatch, tmp_path):
     async def run():
         agent = make_agent(tmp_path, barge_in_hold_ms=20)
+        await establish_room(agent)
         await agent._wire_live()
         entered, release, interrupted = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
@@ -224,7 +228,7 @@ def test_persona_endpoint_updates_the_active_live_session(opened, tmp_path, monk
     monkeypatch.setattr(config, "VOICE_AGENT_CONFIG", {"persona": "original"})
     async def run():
         agent = make_agent(tmp_path)
-        agent._joined = True
+        await establish_room(agent)
         await agent.backend.start_session()
         app = web.Application()
         mount_voice_routes(app, SimpleNamespace(agent=agent))

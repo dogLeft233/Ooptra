@@ -4,9 +4,18 @@ line-length = 100
 # src/oopz_sdk 是内置 SDK，保留其代码风格，不参与本仓库的批量 lint。
 # 本地兼容性修复由对应回归测试验证。
 extend-exclude = ["src/oopz_sdk"]
+# 提交钩子显式传入 SDK 文件名时也保留排除规则。
+force-exclude = true
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I", "B", "UP", "SIM", "RUF"]
+# 先启用明确的阻塞网络/等待调用与调试器检查；文件 I/O 另按调用路径评审。
+# PGH003 要求类型忽略注明诊断编号，避免无范围地绕过类型检查。
+# 日志先约束运行错误与异常信息用法，写法迁移按变更范围渐进处理。
+extend-select = [
+    "ASYNC210", "ASYNC212", "ASYNC251", "T10", "PGH003",
+    "LOG004", "LOG007", "LOG014", "G010", "G101", "G202", "PLE1205", "PLE1206",
+]
 # 中文正文里的全角标点，以及语音文本净化必须逐字匹配的全角尖括号/竖线
 # （MiMo 的思考链标记会以 ＜think＞ / ｜end▁of▁thinking｜ 的形式出现）。
 allowed-confusables = ["，", "。", "：", "；", "（", "）", "！", "？", "＜", "＞", "｜"]
@@ -18,11 +27,20 @@ allowed-confusables = ["，", "。", "：", "；", "（", "）", "！", "？", "
 # 显式声明项目自身的一级模块，避免 config.py / private_key.py 这类
 # 不随仓库分发的模块在 CI 上被误判为第三方而改变 import 分组。
 [tool.ruff.lint.isort]
-known-first-party = ["bridge", "config", "core", "onebot_v11", "oopz", "oopz_sdk", "private_key", "webui"]
+known-first-party = [
+    "app", "behavior", "bridge", "channels", "config", "context", "core", "dialogue",
+    "onebot_v11", "oopz", "oopz_sdk", "operations", "private_key", "scripts", "voice_agent", "webui",
+]
 
 [tool.pyright]
 typeCheckingMode = "standard"
+# 解析边界逐模块收紧；新边界完成类型化后加入此列表。
+strict = ["src/voice_agent/voice_control.py"]
 pythonVersion = "3.10"
 include = ["main.py", "src"]
 exclude = ["**/__pycache__", "src/oopz_sdk"]
 ignore = ["src/oopz_sdk"]
+
+[tool.pytest.ini_options]
+# 真实联调脚本保存在 data/，不能由自动测试收集时执行。
+testpaths = ["tests"]

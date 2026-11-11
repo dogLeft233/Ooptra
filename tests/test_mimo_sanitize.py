@@ -360,6 +360,7 @@ class _FakeBackend:
 
 def _agent(utterance: bytes | None) -> tuple[VoiceAgent, _FakeBackend]:
     agent = VoiceAgent.__new__(VoiceAgent)
+    agent._cascade_attempts = 0
     agent.settings = VoiceAgentSettings(enabled=True, barge_in=False)
     agent.live_mode = False
     agent.duplex = None
@@ -368,8 +369,8 @@ def _agent(utterance: bytes | None) -> tuple[VoiceAgent, _FakeBackend]:
     agent._speaking = False
     agent._barge_in_armed = True
     agent._user_buffers = {}
-    agent._area = "area1"
-    agent._channel = "chan1"
+    agent.settings.area = "area1"
+    agent.settings.channel = "chan1"
     agent._init_throttle()  # 单槽信箱 + 冷却状态，见 agent.VoiceAgent._init_throttle
     agent._vad_for = lambda uid: _StubVad(utterance)  # type: ignore[method-assign]
     return agent, agent.backend

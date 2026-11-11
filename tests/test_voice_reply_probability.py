@@ -5,6 +5,7 @@ import base64
 import random
 
 import pytest
+from support.channel_fixtures import establish_room
 from test_gemini_session_lifecycle import FakeLiveWs
 from test_round_throttle import _offer, _take
 from test_voice_session_regressions import make_agent
@@ -51,7 +52,7 @@ def test_cascade_decides_before_asr(percent, draws, expected, monkeypatch, tmp_p
 
     async def run():
         agent = make_agent(tmp_path, backend="mimo_cascade", reply_cooldown_ms=0)
-        agent._joined = True
+        await establish_room(agent)
         agent.settings.reply_probability_percent = percent
         seen = []
 
@@ -81,8 +82,9 @@ def test_cancelled_explicit_send_does_not_force_the_next_automatic_reply(tmp_pat
     async def run():
         agent = make_agent(tmp_path)
         agent.settings.reply_probability_percent = 0
-        agent._joined = True
+        await establish_room(agent)
         agent._connection_ready = True
+        await establish_room(agent)
         await agent._wire_live()
         await agent.backend.start_session()
         original_send = agent.backend._send
@@ -124,6 +126,7 @@ def test_live_zero_probability_drops_reply_but_keeps_listening_and_human_memory(
     async def run():
         agent = make_agent(tmp_path)
         agent.settings.reply_probability_percent = 0
+        await establish_room(agent)
         await agent._wire_live()
         heard = []
 
@@ -150,6 +153,7 @@ def test_live_uses_one_probability_draw_per_turn_and_hot_changes_apply_next_turn
     async def run():
         agent = make_agent(tmp_path)
         agent.settings.reply_probability_percent = 30
+        await establish_room(agent)
         await agent._wire_live()
         await fragment(agent.backend, b"skip-first")
         agent.settings.reply_probability_percent = 100
@@ -185,8 +189,9 @@ def test_live_explicit_speech_bypasses_zero_probability(tmp_path, monkeypatch, o
     async def run():
         agent = make_agent(tmp_path)
         agent.settings.reply_probability_percent = 0
-        agent._joined = True
+        await establish_room(agent)
         agent._connection_ready = True
+        await establish_room(agent)
         await agent._wire_live()
         await agent.backend.start_session()
         try:

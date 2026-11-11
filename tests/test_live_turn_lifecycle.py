@@ -22,6 +22,7 @@ import json
 from typing import Any
 
 import pytest
+from support.channel_fixtures import establish_room
 
 from voice_agent.agent import VoiceAgent
 from voice_agent.backends.gemini_live import LANGUAGE_GUARD, GeminiLiveBackend
@@ -121,8 +122,9 @@ class _StubVad:
         pass
 
 
-def _make_agent(*, live: bool = True) -> tuple[VoiceAgent, FakeDuplex, FakeBackend]:
+async def _make_agent(*, live: bool = True) -> tuple[VoiceAgent, FakeDuplex, FakeBackend]:
     agent = VoiceAgent.__new__(VoiceAgent)
+    agent._cascade_attempts = 0
     agent.settings = load_voice_agent_settings()[0]
     # 这三项必须显式写死：CI 的 config.py 由 config.example.py 生成，其中
     # VOICE_AGENT_CONFIG.enabled 为 False —— 那样 _on_remote_pcm 会在第一道门
@@ -137,7 +139,6 @@ def _make_agent(*, live: bool = True) -> tuple[VoiceAgent, FakeDuplex, FakeBacke
     agent.settings.barge_in_hold_ms = 0
     agent.settings.listen_only_uids = []
     agent._bot = None
-    agent._joined = True
     agent._speaking = False
     agent._barge_in_armed = True
     agent._live_output_lock = asyncio.Lock()
@@ -151,14 +152,15 @@ def _make_agent(*, live: bool = True) -> tuple[VoiceAgent, FakeDuplex, FakeBacke
     agent.last_reply = ""
     agent.last_user_text = ""
     agent.turns = 0
-    agent._area = "area1"
-    agent._channel = "chan1"
+    agent.settings.area = "area1"
+    agent.settings.channel = "chan1"
     agent._utterance_tasks = set()
 
     duplex, backend = FakeDuplex(), FakeBackend()
     agent.duplex = duplex
     agent.backend = backend
     agent.live_mode = live
+    await establish_room(agent)
     return agent, duplex, backend
 
 
@@ -175,7 +177,7 @@ def test_interleaved_chunks_trigger_barge_in_once() -> None:
     """核心回归：分片与音频帧交替时，一次出声只打断一次（原来每分片一次）。"""
 
     async def run() -> None:
-        agent, duplex, backend = _make_agent()
+        agent, duplex, backend = await _make_agent()
         await _wire(agent)
 
         for _ in range(CHUNKS):
@@ -193,7 +195,7 @@ def test_speaking_is_false_right_after_model_finished() -> None:
     """模型说完后用户才开口：不该被当成抢话。"""
 
     async def run() -> None:
-        agent, duplex, backend = _make_agent()
+        agent, duplex, backend = await _make_agent()
         await _wire(agent)
 
         await backend.emit_audio(5)
@@ -216,7 +218,7 @@ def test_turns_increments_once_per_reply() -> None:
     """一轮回复吐 N 个分片，只记 1 轮（原来每个分片 +1，一轮记成十几轮）。"""
 
     async def run() -> None:
-        agent, _duplex, backend = _make_agent()
+        agent, _duplex, backend = await _make_agent()
         await _wire(agent)
 
         await backend.emit_audio(CHUNKS)
@@ -233,7 +235,7 @@ def test_live_speak_text_counts_the_turn_at_the_boundary() -> None:
     一句话会被记成两轮（API 刚 +1，模型说完的 ``turnComplete`` 再 +1）。"""
 
     async def run() -> None:
-        agent, _duplex, backend = _make_agent()
+        agent, _duplex, backend = await _make_agent()
         await _wire(agent)
 
         result = await agent.speak_text("你好")
@@ -251,7 +253,7 @@ def test_barge_in_rearms_for_the_next_turn() -> None:
     """下一回合重新武装：新的一次出声仍能被抢话打断一次。"""
 
     async def run() -> None:
-        agent, _duplex, backend = _make_agent()
+        agent, _duplex, backend = await _make_agent()
         await _wire(agent)
 
         await backend.emit_audio(1)
@@ -273,7 +275,7 @@ def test_server_side_interrupted_clears_local_playback() -> None:
     """
 
     async def run() -> None:
-        agent, duplex, backend = _make_agent()
+        agent, duplex, backend = await _make_agent()
         await _wire(agent)
 
         await backend.emit_audio(3)
@@ -295,7 +297,7 @@ def test_cascade_barge_in_unchanged() -> None:
     """级联模式仍走 ``_interrupt_speaking``，一次打断只清一次播放队列。"""
 
     async def run() -> None:
-        agent, duplex, _backend = _make_agent(live=False)
+        agent, duplex, _backend = await _make_agent(live=False)
         await _wire(agent)
 
         agent._speaking = True

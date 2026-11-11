@@ -23,6 +23,8 @@ import asyncio
 import logging
 from typing import Any
 
+from support.channel_fixtures import establish_room
+
 from voice_agent.agent import VoiceAgent
 from voice_agent.backends.base import VoiceReply
 from voice_agent.settings import VoiceAgentSettings
@@ -62,8 +64,9 @@ class FakeCascade:
         return self.reply
 
 
-def _make_agent(reply: VoiceReply) -> tuple[VoiceAgent, FakeTransport]:
+async def _make_agent(reply: VoiceReply) -> tuple[VoiceAgent, FakeTransport]:
     agent = VoiceAgent.__new__(VoiceAgent)
+    agent._cascade_attempts = 0
     agent.settings = VoiceAgentSettings(enabled=True, sample_rate_out=24000)
     agent.duplex = FakeTransport()
     agent.backend = FakeCascade(reply)
@@ -73,8 +76,9 @@ def _make_agent(reply: VoiceReply) -> tuple[VoiceAgent, FakeTransport]:
     agent.turns = 0
     agent.last_reply = ""
     agent.last_user_text = ""
-    agent._area = "area1"
-    agent._channel = "chan1"
+    agent.settings.area = "area1"
+    agent.settings.channel = "chan1"
+    await establish_room(agent)
     return agent, agent.duplex
 
 
@@ -101,7 +105,7 @@ def test_asr_turn_is_logged_with_text_and_duration(caplog) -> None:
     """
 
     async def run() -> None:
-        agent, _ = _make_agent(_reply())
+        agent, _ = await _make_agent(_reply())
         with caplog.at_level(logging.INFO, logger="voice_agent.agent"):
             await agent._handle_utterance("u1", PCM, 16000)
 
@@ -116,7 +120,7 @@ def test_empty_asr_result_is_still_logged(caplog) -> None:
     """识别为空也要记 —— 「听到了但没转出字」正是要排查的情形。"""
 
     async def run() -> None:
-        agent, _ = _make_agent(_reply(user_text="", text="", pcm16=b""))
+        agent, _ = await _make_agent(_reply(user_text="", text="", pcm16=b""))
         with caplog.at_level(logging.INFO, logger="voice_agent.agent"):
             await agent._handle_utterance("u1", PCM, 16000)
 
@@ -134,7 +138,7 @@ def test_push_failure_is_logged_once_per_turn(caplog) -> None:
     """整回合只报一条 WARNING；失败通常整回合都失败，逐分片刷屏会盖住线索。"""
 
     async def run() -> None:
-        agent, transport = _make_agent(_reply())
+        agent, transport = await _make_agent(_reply())
         transport.push_result = {"ok": False, "error": "not joined"}
 
         with caplog.at_level(logging.WARNING, logger="voice_agent.agent"):
@@ -142,7 +146,7 @@ def test_push_failure_is_logged_once_per_turn(caplog) -> None:
 
         warned = [r for r in caplog.records if "推流失败" in r.getMessage()]
         assert len(warned) == 1, f"同一回合报了 {len(warned)} 条，应该只有 1 条"
-        assert "not joined" in warned[0].getMessage(), "没带上是哪种失败"
+        assert "transport_failed" in warned[0].getMessage(), "没带上是哪种失败"
 
     asyncio.run(run())
 
@@ -151,7 +155,7 @@ def test_push_success_is_silent(caplog) -> None:
     """正常推流不能有任何 WARNING，否则这条日志会变成噪音。"""
 
     async def run() -> None:
-        agent, transport = _make_agent(_reply())
+        agent, transport = await _make_agent(_reply())
         with caplog.at_level(logging.WARNING, logger="voice_agent.agent"):
             await agent._handle_utterance("u1", PCM, 16000)
 
@@ -165,7 +169,7 @@ def test_turn_counter_and_speaking_are_restored(caplog) -> None:
     """推完要把 ``_speaking`` 落回去、回合数 +1（cascade 的回合边界就在这里）。"""
 
     async def run() -> None:
-        agent, _ = _make_agent(_reply())
+        agent, _ = await _make_agent(_reply())
         await agent._handle_utterance("u1", PCM, 16000)
 
         assert agent.turns == 1, "cascade 的回合数没有 +1"

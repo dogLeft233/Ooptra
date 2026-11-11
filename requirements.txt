@@ -15,3 +15,5 @@ requests>=2.32,<3
 # 默认请求头声明了 br/zstd，需要它们才能解压响应
 brotli>=1.2,<2
 zstandard>=0.23,<1
+# 后端专用 .env.local 凭据；不执行 shell，不覆盖进程环境
+python-dotenv>=1,<2

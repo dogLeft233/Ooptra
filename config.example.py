@@ -129,6 +129,8 @@ VOICE_AGENT_CONFIG = {
     #   openai_realtime —— 骨架，协议待接
     "backend": "gemini_live",
     "persona": "你是 Oopz 语音频道助手，说话简洁友好，像在语音房里自然聊天。",
+    # 级联后端每次进房最多自动接话几次；0 不限。失败也计次，手动开口不计。
+    "cascade_turn_limit": 0,
     "barge_in": True,
     # 某人要**连续**说话满这么多毫秒才算抢话（房间越吵调越大，600~800 适合人多时）。
     # 0 = 关掉门限：一出声就打断，房间一热闹 bot 就说不完整句话。
@@ -178,6 +180,19 @@ VOICE_AGENT_CONFIG = {
         "llm_model": "mimo-v2.6-flash",
         "tts_model": "mimo-v2.5-tts",
         "tts_voice": "冰糖",
+    },
+    # backend="aliyun_deepseek"：阿里语音识别/合成 + DeepSeek 分句流式回复。
+    # 密钥仅从进程环境或项目根目录 .env.local 读取：
+    # DASHSCOPE_API_KEY=... / DEEPSEEK_API_KEY=...（不要写进前端或提交到 Git）
+    "aliyun_deepseek": {
+        "ws_url": "wss://dashscope.aliyuncs.com/api-ws/v1/inference",
+        # 也可使用业务空间专属地址：
+        # wss://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference
+        "asr_model": "qwen-audio-3.1-asr-flash-message",
+        "tts_model": "qwen-audio-3.1-tts-flash",
+        "tts_voice": "longanhuan_v3.1",
+        "llm_base_url": "https://api.deepseek.com",
+        "llm_model": "deepseek-flash",
     },
     "gemini": {
         "api_key": "",                # 或 GEMINI_API_KEY

@@ -31,9 +31,9 @@ class AnnouncementDuplex:
 def test_mimo_every_request_rewrites_and_waits_for_tail(tmp_path):
     async def run():
         agent = make_agent(tmp_path)
-        await agent.join("a", "c", source="auto", visit_id="v")
         duplex = AnnouncementDuplex()
         agent.duplex = duplex
+        await agent.join("a", "c", source="auto", visit_id="v")
         requests = []
 
         async def rewrite(kind, template):
@@ -169,9 +169,9 @@ def test_gemini_uses_live_session_without_mimo_and_ignores_internal_user_memory(
         agent.settings.mimo_api_key = ""
         agent.backend = GeminiLiveBackend(agent.settings, agent.memory)
         agent.live_mode = True
-        await agent.join("a", "c", source="auto", visit_id="v")
         duplex = AnnouncementDuplex()
         agent.duplex = duplex
+        await agent.join("a", "c", source="auto", visit_id="v")
         await agent._wire_live()
         duplex.drained.set()
         for kind in ("enter", "leave"):
@@ -234,8 +234,8 @@ def test_live_timeout_does_not_mute_next_session_callbacks(tmp_path, monkeypatch
         agent.settings.gemini_api_key = "test"
         agent.backend = GeminiLiveBackend(agent.settings, agent.memory)
         agent.live_mode = True
-        await agent.join("a", "c", source="auto", visit_id="v")
         agent.duplex = AnnouncementDuplex()
+        await agent.join("a", "c", source="auto", visit_id="v")
         await agent._wire_live()
         stale_audio = agent.backend._audio_out
         assert not (await agent.speak_announcement("enter", "hi", expected_visit_id="v", timeout=0.01))["ok"]
@@ -264,8 +264,8 @@ def test_live_audio_without_any_text_is_an_empty_ai_result(tmp_path, monkeypatch
         agent.settings.gemini_api_key = "test"
         agent.backend = GeminiLiveBackend(agent.settings, agent.memory)
         agent.live_mode = True
-        await agent.join("a", "c", source="auto", visit_id="v")
         agent.duplex = AnnouncementDuplex()
+        await agent.join("a", "c", source="auto", visit_id="v")
         agent.duplex.drained.set()
         await agent._wire_live()
         task = asyncio.create_task(agent.speak_announcement("enter", "hi", expected_visit_id="v"))
@@ -281,7 +281,8 @@ def test_live_audio_without_any_text_is_an_empty_ai_result(tmp_path, monkeypatch
     asyncio.run(run())
 
 
-def test_manual_leave_cancels_live_audio_push_before_waiting_for_output_lock(tmp_path, monkeypatch):
+@pytest.mark.parametrize("release_push", [False, True])
+def test_manual_leave_drains_live_push_before_closing_reader(tmp_path, monkeypatch, release_push):
     async def run():
         from voice_agent import ws_transport
         from voice_agent.backends.gemini_live import GeminiLiveBackend
@@ -297,18 +298,37 @@ def test_manual_leave_cancels_live_audio_push_before_waiting_for_output_lock(tmp
         agent.backend = GeminiLiveBackend(agent.settings, agent.memory)
         agent.live_mode = True
         await agent.join("a", "c")
-        entered = asyncio.Event()
+        entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        close = agent.backend.aclose
+
+        async def close_after_transport_settles():
+            assert finished.is_set(), "model close raced the in-flight transport deadline"
+            await close()
+
+        monkeypatch.setattr(agent.backend, "aclose", close_after_transport_settles)
 
         async def stalled_push(*args, **kwargs):
             entered.set()
-            await asyncio.Event().wait()
+            try:
+                await release.wait()
+                return {"ok": True}
+            finally:
+                finished.set()
 
         agent.duplex.push_tts_pcm = stalled_push
         await ws._queue.put(json.dumps({"serverContent": {
             "modelTurn": {"parts": [{"inlineData": {"data": base64.b64encode(b"pcm").decode()}}]},
         }}))
         await entered.wait()
-        assert (await asyncio.wait_for(agent.leave(), 0.2))["ok"]
+        leaving = asyncio.create_task(agent.leave())
+        await asyncio.sleep(0)
+        assert not leaving.done()
+        if release_push:
+            release.set()
+        # 未释放时由真实渠道三秒期限终止推送；此处只是失败上限。
+        assert (await asyncio.wait_for(leaving, 5))["ok"]
+        assert finished.is_set()
         assert ws.closed and not agent.status()["joined"]
     asyncio.run(run())
 
@@ -316,9 +336,9 @@ def test_manual_leave_cancels_live_audio_push_before_waiting_for_output_lock(tmp
 def test_announcement_does_not_mix_with_an_existing_reply_tail(tmp_path):
     async def run():
         agent = make_agent(tmp_path)
-        await agent.join("a", "c", source="auto", visit_id="v")
         duplex = AnnouncementDuplex()
         agent.duplex = duplex
+        await agent.join("a", "c", source="auto", visit_id="v")
         rewrites = []
 
         async def rewrite(kind, template):

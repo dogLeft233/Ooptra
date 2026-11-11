@@ -1,0 +1,16 @@
+{
+  "name": "ooptra-dev-tools",
+  "private": true,
+  "engines": {
+    "node": "^22.13.0 || >=24"
+  },
+  "scripts": {
+    "lint": "npm run lint:js",
+    "lint:js": "eslint src/webui/assets tests/browser eslint.config.mjs --max-warnings 0"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "eslint": "10.14.0",
+    "globals": "17.14.0"
+  }
+}

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from support.channel_fixtures import establish_room
 from test_voice_session_regressions import make_agent
 
 from oopz_sdk.services.voice import Voice
@@ -98,7 +99,7 @@ def test_speak_before_join_has_no_model_request_or_memory(tmp_path, monkeypatch,
 def test_speak_without_playback_has_no_request(tmp_path, monkeypatch, backend, state):
     async def run():
         agent = make_agent(tmp_path, backend=backend)
-        agent._joined = True
+        await establish_room(agent)
         agent._connection_ready = state != 'disconnected'
         agent._voice_suspended = state == 'suspended'
         if state == 'no_duplex':

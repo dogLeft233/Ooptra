@@ -89,10 +89,20 @@ Git 镜像仅加速代码传输，Python 依赖与 Chromium 下载仍取决于�
 | `data/names.json` | 昵称缓存，可删除后重新拉取 |
 | `data/voice_memory.jsonl` | 语音共享记忆，删除会清空上下文 |
 | `data/voice_auto_visit.json` | 自动加入次数、冷却和未确认记录，重启保留；不要删除以重置额度 |
-| `logs/oopz_bot.log` | WebUI 读取的运行日志，保留 7 天 |
+| `logs/oopz_bot.log` | WebUI 读取的运行日志；轮转与清理规则见下节 |
 
 升级或迁移前，停止程序并备份 `config.py`、`private_key.py` 与 `data/`。
 自动串门状态异常时先暂停并核对实际房间，恢复步骤见[语音指南](voice-guide.md#状态异常与恢复)。
+
+## 日志与排障证据
+
+当前使用标准库 `logging`，由 `src/core/logger_config.py` 初始化，向 `logs/oopz_bot.log` 与 stderr 输出可读文本。单文件达到约 10 MiB 时轮转，最多保留 5 个备份；初始化时按修改时间清理日志目录中超过 7 天的 `*.log*` 文件。因此既受容量也受清理策略限制，不保证覆盖完整 7 天，清理也不是定时执行。
+
+进程启动前可设置 `BOT_LOG_FILE_LEVEL`（默认 `DEBUG`）、`BOT_LOG_CONSOLE_LEVEL`（默认 `INFO`）、`BOT_SDK_LOG_LEVEL`（默认 `INFO`）。可选值为 `DEBUG`、`INFO`、`WARNING`、`ERROR`、`CRITICAL`，无效值回退默认值；这些是日志门槛，SDK 或模块自身级别也会影响最终输出。修改后重启应用；提高详细程度会增加输出量，并不会自动对旧代码日志脱敏。
+
+排障时先记录版本、时间范围与时区、触发操作、实际房间及可用的请求/会话/回合标识，从 WebUI 日志页或日志文件提取同一操作前后的记录。区分重试、最终失败、用户打断与过期任务丢弃；日志不足时说明缺少哪个阶段，不凭单条错误推断整个链路。提交问题前检查正文、URL 和异常堆栈，删除凭据及私人会话内容。
+
+日志开发规则与字段要求见 [代码要求](coding-standards.md#日志与可观测性)。当前尚未启用结构化 JSONL、队列日志、Vector 或独立指标/调用链存储；多个 worktree 的真实服务联调需分别隔离配置、数据与日志目录，不能复用生产凭据和身份数据库。
 
 ## 故障排查
 

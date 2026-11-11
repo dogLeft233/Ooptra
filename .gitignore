@@ -32,6 +32,7 @@ build/
 .learnings
 .superpowers/
 .browser-ci/
+node_modules/
 
 # === IDE ===
 .vscode/
