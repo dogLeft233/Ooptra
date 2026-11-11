@@ -37,3 +37,5 @@
 同步 `observe/record_output` 是有限本地事务，异步装配可按顺序交给线程；不得并发无序安装观察。`close` 拒绝新请求、结束短 RPC/轮询，等待台账锁释放；不等待第三方在线。原始文件、数据库迁移与降级出口见 [memory](./_internal/memory/README.md)。
 
 公开行为测试：`python -m pytest -q tests/context tests/test_astrbot_context_bridge.py tests/test_astrbot_live_context.py tests/test_memory_recent.py`。覆盖真实 SQLite 回滚、重启、同键冲突、满载补受理、原来源、逐目标重试、增量输入、授权伪造/撤销和旧文件导出。原协议测试继续验证切房、取消、peer 与持久化故障。模块只允许引用 `channels.models` 和公共技术机制。
+
+完整输入的观察事务耐久捕获原来源和稳定 input_ref。无输出终态调用 `finish_input` 采集原输入；正常表达通过 `record_output` 一次合并原输入和确认输出。两者共用输入投递身份，已领取/确认载荷不改写；已采集终态后出现迟到输出只记录独立本地事实，不再次投递问题。容量拒绝保留原载荷，重试不跟随新来源。

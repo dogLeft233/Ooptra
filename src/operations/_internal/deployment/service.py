@@ -157,13 +157,16 @@ class MaintenanceService:
             verified = await asyncio.to_thread(self.backups.inspect, request.backup_id)
             backup_fingerprint = verified.fingerprint
         installed, _ = await asyncio.to_thread(self.installed)
-        plan = MaintenancePlan(uuid.uuid4().hex, request, installed, self._config_revision(),
-            self.platform.clock.time() + 600, ('停止业务资源', '重启应用', '保留身份映射与用户数据'), backup_fingerprint)
-        with mutation_lock(self.root):
-            if not deployment_access(self.root).allowed:
-                raise ValueError('维护任务进行中')
-            atomic_json(self.root / 'data/maintenance/plans' / (plan.plan_id + '.json'), asdict(plan))
-        return plan
+        def persist_plan():
+            with mutation_lock(self.root, blocking=False):
+                if not deployment_access(self.root).allowed:
+                    raise ValueError('维护任务进行中')
+                plan = MaintenancePlan(uuid.uuid4().hex, request, installed, self._config_revision(),
+                    self.platform.clock.time() + 600,
+                    ('停止业务资源', '重启应用', '保留身份映射与用户数据'), backup_fingerprint)
+                atomic_json(self.root / 'data/maintenance/plans' / (plan.plan_id + '.json'), asdict(plan))
+                return plan
+        return await self._run_mutation(persist_plan)
 
     async def execute(self, plan: MaintenancePlan) -> JobRef:
         if not isinstance(plan, MaintenancePlan) or re.fullmatch(r'[a-f0-9]{32}', plan.plan_id) is None:

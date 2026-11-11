@@ -59,6 +59,15 @@ def subtitle_receipt(outcome: ActionOutcome | None, reason: str) -> dict:
 async def commit_output(context, record: OutputRecord):
     """拥有不可取消的SQLite线程直到收尾；流程退出后才允许关闭上下文。"""
     task = asyncio.create_task(asyncio.to_thread(context.record_output, record), name='app-context-commit')
+    return await _wait_context_write(task, record.action_id)
+
+
+async def finish_input(context, input_ref):
+    task = asyncio.create_task(asyncio.to_thread(context.finish_input, input_ref), name='app-input-commit')
+    return await _wait_context_write(task, input_ref)
+
+
+async def _wait_context_write(task, action_id):
     cancelled = None
     while not task.done():
         try:
@@ -71,7 +80,7 @@ async def commit_output(context, record: OutputRecord):
         try:
             task.result()
         except Exception:
-            logger.exception('event=context.commit.failed_after_cancellation action_id=%s', record.action_id)
+            logger.exception('event=context.commit.failed_after_cancellation action_id=%s', action_id)
         raise cancelled
     return task.result()
 
@@ -240,6 +249,8 @@ async def run_cascade(*, backend, context, behavior, channel,
                     behavior.feedback(actual if isinstance(actual, PlaybackResult) else
                         NotExecuted(intent.action_id, 'execution' if execution_started else 'generation', end_reason))
                 behavior.finish_attempt(AttemptFinished(permit, end_reason, time.monotonic()))
+                if recognized is not None and not commit_started:
+                    await finish_input(context, trigger_id)
                 if observations is not None:
                     observations.record(trigger_id=trigger_id, session_id=session.session_id,
                         backend=backend.name, reason=trace_reason, outcome=end_reason,

@@ -30,3 +30,5 @@ switching/checking → rolling_back → rolled_back | failed
 ## 验证
 
 `tests/operations/test_versioned_maintenance.py` 覆盖版本、幂等、变更屏障、取消、部分静默和进程身份。`tests/test_maintenance_rehearsal.py` 在隔离 Git 仓库启动真实子进程与 HTTP 服务，覆盖等待父提交、候选崩溃、未就绪、无监督和回滚。真实部署、账号、更新源和数据不用于故障注入。
+
+维护计划的变更锁、配置摘要和计划落盘在线程内执行，复用维护模块拥有的 `_run_mutation` 取消收尾。锁忙明确拒绝，不在事件循环阻塞等待正在异步应用的配置事务；重复取消也等待已受理落盘完成。

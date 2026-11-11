@@ -125,7 +125,7 @@ class ContextLedger:
     def _insert_history(db, identifier, row, room, session, source):
         db.execute("INSERT OR IGNORE INTO history(entry_id,room,session,source,role,content,user_key,channel_key,ts) VALUES (?,?,?,?,?,?,?,?,?)", (identifier, room, session, source, row["role"], row["content"], row.get("user_key", ""), row.get("channel_key", ""), row.get("ts", time.time())))
 
-    def commit(self, key: str, payload: Any, turn: ConfirmedTurn, *, room="", session="", source="", input_ref="", event=None) -> RecordReceipt:
+    def commit(self, key: str, payload: Any, turn: ConfirmedTurn, *, room="", session="", source="", input_ref="", event=None, defer_event=False, input_event_ref="") -> RecordReceipt:
         fingerprint = encoded(payload)
         with self.transaction() as db:
             prior = db.execute("SELECT payload,receipt,event FROM idempotency WHERE key=?", (key,)).fetchone()
@@ -142,7 +142,18 @@ class ContextLedger:
                 if turn.confirmation == "completed":
                     self._insert_history(db, "output:" + key, asdict(MemoryTurn("assistant", turn.reply_text, turn.user_key, turn.channel_key, time.time())), room, session, source)
                 receipt = RecordReceipt(bool(turn.user_text.strip()), turn.confirmation == "completed")
-            if event:
+            if input_event_ref and not prior:
+                original = db.execute("SELECT event FROM idempotency WHERE key=?",
+                                      ("observation:" + input_event_ref,)).fetchone()
+                if original is not None:
+                    event = json.loads(original[0]) if original[0] else None
+                    if event:
+                        event["payload"]["reply_text"] = turn.reply_text[:4000]
+                        event["payload"]["interrupted"] = turn.confirmation == "interrupted"
+                        # 首个终态拥有原输入的外部采集；已领取/确认的载荷永不改写或再投。
+                        if db.execute("SELECT 1 FROM deliveries WHERE id=?", (event["request_id"],)).fetchone():
+                            event = None
+            if event and not defer_event:
                 self._validate_event(event)
                 count = db.execute("SELECT COUNT(*) FROM deliveries WHERE state IN ('pending','retrying')").fetchone()[0]
                 if count >= 128:
@@ -153,8 +164,16 @@ class ContextLedger:
             db.execute("INSERT OR REPLACE INTO idempotency VALUES (?,?,?,?)", (key, fingerprint, encoded(asdict(receipt)), encoded(event) if event else None))
             return receipt
 
-    def commit_input(self, identifier, turn, *, room, session):
-        return self.commit("observation:" + identifier, asdict(turn), turn, room=room, session=session, input_ref=identifier)
+    def commit_input(self, identifier, turn, *, room, session, event=None):
+        return self.commit("observation:" + identifier, asdict(turn), turn, room=room, session=session,
+                           input_ref=identifier, event=event, defer_event=True)
+
+    def finish_input(self, identifier):
+        with self.transaction() as db:
+            if not db.execute("SELECT 1 FROM idempotency WHERE key=?", ("observation:" + identifier,)).fetchone():
+                return RecordReceipt(False, False)
+        return self.commit("input-delivery:" + identifier, {"input_ref": identifier},
+                           ConfirmedTurn("", "", "silent"), input_event_ref=identifier)
 
     def ready(self):
         with self.transaction() as db:

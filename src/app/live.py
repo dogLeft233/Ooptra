@@ -38,6 +38,7 @@ class LiveFlow:
         self.live = None
         self._reader = None
         self._outputs: set[asyncio.Task] = set()
+        self._input_commits: set[asyncio.Task] = set()
         self._actions: set[str] = set()
         self._metadata = {}
         self._prepared = {}
@@ -135,6 +136,7 @@ class LiveFlow:
                     await event.job.aclose()
                     self.behavior.feedback(NotExecuted(event.action_id, "capacity", "busy"))
                     continue
+                self._active_turns.add(self._key(event))
                 task = asyncio.create_task(self._play(event), name="app-live-playback")
                 self._outputs.add(task)
                 task.add_done_callback(self._observe)
@@ -143,7 +145,17 @@ class LiveFlow:
                 prepared = await self._prepare(event, complete=True)
                 await self.live.authorize_input(event.proposal, prepared,
                     tools=self.context.tools(prepared) if prepared is not None else None)
-                self._finalized.setdefault(self._key(event), asyncio.Event()).set()
+                key = self._key(event)
+                if event.kind == "turn_finished" and key not in self._active_turns and not event.internal:
+                    from app.flows import finish_input
+                    if len(self._input_commits) >= 8:
+                        await finish_input(self.context, key)
+                    else:
+                        task = asyncio.create_task(finish_input(self.context, key), name="app-live-input-commit")
+                        self._input_commits.add(task)
+                        task.add_done_callback(self._observe)
+                        task.add_done_callback(self._input_commits.discard)
+                self._finalized.setdefault(key, asyncio.Event()).set()
             elif event.kind == "control_proposed":
                 if event.tool_ref in self._control_tasks:
                     continue
@@ -359,6 +371,7 @@ class LiveFlow:
         for task in outputs:
             task.cancel()
         await asyncio.gather(*outputs, return_exceptions=True)
+        await asyncio.gather(*tuple(self._input_commits), return_exceptions=True)
         if self.live is not None:
             await self.live.aclose()
         for future in self._manual.values():

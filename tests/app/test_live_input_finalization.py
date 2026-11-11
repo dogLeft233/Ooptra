@@ -163,3 +163,20 @@ def test_joined_live_storage_refresh_restores_the_new_context_before_return(tmp_
         finally:
             await agent.stop()
     asyncio.run(scenario())
+
+
+def test_live_probability_rejection_collects_only_final_complete_input(tmp_path):
+    async def scenario():
+        context, socket, flow = await open_flow(tmp_path, shared=True, probability=0)
+        try:
+            await socket.deliver(audio_message(user_text="这是"))
+            assert await context.bridge.poll(wait=0) == []
+            await socket.deliver({"serverContent": {"inputTranscription": {"text": "完整的问题"}, "turnComplete": True}})
+            events = await context.bridge.poll(wait=1)
+            assert len(events) == 1
+            assert events[0]["payload"]["user_text"] == "这是完整的问题"
+            assert events[0]["payload"]["reply_text"] == ""
+        finally:
+            await flow.close()
+            await context.close()
+    asyncio.run(scenario())

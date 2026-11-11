@@ -71,8 +71,15 @@ class ContextService:
         active = (observation.session.session_id not in self._retired_sessions and
                   (current is None or current[0].session == observation.session or observation.kind == "session"))
         if observation.kind == "recognized" and observation.complete:
+            source = self.bridge.context
+            event = None
+            if (observation.text.strip() and source.get("ok") is True and self.bridge._room == asdict(observation.session.room_target)
+                    and ("memory_scopes" not in source or (source.get("memory_scopes") and source.get("provider")))):
+                event = self.bridge._event("commit", {"user_text": observation.text[:4000],
+                    "reply_text": "", "speaker": observation.user_key, "interrupted": False})
+                event["request_id"] = "input-" + observation.input_ref
             self._ledger.commit_input(observation.input_ref, ConfirmedTurn(observation.text, "", "silent", observation.user_key,
-                                       f"{observation.session.room_target.area}/{observation.session.room_target.channel}"), room=room, session=observation.session.session_id)
+                                       f"{observation.session.room_target.area}/{observation.session.room_target.channel}"), room=room, session=observation.session.session_id, event=event)
             self._inputs[observation.input_ref] = observation
             if len(self._inputs) > 4096:
                 self._inputs.pop(next(iter(self._inputs)))
@@ -159,7 +166,17 @@ class ContextService:
         receipt = self._ledger.commit("action:" + record.action_id, asdict(record), record.turn,
                                       room=encoded(asdict(record.session.room_target)), session=record.session.session_id,
                                       source=record.context_ref.binding_id if record.context_ref else "",
-                                      input_ref=record.input_ref, event=event)
+                                      input_ref=record.input_ref, event=event,
+                                      input_event_ref=record.input_ref if record.turn.user_text.strip() else "")
+        if self._loop and self._loop.is_running():
+            self._loop.call_soon_threadsafe(self.bridge.publish_committed)
+        else:
+            self.bridge.publish_committed()
+        return receipt
+
+    def finish_input(self, input_ref: str):
+        """无输出终态采集原完整输入；源在observe时绑定，与输出共享耐久投递身份。"""
+        receipt = self._ledger.finish_input(input_ref)
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self.bridge.publish_committed)
         else:

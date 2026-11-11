@@ -281,3 +281,62 @@ def test_preparation_excludes_current_input_by_identity_without_removing_equal_o
         finally:
             await context.close()
     asyncio.run(run())
+
+
+def test_silent_input_delivery_binds_original_source_and_late_output_does_not_repeat_user(tmp_path):
+    from support.context_fixtures import prepare_source
+    async def scenario():
+        path = str(tmp_path / "memory.jsonl")
+        context = create_context_service(path)
+        ref = session()
+        await prepare_source(context.bridge, {"ok": True, "provider": "memory_companion",
+            "memory_scopes": [{"umo": "original"}]}, "area", "room")
+        original_source = context.bridge.session_id
+        context.observe(Observation("input", ref, "wire", 1, "recognized", "请调小音量", "oopz:original", "input"))
+        assert await context.bridge.poll(wait=0) == []
+        await prepare_source(context.bridge, {"ok": True, "provider": "other",
+            "memory_scopes": [{"umo": "replacement"}]}, "area", "room")
+        receipt = context.finish_input("input")
+        event = (await context.bridge.poll(wait=0))[0]
+        assert event["session_id"] == original_source
+        assert event["scope"]["memory_scopes"] == [{"umo": "original"}]
+        assert event["payload"] == {"user_text": "请调小音量", "reply_text": "",
+                                    "speaker": "oopz:original", "interrupted": False}
+        assert context.bridge.resolve(event["request_id"], {"ok": True, "state": "stored"})
+        assert context.finish_input("input") == receipt
+        prepared = await context.prepare_context(ContextRequest(ref))
+        context.record_output(OutputRecord("late-output", ref,
+            ConfirmedTurn("请调小音量", "好了", "completed", "oopz:original", "area/room"),
+            ActionOutcome("late-output", "completed", ref), prepared.context_ref, "input"))
+        await asyncio.sleep(0)
+        assert await context.bridge.poll(wait=0) == []
+        assert [row["content"] for row in context.history.recent()] == ["请调小音量", "好了"]
+        await context.close()
+        restored = create_context_service(path)
+        restored.finish_input("input")
+        assert await restored.bridge.poll(wait=0) == []
+        assert restored.delivery(receipt.delivery_id).state == "confirmed"
+        await restored.close()
+    asyncio.run(scenario())
+
+
+def test_normal_expression_collects_input_and_reply_once_in_original_wire_event(tmp_path):
+    from support.context_fixtures import prepare_source
+    async def scenario():
+        context = create_context_service(str(tmp_path / "memory.jsonl"))
+        ref = session()
+        await prepare_source(context.bridge, {"ok": True, "provider": "memory_companion",
+            "memory_scopes": [{"umo": "original"}]}, "area", "room")
+        context.observe(Observation("input", ref, "wire", 1, "recognized", "question", "speaker", "input"))
+        prepared = await context.prepare_context(ContextRequest(ref))
+        record = OutputRecord("output", ref, ConfirmedTurn("question", "answer", "completed", "speaker"),
+                              ActionOutcome("output", "completed", ref), prepared.context_ref, "input")
+        context.record_output(record)
+        context.finish_input("input")
+        await asyncio.sleep(0)
+        events = await context.bridge.poll(wait=0)
+        assert len(events) == 1
+        assert events[0]["payload"]["user_text"] == "question"
+        assert events[0]["payload"]["reply_text"] == "answer"
+        await context.close()
+    asyncio.run(scenario())
