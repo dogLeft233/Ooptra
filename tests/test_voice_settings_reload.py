@@ -240,3 +240,61 @@ def test_reload_settings_is_noop_when_config_unchanged(
     result = asyncio.run(rt.reload_settings())
     assert result["changed"] == []
     assert result["notes"] == []
+
+
+def test_reasoning_effort_hot_reload_applies_without_replacing_backend(monkeypatch, tmp_path):
+    from operations.models import ReasoningEffort
+
+    rt = _make_runtime(monkeypatch, _settings(tmp_path, backend="aliyun_deepseek"))
+    original_backend = rt.agent.backend
+    fresh = _settings(tmp_path, backend="aliyun_deepseek", deepseek_reasoning_effort=ReasoningEffort.HIGH)
+    monkeypatch.setattr(runtime_module, "load_voice_agent_settings", lambda: (fresh, VoiceApiSettings()))
+    result = asyncio.run(rt.reload_settings())
+    assert not result["hot_reload_failed"]
+    assert result["restart_keys"] == []
+    assert rt.agent.backend is original_backend
+    assert rt.agent.backend.settings.deepseek_reasoning_effort == ReasoningEffort.HIGH
+    assert any("下一次" in note for note in result["notes"])
+
+
+@pytest.mark.parametrize("changes", [
+    {"deepseek_reasoning_effort": "high", "output_volume": 25},
+    {"output_volume": 25},
+    {"deepseek_reasoning_effort": "high"},
+])
+def test_combined_deferred_settings_do_not_cancel_active_flows(monkeypatch, tmp_path, changes):
+    async def run():
+        from operations.models import ReasoningEffort
+        rt = _make_runtime(monkeypatch, _settings(tmp_path, backend="aliyun_deepseek"))
+        original_backend = rt.agent.backend
+        finished = []
+        release = asyncio.Event()
+        async def flow(name):
+            await release.wait()
+            finished.append(name)
+        announcement = asyncio.create_task(flow("announcement"))
+        control = asyncio.create_task(flow("control"))
+        rt.agent._announcement_task = announcement
+        rt.agent._voice_control_task = control
+        await asyncio.sleep(0)
+        options = dict(changes)
+        if "deepseek_reasoning_effort" in options:
+            options["deepseek_reasoning_effort"] = ReasoningEffort(options["deepseek_reasoning_effort"])
+        fresh = _settings(tmp_path, backend="aliyun_deepseek", **options)
+        monkeypatch.setattr(runtime_module, "load_voice_agent_settings", lambda: (fresh, VoiceApiSettings()))
+        try:
+            result = await rt.reload_settings()
+            assert not result["hot_reload_failed"]
+            assert rt.agent.backend is original_backend
+            assert not announcement.done() and not control.done()
+            release.set()
+            await asyncio.gather(announcement, control)
+            assert sorted(finished) == ["announcement", "control"]
+            assert rt.agent.backend.settings.deepseek_reasoning_effort == fresh.deepseek_reasoning_effort
+            assert rt.agent.settings.output_volume == fresh.output_volume
+            if "output_volume" in changes:
+                assert any("25%" in note for note in result["notes"])
+        finally:
+            release.set()
+            await rt.stop()
+    asyncio.run(run())

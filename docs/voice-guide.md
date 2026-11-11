@@ -90,7 +90,14 @@ DEEPSEEK_API_KEY=你的DeepSeek密钥
 启用 `intermediate_result_enabled=true`，临时转录按句 ID 覆盖；本地切句结束并收到
 服务端最终转录后才交决策和记忆，临时转录不会触发回复、控制或持久写入。
 仍保留本地 `silence_ms` 的停顿确认等待；本轮没有缩短它，也未向 WebUI 增加临时字幕。
-DeepSeek 请求显式使用 `thinking={"type":"enabled"}`、`reasoning_effort="low"`。
+在「配置 → 语音模型」的 DeepSeek 设置中选择「思考强度」：关闭（`none`）、
+低（`low`，默认）、高（`high`）、最高（`max`）。点击保存并确认应用成功后，
+从下一次生成回复生效，后续回复持续使用此档位；正在生成的任务保留原配置，无需退房或重启。
+仅适用于 `aliyun_deepseek` 后端。对应 `aliyun_deepseek.reasoning_effort`，不支持自定义值；
+更高强度通常增加等待时间，仍受表达任务期限和生成长度上限约束，不保证一定能产出完整回答。
+
+DeepSeek 请求显式传递所选 `reasoning_effort`：`none` 时 `thinking={"type":"disabled"}`，
+其他档位为 `thinking={"type":"enabled"}`。
 只把正式回答 `content` 送入语音，`reasoning_content` 不进入 TTS、字幕、日志或权威历史；
 正式回答出现思考标签或只返回推理而无正文时失败关闭，不猜测正文。
 正常回复通过 DeepSeek SSE 按完整句送入双向流式 TTS，音频到达后即推送房间，

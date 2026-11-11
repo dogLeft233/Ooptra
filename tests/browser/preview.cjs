@@ -51,6 +51,19 @@ const {chromium} = require(process.env.OOPTRA_PLAYWRIGHT_MODULE || 'playwright')
     await page.locator('.nav-item[data-page="config"]').click();
     await page.waitForFunction(() => document.querySelectorAll('#config-groups .cfg-group').length > 0);
     await page.locator('#config-tabs [data-tab="voice"]').click();
+    const backend = page.locator('[data-group="voice"][data-field="backend"] select');
+    await backend.selectOption('aliyun_deepseek');
+    const effort = page.locator('[data-group="voice"][data-field="aliyun_deepseek.reasoning_effort"] select');
+    assert.equal(await effort.inputValue(), 'low');
+    assert.deepEqual(await effort.locator('option').evaluateAll(options => options.map(option => option.value)), ['none', 'low', 'high', 'max']);
+    for (const value of ['high', 'max', 'none', 'low']) {
+      await effort.selectOption(value);
+      await page.locator('#config-save').click();
+      await page.waitForFunction(() => !document.querySelector('#config-save').disabled);
+      await page.locator('#tool-reload').click();
+      await page.waitForFunction(value => document.querySelector('[data-field="aliyun_deepseek.reasoning_effort"] select').value === value, value);
+      if (process.env.OOPTRA_BROWSER_ARTIFACTS) await page.screenshot({path: path.join(process.env.OOPTRA_BROWSER_ARTIFACTS, `thinking-${value}.png`), fullPage: true});
+    }
     const voiceVolume = page.locator('[data-group="voice"][data-field="output_volume"] input');
     assert.equal(await voiceVolume.inputValue(), '40');
     await voiceVolume.fill('25');

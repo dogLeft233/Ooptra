@@ -9,7 +9,7 @@ from typing import Any
 from dotenv import dotenv_values
 
 from core.paths import project_path
-from operations.models import VoiceAgentSettings, VoiceApiSettings
+from operations.models import ReasoningEffort, VoiceAgentSettings, VoiceApiSettings
 
 
 def _get(cfg: dict[str, Any], key: str, default: Any) -> Any:
@@ -90,6 +90,7 @@ def load_voice_agent_settings(*, runtime_config=None, environ=None, local_enviro
         aliyun_tts_voice=str(cascade.get("tts_voice") or VoiceAgentSettings.aliyun_tts_voice),
         deepseek_base_url=str(cascade.get("llm_base_url") or VoiceAgentSettings.deepseek_base_url),
         deepseek_model=str(cascade.get("llm_model") or VoiceAgentSettings.deepseek_model),
+        deepseek_reasoning_effort=ReasoningEffort(cascade.get("reasoning_effort", "low")),
         gemini_api_key=read_environment("GEMINI_API_KEY", str(gemini.get("api_key", "") or "")),
         gemini_base_url=str(gemini.get("base_url", VoiceAgentSettings.gemini_base_url) or VoiceAgentSettings.gemini_base_url),
         gemini_model=str(gemini.get("model", "gemini-2.0-flash-live-001") or "gemini-2.0-flash-live-001"),

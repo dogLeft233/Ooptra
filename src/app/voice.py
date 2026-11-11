@@ -95,37 +95,9 @@ def _dump_remote_pcm(uid: str, pcm: bytes, sample_rate: int) -> None:
     _pcm_dump["ts"].write(f"{time.monotonic():.3f}\t{uid}\t{len(pcm)}\t{sample_rate}\n")
     _pcm_dump["ts"].flush()
 
-# 改了这些字段就必须重建记忆 / VAD / 已建立的模型会话，否则旧值继续生效
+# 记忆与音频输入派生对象由使用者重建；模型会话规则由生成拥有。
 _MEMORY_FIELDS = {"memory_path", "memory_max_turns"}
 _VAD_FIELDS = {"sample_rate_in", "silence_ms", "max_utterance_ms"}
-_SESSION_FIELDS = {
-    "voice_volume_enabled",
-    "voice_leave_enabled",
-    "persona",
-    "proxy",
-    "gemini_api_key",
-    "gemini_base_url",
-    "gemini_model",
-    "gemini_voice",
-    "openai_api_key",
-    "openai_base_url",
-    "openai_realtime_model",
-    "openai_voice",
-    "mimo_api_key",
-    "mimo_base_url",
-    "mimo_asr_model",
-    "mimo_llm_model",
-    "mimo_tts_model",
-    "mimo_tts_voice",
-    "dashscope_api_key",
-    "dashscope_ws_url",
-    "aliyun_asr_model",
-    "aliyun_tts_model",
-    "aliyun_tts_voice",
-    "deepseek_api_key",
-    "deepseek_base_url",
-    "deepseek_model",
-}
 
 
 class VoiceCoordinator:
@@ -495,15 +467,19 @@ class VoiceCoordinator:
             tuple(self.settings.listen_only_uids), minimum, _MIN_UTTERANCE_RMS)
 
     async def refresh(self, changed: list[str]) -> list[str]:
-        # 音量只改播放增益；不取消播报，也不等待进退房或重建模型会话。
-        if changed == ["output_volume"]:
-            return [await self._apply_output_volume()]
+        update = self.backend.update_settings(self.settings, tuple(changed))
+        if set(changed) <= update.deferred_fields | {"output_volume"}:
+            notes = list(update.notes)
+            if "output_volume" in changed:
+                notes.append(await self._apply_output_volume())
+            return notes
         await self._cancel_voice_control()
         await self._cancel_announcement()
         async with self._operation_lock:
-            return await self._refresh_locked(changed)
+            return await self._refresh_locked(changed, update.reopen_live, update.notes)
 
-    async def _refresh_locked(self, changed: list[str]) -> list[str]:
+    async def _refresh_locked(self, changed: list[str], reopen_live: bool,
+                              generation_notes: tuple[str, ...]) -> list[str]:
         """配置就地更新后，把派生对象与会话同步到新值。
 
         返回给用户看的提示（哪些东西被重建了）。``changed`` 是字段名列表。
@@ -511,7 +487,7 @@ class VoiceCoordinator:
         if not changed:
             return []
         changed_set = set(changed)
-        notes: list[str] = []
+        notes = list(generation_notes)
 
         if "output_volume" in changed_set:
             notes.append(await self._apply_output_volume())
@@ -554,7 +530,7 @@ class VoiceCoordinator:
                 await self._stop_round_worker()
             notes.append("语音后端已切换")
 
-        session_dirty = bool(_SESSION_FIELDS & changed_set) or "backend" in changed_set
+        session_dirty = reopen_live or "backend" in changed_set
         if not session_dirty:
             return notes
 

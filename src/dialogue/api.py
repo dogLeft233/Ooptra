@@ -28,6 +28,7 @@ from dialogue.models import (
     Recognition,
     Reject,
     ResolveReceipt,
+    SettingsUpdate,
     ToolRef,
     TranscriptRevision,
 )
@@ -62,6 +63,11 @@ class DialogueSettings(Protocol):
 
     @property
     def deepseek_model(self) -> str: ...
+
+    @property
+    def deepseek_reasoning_effort(self) -> str:
+        """已解析的 none/low/high/max；生成任务复制此配置。"""
+        ...
 
     @property
     def gemini_api_key(self) -> str: ...
@@ -197,6 +203,15 @@ class VoiceBackend:
 
     name: str = "base"
     settings: DialogueSettings
+
+    def update_settings(self, settings: DialogueSettings, changed: tuple[str, ...]) -> SettingsUpdate:
+        """应用已解析设置，返回无损延后字段及当前Live是否失效。
+
+        同步且不创建任务、不关闭资源；新级联任务继续复制本次配置。
+        调用方按原会话停止跨模块流程后，才重开已失效Live；无需理解供应商字段。
+        配置版本与磁盘持久化仍由维护模块拥有。
+        """
+        raise NotImplementedError
 
     def capabilities(self) -> DialogueCapabilities:
         """声明可调用能力，不由调用方猜测供应商名。"""

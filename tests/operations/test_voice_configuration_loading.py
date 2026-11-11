@@ -60,3 +60,37 @@ assert VoiceAgentSettings().enabled is False
     result = subprocess.run([sys.executable, "-c", script], env={**os.environ, "PYTHONPATH": str(source)},
                             capture_output=True, text=True, timeout=5)
     assert result.returncode == 0, result.stderr
+
+
+def test_reasoning_effort_saves_and_loads_through_public_configuration(tmp_path):
+    from operations import create_configuration
+    from operations.models import ConfigurationChange
+    from webui.config_editor import GROUP_SOURCES, _normalize_updates
+
+    path = tmp_path / "config.py"
+    path.write_text('VOICE_AGENT_CONFIG = {"aliyun_deepseek": {}}\n')
+    runtime = SimpleNamespace(VOICE_AGENT_CONFIG={"aliyun_deepseek": {}})
+    service = create_configuration(path=path, runtime_config=lambda: runtime)
+    for effort in ("none", "low", "high", "max"):
+        update = _normalize_updates({"voice": {"aliyun_deepseek.reasoning_effort": effort}})
+        service.save_fields(ConfigurationChange.from_normalized(update, sources=GROUP_SOURCES))
+        loaded, _ = load_voice_agent_settings(runtime_config=runtime, environ={}, local_environment={})
+        assert loaded.deepseek_reasoning_effort == effort
+        disk = {}
+        exec(path.read_text(), disk)
+        assert disk["VOICE_AGENT_CONFIG"]["aliyun_deepseek"]["reasoning_effort"] == effort
+
+
+def test_invalid_reasoning_effort_is_rejected_at_configuration_boundary():
+    import pytest
+
+    from webui.config_editor import _normalize_updates
+
+    with pytest.raises(ValueError):
+        _normalize_updates({"voice": {"aliyun_deepseek.reasoning_effort": "typo"}})
+    with pytest.raises(ValueError):
+        load_voice_agent_settings(runtime_config=SimpleNamespace(
+            VOICE_AGENT_CONFIG={"aliyun_deepseek": {"reasoning_effort": "typo"}}),
+            environ={}, local_environment={})
+    defaults, _ = load_voice_agent_settings(runtime_config=SimpleNamespace(), environ={}, local_environment={})
+    assert defaults.deepseek_reasoning_effort == "low"
