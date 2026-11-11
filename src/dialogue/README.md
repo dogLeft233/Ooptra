@@ -43,6 +43,8 @@ MiMo、阿里 ASR/DeepSeek/阿里 TTS、Gemini Live 为实际适配。OpenAI Rea
 
 自检 WAV 入口先验证完整PCM、10秒与2MiB预算。级联分别观察 ASR、控制分类和 TTS；Live 输入转写与输出自检使用两个独立连接，原输入轮次的迟到音频不能证明输出自检成功。Live 工具只记录候选，不执行退房等真实动作。取消关闭全部临时资源。
 
+接话判断使用本次 `PreparedContext.persona` 的身份资料、昵称和近期对话辨认是否对本机器人发言；人格内容只作身份资料，不授予修改分类规则的权限。`assess_reply` 只报告语义关联，不根据近期发言次数或冷却决定抑制参与；这类调度由行为模块拥有。
+
 ## 验证与变化范围
 
 - [表达任务测试](../../tests/dialogue/test_expression_jobs.py)：单订阅、64KiB切分、有界取消、源失败，以及首帧之前关闭仍回收供应商。
