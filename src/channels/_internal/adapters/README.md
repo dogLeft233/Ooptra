@@ -16,7 +16,7 @@
 
 账号绑定事实、房间事实和模型任务分开：本能力只管理账号/事件连接；房间会话与播放仍归上层 channels 会话/输出能力。文字接入 Oopz→OneBot→AstrBot→OneBot→Oopz 原路径保持，AstrBot 是该路径的对话拥有者，本地不再次生成同一条消息。
 
-共享画面的观看连接由浏览器适配拥有：复用同时匹配会话键、应用、房间、令牌、观看者及发布者；清理前固定操作代次，退房使等待中的旧观看请求失效。抽帧只使用 `requestVideoFrameCallback` 确认过的解码帧，三秒内没有新帧即不可用；反复捕获不会刷新旧图年龄。内部回执携带 `frame_age_ms`，渠道校验后保守恢复原捕获时间，不把 RPC 返回时间当作新画面。验证入口为 `tests/browser/screen-viewer-lifecycle.cjs` 和 `tests/channels/test_screen_capture.py`。
+共享画面的观看连接由浏览器适配拥有：复用同时匹配会话键、应用、房间、令牌、观看者及发布者；清理前固定操作代次，退房使等待中的旧观看请求失效。在途关闭保留原连接并由并发关闭请求共同观察，失败后仍可重试，不以清空当前指针冒充断开。抽帧只使用 `requestVideoFrameCallback` 确认过的解码帧，三秒内没有新帧即不可用；反复捕获不会刷新旧图年龄。内部回执携带 `frame_age_ms`，渠道校验后保守恢复原捕获时间，不把 RPC 返回时间当作新画面。验证入口为 `tests/browser/screen-viewer-lifecycle.cjs` 和 `tests/channels/test_screen_capture.py`。
 
 ## 验证
 

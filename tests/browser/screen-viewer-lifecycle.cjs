@@ -9,7 +9,7 @@ const {chromium} = require(process.env.OOPTRA_PLAYWRIGHT_MODULE || 'playwright')
   const browser = await chromium.launch({headless: true, channel: process.env.OOPTRA_BROWSER_CHANNEL});
   const failures = [];
   try {
-    for (const scenario of ['credentials', 'close-during-replace', 'stale-frame']) {
+    for (const scenario of ['credentials', 'close-during-replace', 'failed-close-retry', 'stale-frame']) {
       const page = await browser.newPage();
       const errors = [];
       page.on('pageerror', error => errors.push(error.message));
@@ -25,14 +25,14 @@ const {chromium} = require(process.env.OOPTRA_PLAYWRIGHT_MODULE || 'playwright')
           const user = {uid: 'publisher', hasVideo: true, videoTrack: {getMediaStreamTrack: () => track}};
           eval('client = {remoteUsers: []}');
           eval('client').remoteUsers = [user];
-          const painting = setInterval(() => track.requestFrame(), 20);
+          const painting = setInterval(() => {paint.fillRect(0, 0, 320, 180); track.requestFrame();}, 20);
           const first = await window.agoraCaptureScreen();
           clearInterval(painting);
           await new Promise(resolve => setTimeout(resolve, 3200));
           const stale = await window.agoraCaptureScreen();
           const stillStale = await window.agoraCaptureScreen();
           paint.fillStyle = 'blue'; paint.fillRect(0, 0, 320, 180);
-          const refreshing = setInterval(() => track.requestFrame(), 20);
+          const refreshing = setInterval(() => {paint.fillRect(0, 0, 320, 180); track.requestFrame();}, 20);
           const renewed = await window.agoraCaptureScreen();
           clearInterval(refreshing);
           track.stop();
@@ -42,6 +42,7 @@ const {chromium} = require(process.env.OOPTRA_PLAYWRIGHT_MODULE || 'playwright')
         let releaseLeave, leaveStarted;
         const entered = new Promise(resolve => {leaveStarted = resolve;});
         let stall = false;
+        let failLeave = false;
         const clients = [];
         window.AgoraRTC = {createClient: () => {
           const rtc = {connectionState: 'DISCONNECTED', remoteUsers: [{uid: 'publisher', hasVideo: true}],
@@ -49,6 +50,7 @@ const {chromium} = require(process.env.OOPTRA_PLAYWRIGHT_MODULE || 'playwright')
             async join(...args) {joins.push(args); this.connectionState = 'CONNECTED';},
             async leave() {
               if (stall) {leaveStarted(); await new Promise(resolve => {releaseLeave = resolve;});}
+              if (failLeave) throw new Error('fixture leave failed');
               this.connectionState = 'DISCONNECTED';
             }};
           clients.push(rtc);
@@ -65,25 +67,43 @@ const {chromium} = require(process.env.OOPTRA_PLAYWRIGHT_MODULE || 'playwright')
         stall = true;
         const pending = window.agoraWatchScreen({...base, key: 'replacement'});
         await entered;
-        const closed = await window.agoraCloseScreen();
+        let settled = false;
+        const closing = window.agoraCloseScreen().then(result => {settled = true; return result;});
+        await Promise.resolve();
+        await Promise.resolve();
+        const acknowledgedBeforeCleanup = settled;
         stall = false;
+        failLeave = scenario === 'failed-close-retry';
         releaseLeave();
+        const closed = await closing;
         const replaced = await pending;
-        return {closed, replaced, active: clients.filter(rtc => rtc.connectionState === 'CONNECTED').length};
+        const activeBeforeRetry = clients.filter(rtc => rtc.connectionState === 'CONNECTED').length;
+        failLeave = false;
+        const retried = await window.agoraCloseScreen();
+        return {closed, replaced, acknowledgedBeforeCleanup, activeBeforeRetry, retried,
+          active: clients.filter(rtc => rtc.connectionState === 'CONNECTED').length};
       }, scenario);
       try {
         if (scenario === 'credentials') {
           assert.deepEqual(result.joins.map(row => [row[1], row[2]]), [
             ['room', 'token-1'], ['room', 'token-2'], ['room-2', 'token-2']]);
         } else if (scenario === 'close-during-replace') {
+          assert.equal(result.acknowledgedBeforeCleanup, false);
           assert.equal(result.closed.ok, true);
           assert.equal(result.replaced.ok, false);
           assert.equal(result.active, 0, 'a completed close must invalidate pending replacement');
+        } else if (scenario === 'failed-close-retry') {
+          assert.equal(result.acknowledgedBeforeCleanup, false);
+          assert.equal(result.closed.ok, false, 'concurrent close must observe the pending leave failure');
+          assert.equal(result.replaced.ok, false);
+          assert.equal(result.activeBeforeRetry, 1);
+          assert.equal(result.retried.ok, true);
+          assert.equal(result.active, 0, 'failed cleanup must retain its client for a later retry');
         } else {
-          assert.equal(result.first, 'captured');
+          assert.equal(result.first, 'captured', JSON.stringify(result));
           assert.equal(result.stale, 'unavailable', 'a live track cannot prove the retained decoded frame is fresh');
           assert.equal(result.stillStale, 'unavailable', 'repeated capture must not refresh a retained image');
-          assert.equal(result.renewed, 'captured');
+          assert.equal(result.renewed, 'captured', JSON.stringify(result));
         }
         assert.deepEqual(errors, []);
         if (process.env.OOPTRA_BROWSER_ARTIFACTS) {

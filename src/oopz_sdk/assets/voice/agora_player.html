@@ -1210,17 +1210,28 @@ let screenClient = null;
 let screenKey = "";
 let screenPublisher = "";
 let screenConnection = null;
+let screenRetiring = null;
+let screenClosing = null;
 let screenEpoch = 0;
 window.agoraCloseScreen = async () => {
-  const epoch = ++screenEpoch;
+  screenEpoch++;
   window.agoraClearScreen();
-  const previous = screenClient;
+  if (screenClient) screenRetiring = screenClient;
   screenClient = null; screenKey = ""; screenPublisher = ""; screenConnection = null;
-  if (previous) {
-    try {await previous.leave();}
-    catch (_) {if (screenEpoch === epoch && !screenClient) screenClient = previous; return {ok: false};}
+  if (!screenRetiring) return {ok: true};
+  if (!screenClosing) {
+    const previous = screenRetiring;
+    screenClosing = (async () => {
+      try {
+        await previous.leave();
+        if (screenRetiring === previous) screenRetiring = null;
+        return {ok: true};
+      } catch (_) {return {ok: false};}
+    })();
   }
-  return {ok: true};
+  const closing = screenClosing;
+  try {return await closing;}
+  finally {if (screenClosing === closing) screenClosing = null;}
 };
 window.agoraWatchScreen = async data => {
   const fields = ["key", "appId", "roomId", "token", "uid", "publisher"];
@@ -1312,7 +1323,12 @@ window.agoraCaptureScreen = async () => {
       let arrived;
       try {
         arrived = await new Promise(resolve => {
-          const callback = video.requestVideoFrameCallback(() => resolve(true));
+          const callback = video.requestVideoFrameCallback(() => {
+            // Frame callbacks can run with microtasks between them; this waiter
+            // must publish its own decoded-frame evidence before resolving.
+            if (screenPreview === preview) preview.frameAt = performance.now();
+            resolve(true);
+          });
           timer = setTimeout(() => {video.cancelVideoFrameCallback(callback); resolve(false);}, 800);
         });
       } finally {clearTimeout(timer);}
