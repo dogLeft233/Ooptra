@@ -95,6 +95,10 @@ def test_live_zero_probability_drops_reply_but_keeps_listening_and_human_memory(
             assert not playback.chunks and not agent.last_reply
             assert not agent.status()["speaking"]
             assert agent.turns == 0
+            async def committed():
+                while not agent.memory.as_messages():
+                    await asyncio.sleep(0)
+            await asyncio.wait_for(committed(), 1)
             assert agent.memory.as_messages() == [{"role": "user", "content": "human"}]
         finally:
             await agent.leave()

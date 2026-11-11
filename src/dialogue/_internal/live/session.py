@@ -51,6 +51,8 @@ class _Turn:
     input_timer: asyncio.Task | None = None
     authorized_context: Any = None
     authorized_tools: Any = None
+    rejection_reason: str = ""
+    input_reported: bool = False
 
 
 class LiveSession:
@@ -119,11 +121,12 @@ class LiveSession:
         self._state, self._reason = "failed", reason
         if self._turn is not None:
             turn = self._turn
-            unfinished = turn.state in {"pending", "allowed"}
+            unfinished = turn.state in {"pending", "allowed", "rejected"} and not turn.input_reported
             turn.state = "failed"
             turn.provider_done.set()
             turn.input_ready.set()
             if unfinished:
+                turn.input_reported = True
                 self._publish(LiveEvent("turn_finished", self.request.session, turn.ref,
                     turn.user_text, turn.speaker, action_id=turn.action_id, reason=reason,
                     internal=turn.internal))
@@ -200,12 +203,15 @@ class LiveSession:
             if not turn.provider_done.is_set() and turn.state == "allowed":
                 self._publish(LiveEvent("input_finalized", self.request.session, turn.ref,
                     turn.user_text, turn.speaker, action_id=turn.action_id, internal=turn.internal))
-        if turn.provider_done.is_set() and turn.state == "allowed":
-            turn.state = "completed"
+        if turn.provider_done.is_set() and turn.state in {"allowed", "rejected"} and not turn.input_reported:
+            reason = turn.rejection_reason if turn.state == "rejected" else "completed"
+            if turn.state == "allowed":
+                turn.state = "completed"
+            turn.input_reported = True
             if turn.timer is not None and turn.timer is not asyncio.current_task():
                 turn.timer.cancel()
             self._publish(LiveEvent("turn_finished", self.request.session, turn.ref,
-                turn.user_text, turn.speaker, action_id=turn.action_id, reason="completed",
+                turn.user_text, turn.speaker, action_id=turn.action_id, reason=reason,
                 internal=turn.internal))
 
     def _schedule_input_finalization(self, turn: _Turn) -> None:
@@ -223,6 +229,9 @@ class LiveSession:
         if (self._closed.is_set() or ref.live_session_id != self.live_session_id or turn is None
                 or ref != turn.ref or not turn.input_ready.is_set()):
             return ResolveReceipt("stale")
+        if turn.state not in {"allowed", "completed"}:
+            turn.authorization_ready.set()
+            return ResolveReceipt("stale")
         if prepared is None or prepared.context_ref != turn.context.context_ref:
             turn.authorization_ready.set()
             return ResolveReceipt("stale")
@@ -236,7 +245,7 @@ class LiveSession:
         return ResolveReceipt("applied")
 
     async def _expire(self, turn: _Turn) -> None:
-        while turn.state in {"pending", "allowed"}:
+        while turn.state in {"pending", "allowed", "rejected"}:
             await asyncio.sleep(max(0, turn.deadline - time.monotonic()))
             if time.monotonic() < turn.deadline:
                 continue
@@ -248,7 +257,7 @@ class LiveSession:
                     turn.user_text, turn.speaker, reason="expired", internal=turn.internal))
                 if not boundary_known:
                     self._fail("unresolved_turn_boundary")
-            elif turn.state == "allowed" and not turn.provider_done.is_set():
+            elif turn.state in {"allowed", "rejected"} and not turn.provider_done.is_set():
                 turn.state = "failed"
                 turn.provider_done.set()
                 self._fail("turn_deadline")
@@ -276,13 +285,20 @@ class LiveSession:
             return ResolveReceipt("held")
         if isinstance(permission, Reject):
             turn.state = "rejected"
+            turn.rejection_reason = permission.reason
+            turn.authorization_ready.set()
+            if turn.input_timer is not None:
+                turn.input_timer.cancel()
+                turn.input_timer = None
             if turn.timer is not None:
                 turn.timer.cancel()
             turn.buffered_bytes = 0
             while not turn.audio.empty():
                 turn.audio.get_nowait()
-            self._publish(LiveEvent("turn_finished", self.request.session, turn.ref,
-                turn.user_text, turn.speaker, reason=permission.reason, internal=turn.internal))
+            turn.deadline = turn.expression_deadline
+            turn.timer = self._spawn(self._expire(turn))
+            if turn.provider_done.is_set():
+                self._schedule_input_finalization(turn)
             return ResolveReceipt("rejected")
         intent = permission.intent
         if (intent.session != self.request.session or intent.deadline <= time.monotonic()
@@ -377,7 +393,8 @@ class LiveSession:
         generation = self._generation
         key = call["id"]
         try:
-            if call["name"] == "astrbot_remember" and turn is not None and not turn.internal:
+            if (call["name"] == "astrbot_remember" and turn is not None and not turn.internal
+                    and turn.state in {"pending", "allowed", "completed"}):
                 self._schedule_input_finalization(turn)
                 try:
                     await asyncio.wait_for(turn.authorization_ready.wait(),
@@ -387,6 +404,8 @@ class LiveSession:
                 tools, prepared, speaker = turn.authorized_tools, turn.authorized_context, turn.speaker
                 if turn.state not in {"allowed", "completed"}:
                     tools = None
+            elif call["name"] == "astrbot_remember" and turn is not None:
+                tools = None
             if tools is None:
                 result = {"ok": False, "error": "Memory authorization unavailable"}
             else:
@@ -553,7 +572,7 @@ class LiveSession:
             elif not model_turn and not output_text and input_text and turn.state in {"pending", "allowed"}:
                 pass  # 可证明属于待许可已完成轮次的晚转录。
             elif model_turn or output_text:
-                if turn.state == "allowed":
+                if turn.state in {"allowed", "rejected"}:
                     self._finalize_input(turn)
                 if turn.state == "pending":
                     turn.state = "superseded"
@@ -615,7 +634,7 @@ class LiveSession:
                     turn.timer.cancel()
                 turn.timer = self._spawn(self._expire(turn))
                 self._propose(turn, "updated")
-            elif turn.state == "allowed":
+            elif turn.state in {"allowed", "rejected"}:
                 if turn.internal:
                     self._finalize_input(turn)
                 else:

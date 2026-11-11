@@ -474,7 +474,8 @@ class VoiceCoordinator:
         if "output_volume" in changed_set:
             notes.append(await self._apply_output_volume())
 
-        if storage_configuration_changed(changed_set):
+        storage_rebuilt = storage_configuration_changed(changed_set)
+        if storage_rebuilt:
             await self._stop_reply_locked(restart=False)
             if hasattr(self, "context_service"):
                 await self.context_service.close()
@@ -510,7 +511,7 @@ class VoiceCoordinator:
                 await self._stop_round_worker()
             notes.append("语音后端已切换")
 
-        session_dirty = requires_session_restart(changed_set)
+        session_dirty = requires_session_restart(changed_set) or storage_rebuilt
         if not session_dirty:
             return notes
 

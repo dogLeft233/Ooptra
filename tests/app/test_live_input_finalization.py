@@ -1,5 +1,6 @@
 import asyncio
 
+import pytest
 from support.live_runtime import Socket, audio_message
 
 from app.live import LiveFlow
@@ -22,7 +23,7 @@ class Transport:
     async def wait_playback(self, timeout): return AudioPushResult(True)
 
 
-async def open_flow(tmp_path, *, shared=False):
+async def open_flow(tmp_path, *, shared=False, probability=100):
     context = create_context_service(str(tmp_path / "history.jsonl"))
     if shared:
         await prepare_source(context.bridge, {"ok": True, "provider": "memory_companion",
@@ -34,7 +35,7 @@ async def open_flow(tmp_path, *, shared=False):
     channel = create_channel(Transport())
     session = (await channel.execute(JoinRoom("join", RoomTarget("a", "c"), 0))).session
     flow = LiveFlow(backend=backend, context=context, behavior=create_behavior(), channel=channel,
-        session=session, current=lambda: True, settings=lambda: ReplySettings(probability=100),
+        session=session, current=lambda: True, settings=lambda: ReplySettings(probability=probability),
         on_state=lambda *args: None, on_leave=lambda **kwargs: False,
         output_state=lambda: {"volume": 50, "muted": False})
     await flow.start()
@@ -114,6 +115,51 @@ def test_muted_live_reply_never_enters_confirmed_assistant_history(tmp_path):
             await asyncio.wait_for(finished(), 1)
             assert all(row["role"] != "assistant" for row in agent.memory.recent())
             assert playback.chunks == []
+        finally:
+            await agent.stop()
+    asyncio.run(scenario())
+
+
+def test_rejected_expression_still_waits_for_the_complete_user_input(tmp_path):
+    async def scenario():
+        context, socket, flow = await open_flow(tmp_path, probability=0)
+        try:
+            await socket.deliver(audio_message(user_text="这是"))
+            await socket.deliver({"serverContent": {
+                "inputTranscription": {"text": "完整的问题"}, "turnComplete": True}})
+            async def committed():
+                while not context.history.recent():
+                    await asyncio.sleep(0)
+            await asyncio.wait_for(committed(), 1)
+            assert [row["content"] for row in context.history.recent()] == ["这是完整的问题"]
+            assert not flow.busy
+        finally:
+            await flow.close()
+            await context.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("field", ["memory_path", "memory_max_turns"])
+def test_joined_live_storage_refresh_restores_the_new_context_before_return(tmp_path, field):
+    from support.live_runtime import make_live_agent
+    async def scenario():
+        agent, _, sockets = await make_live_agent(tmp_path)
+        try:
+            if field == "memory_path":
+                agent.settings.memory_path = str(tmp_path / "new-history.jsonl")
+            else:
+                agent.settings.memory_max_turns += 1
+            await agent.refresh([field])
+            assert agent._live_flow is not None
+            assert agent.backend.session_active
+            assert sockets[0].closed and len(sockets) == 2
+            await agent._live_flow.send_input("speaker", b"\0\x40" * 320, 16000)
+            await sockets[-1].deliver(audio_message(user_text="新的问题", text="新的回答", done=True))
+            async def committed():
+                while agent._live_flow.busy or not agent.memory.recent():
+                    await asyncio.sleep(0)
+            await asyncio.wait_for(committed(), 1)
+            assert [row["content"] for row in agent.memory.recent()] == ["新的问题", "新的回答"]
         finally:
             await agent.stop()
     asyncio.run(scenario())
