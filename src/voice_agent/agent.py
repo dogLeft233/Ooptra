@@ -47,8 +47,8 @@ from channels.api import (
 )
 from channels.models import JoinRoom, LeaveRoom, RoomTarget, SessionRef, VadvConfig
 from channels.models import RoomOperation as VoiceOperation
-from context import create_context_bridge, create_memory
-from context.api import SourceBridge
+from context import create_context_bridge, create_memory, create_turn_submission
+from context.api import SourceBridge, TurnSubmission
 from context.models import ConfirmedTurn
 from core.audio import pcm16_rms
 from dialogue import create_backend
@@ -1405,7 +1405,8 @@ class VoiceAgent:
         return not self.live_mode and self._ensure_attempt_budget().exhausted(self.settings.cascade_turn_limit)
 
     async def _record_output(self, user_text: str, reply_text: str, uid: str,
-                             session: SessionRef | None, confirmation: Literal["completed", "silent", "interrupted", "failed", "unknown"]) -> None:
+                             session: SessionRef | None, confirmation: Literal["completed", "silent", "interrupted", "failed", "unknown"],
+                             submission: TurnSubmission | None = None) -> None:
         if session is None or self.channels.snapshot().session != session:
             return
         # 记录绑定产生它的会话；不把迟到输出归入新房间或新 AstrBot 来源。
@@ -1413,12 +1414,10 @@ class VoiceAgent:
         turn = ConfirmedTurn(user_text, reply_text if confirmation == "completed" else "",
                              confirmation, user_key=key,
                              channel_key=f"{session.room_target.area}/{session.room_target.channel}")
-        bridge = self._ensure_context_bridge()
-        bridge.record_turn(turn.user_text, turn.reply_text, speaker=uid,
-                           interrupted=confirmation in {"interrupted", "failed", "unknown"})
-        memory = getattr(self, "memory", None)
-        if memory is not None:
-            await asyncio.to_thread(memory.record, turn)
+        if submission is None:
+            submission = create_turn_submission(getattr(self, "memory", None),
+                                                self._ensure_context_bridge(), speaker=uid)
+        await submission.record(turn)
 
     async def _handle_utterance_reply(self, uid: str, pcm: bytes, sample_rate: int) -> None:
         session = self.channels.snapshot().session
@@ -1440,7 +1439,7 @@ class VoiceAgent:
                 await self._handle_streamed_reply(uid, pcm, sample_rate)
                 return
             memory = getattr(self, "memory", None)
-            record_turn = bridge.bind_turn(speaker=uid)
+            submission = create_turn_submission(memory, bridge, speaker=uid)
             recognized_text = ""
             recorded = False
 
@@ -1460,7 +1459,7 @@ class VoiceAgent:
                 except RecognizedGenerationFailed as exc:
                     self.last_reply = f"[error] {exc}"
                     if epoch == self._operation_epoch and bridge.session_id == source_session:
-                        await self._record_output(exc.user_text, "", uid, session, "failed")
+                        await self._record_output(exc.user_text, "", uid, session, "failed", submission)
                         recorded = True
                     logger.exception("event=voice.generation.failed stage=after_recognition")
                     return
@@ -1488,12 +1487,12 @@ class VoiceAgent:
                     return
                 self.last_user_text = reply.user_text or self.last_user_text
                 if reply.control is not None and reply.control.leave:
-                    await self._record_output(reply.user_text, "", uid, session, "silent")
+                    await self._record_output(reply.user_text, "", uid, session, "silent", submission)
                     recorded = True
                     self.request_voice_leave()
                     return
                 if reply.control is not None and reply.control.volume is not None:
-                    await self._record_output(reply.user_text, "", uid, session, "silent")
+                    await self._record_output(reply.user_text, "", uid, session, "silent", submission)
                     recorded = True
                     result = await self._apply_volume_command(reply.control.volume)
                     if not self.output_muted:
@@ -1525,15 +1524,13 @@ class VoiceAgent:
                 if confirmation == "completed" and not reply.text:
                     confirmation = "unknown"
                 if epoch == self._operation_epoch and bridge.session_id == source_session:
-                    await self._record_output(reply.user_text or "", reply.text, uid, session, confirmation)
+                    await self._record_output(reply.user_text or "", reply.text, uid, session, confirmation, submission)
                     recorded = True
             finally:
                 if not recorded and recognized_text:
-                    record_turn(recognized_text, "", interrupted=True)
                     turn = ConfirmedTurn(recognized_text, "", "interrupted", user_key=f"oopz:{uid}",
                                          channel_key=f"{session.room_target.area}/{session.room_target.channel}")
-                    if memory is not None:
-                        await asyncio.to_thread(memory.record, turn)
+                    await submission.record(turn)
 
     async def _handle_streamed_reply(self, uid: str, pcm: bytes, sample_rate: int) -> None:
         session = self.channels.snapshot().session
@@ -1543,7 +1540,7 @@ class VoiceAgent:
         sent = False
         failed = False
         bridge, memory = self.context_bridge, self.memory
-        record_turn = bridge.bind_turn(speaker=uid)
+        submission = create_turn_submission(memory, bridge, speaker=uid)
         recognized_text = ""
         recorded = False
 
@@ -1597,12 +1594,12 @@ class VoiceAgent:
                 return
             self.last_user_text = reply.user_text or self.last_user_text
             if reply.control is not None and reply.control.leave:
-                await self._record_output(reply.user_text, "", uid, session, "silent")
+                await self._record_output(reply.user_text, "", uid, session, "silent", submission)
                 recorded = True
                 self.request_voice_leave()
                 return
             if reply.control is not None and reply.control.volume is not None:
-                await self._record_output(reply.user_text, "", uid, session, "silent")
+                await self._record_output(reply.user_text, "", uid, session, "silent", submission)
                 recorded = True
                 result = await self._apply_volume_command(reply.control.volume)
                 if not self.output_muted:
@@ -1617,7 +1614,7 @@ class VoiceAgent:
             if confirmation == "completed" and not reply.text:
                 confirmation = "unknown"
             if epoch == self._operation_epoch and self.context_bridge.session_id == source_session:
-                await self._record_output(reply.user_text, reply.text, uid, session, confirmation)
+                await self._record_output(reply.user_text, reply.text, uid, session, confirmation, submission)
                 recorded = True
             logger.info("流式语音回合完成：已输出音频=%s", sent)
         except VoiceStreamInterrupted:
@@ -1630,7 +1627,7 @@ class VoiceAgent:
             failed = True
             self.last_reply = f"[error] {exc}"
             if epoch == self._operation_epoch and self.context_bridge.session_id == source_session:
-                await self._record_output(exc.user_text, "", uid, session, "failed")
+                await self._record_output(exc.user_text, "", uid, session, "failed", submission)
                 recorded = True
             logger.exception("event=voice.generation.failed stage=after_recognition")
         except Exception as exc:
@@ -1638,18 +1635,19 @@ class VoiceAgent:
             self.last_reply = f"[error] {exc}"
             logger.exception("流式语音回合失败")
         finally:
-            if not recorded and recognized_text and session is not None:
-                record_turn(recognized_text, "", interrupted=True)
-                turn = ConfirmedTurn(recognized_text, "", "interrupted", user_key=f"oopz:{uid}",
-                                     channel_key=f"{session.room_target.area}/{session.room_target.channel}")
-                await asyncio.to_thread(memory.record, turn)
-            if playback is not None:
-                self._playbacks.discard(playback)
-            if epoch == self._operation_epoch:
-                self._speaking = False
-                if failed and duplex is not None and duplex is self.duplex:
-                    with contextlib.suppress(Exception):
-                        await duplex.stop_tts()
+            try:
+                if not recorded and recognized_text and session is not None:
+                    turn = ConfirmedTurn(recognized_text, "", "interrupted", user_key=f"oopz:{uid}",
+                                         channel_key=f"{session.room_target.area}/{session.room_target.channel}")
+                    await submission.record(turn)
+            finally:
+                if playback is not None:
+                    self._playbacks.discard(playback)
+                if epoch == self._operation_epoch:
+                    self._speaking = False
+                    if failed and duplex is not None and duplex is self.duplex:
+                        with contextlib.suppress(Exception):
+                            await duplex.stop_tts()
 
     async def speak_text(self, text: str) -> dict[str, Any]:
         self._ensure_operations()

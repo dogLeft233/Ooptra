@@ -26,6 +26,15 @@ class TurnRecorder(Protocol):
     def __call__(self, user_text: str, reply_text: str, *, interrupted: bool = False) -> None: ...
 
 
+class TurnSubmission(Protocol):
+    """绑定原来源的一次提交；首次record固定事实，重复调用共享真实结果。
+
+    取消等待会观察已受理磁盘工作完成后传播，不撤销或重新提交。
+    持久化失败会在首次与后续等待中抛出；不承诺跨JSONL/outbox原子事务。
+    """
+    async def record(self, turn: ConfirmedTurn) -> RecordReceipt: ...
+
+
 class SourceBridge(Protocol):
     """AstrBot protocol=1 来源、短 RPC 与耐久待写适配。
 

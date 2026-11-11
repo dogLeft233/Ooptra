@@ -43,3 +43,5 @@
 当前 JSONL 历史和 sources 的 outbox 仍分开维护。sources 已改为落盘失败抛出 OSError 并回滚内存入队，写请求先落盘再投递；完整历史/幂等键/投递共同事务尚待实现。现有测试入口：`tests/test_memory_recent.py`、`tests/test_astrbot_context_bridge.py`。先迁移 record/delivery 和恢复，再接新 prepare；明确迁移旧后端写入方后再删除旧接口。
 
 目标公开行为测试：提交故障不成功、重试同键不重复、同键异载荷冲突、部分播放不写全文、切来源后原队列目标不变、逐目标重试、坏旧文件不静默丢失、重启恢复。变化场景：替换事务存储只改本子模块及导入适配，不改行为/生成；这是设计分析，当前未验证新数据库实现。
+
+当前 `submission.py` 拥有一次上下文提交的受理任务、JSONL 线程及失败结果。正常路径与取消兜底复用 `TurnSubmission.record`；首次事实不可被迟到的 interrupted 事实替换。重复等待不新增本地记录或外部请求。此能力不提供跨调用/重启幂等或 JSONL/outbox 共同事务。`tests/context/test_turn_submission.py` 覆盖取消与磁盘失败，应用阻塞文件回归在 `tests/test_voice_history_outcomes.py`。

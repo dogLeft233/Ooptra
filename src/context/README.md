@@ -26,7 +26,7 @@
 - `SourceBridge` 拥有来源准备、短 RPC、待写队列与租约。`bind_turn(speaker=...)` 返回本轮 `TurnRecorder`，固定原会话/来源/授权并幂等提交；迟到结果只投递原目标、不更新新会话历史，持久失败不标记已提交。`prepare` 结果绑定原准备代次；`clear` 不清理已受理写入和 `bindings`。`context`、`history`、`poll` 都返回独立快照，不开放可变队列。
 - protocol=1 写请求先写 outbox 再提供给 worker；取消等待保留原 request ID/原目标。落盘失败抛出 `OSError`，不宣称已排队；恢复数据不合法时拒绝启动写入。构造器的 `outbox_path=None` 仅用于明确选择内存模式的调用方。
 
-同步历史和 outbox 文件操作仍会阻塞调用线程；异步调用方应按实际路径将耗时操作交给线程。当前 JSONL 历史与 outbox JSON 仍分别保存，**未实现共同事务**；近期历史尚未按房间/来源严格隔离。下面设计中的 `record(OutputRecord)`、`delivery`、授权 grant 与 SQLite 导入不能视作当前 `ConversationHistory.record(ConfirmedTurn)` 已具备的能力。
+`create_turn_submission(history, bridge, speaker=...)` 固定原来源和存储，返回一次 `TurnSubmission`。首次 `record(ConfirmedTurn)` 受理事实，正常记录和取消兜底共用同一任务；上下文拥有 JSONL 线程及取消后的真实完成观察，失败保留为同一次失败，不重新受理或当成成功。取消在受理任务结束后传播。同步历史的其他操作与 outbox 文件操作仍会阻塞调用线程。当前 JSONL 历史与 outbox JSON 仍分别保存，**未实现共同事务**；近期历史尚未按房间/来源严格隔离。下面设计中的 `record(OutputRecord)`、`delivery`、授权 grant 与 SQLite 导入不能视作当前 `ConversationHistory.record(ConfirmedTurn)` 已具备的能力。
 
 ## 待实现公开契约
 

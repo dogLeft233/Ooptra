@@ -5,6 +5,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import threading
 
 import pytest
 from support.channel_fixtures import Duplex, make_voice_agent
@@ -352,4 +353,58 @@ def test_live_announcement_records_confirmed_assistant_without_human_input(tmp_p
         finally:
             await agent.leave()
             await agent.backend.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_stop_during_accepted_history_write_commits_once(tmp_path, monkeypatch, streaming):
+    async def run():
+        from support.context_fixtures import prepare_source
+        agent = make_voice_agent(tmp_path)
+        agent.bind_duplex(Playback())
+        entered, released = threading.Event(), threading.Event()
+        original = agent.memory.record
+        def blocking_record(turn):
+            entered.set()
+            assert released.wait(3), "test must release the real disk write"
+            return original(turn)
+        monkeypatch.setattr(agent.memory, "record", blocking_record)
+        class Model:
+            async def handle_utterance(self, *args, on_recognition=None, **kwargs):
+                on_recognition("question")
+                return VoiceReply(user_text="question", text="answer", pcm16=b"\x00\x40" * 480)
+            async def aclose(self):
+                pass
+        class StreamingModel(Model):
+            async def handle_utterance_stream(self, *args, on_audio, on_recognition, **kwargs):
+                on_recognition("question")
+                await on_audio(b"\x00\x40" * 480, 24000)
+                return VoiceReply(user_text="question", text="answer", sample_rate=24000)
+        agent.backend = StreamingModel() if streaming else Model()
+        await agent.join("area", "room")
+        await prepare_source(agent.context_bridge, {"ok": True, "provider": "memory_companion",
+            "memory_scopes": [{"umo": "original"}]}, "area", "room")
+        try:
+            pending = asyncio.create_task(agent._handle_utterance("speaker", b"\x01\x00", 16000))
+            assert await asyncio.to_thread(entered.wait, 1)
+            stopping = asyncio.create_task(agent.stop_current_reply())
+            for _ in range(100):
+                if pending.cancelling():
+                    break
+                await asyncio.sleep(0)
+            assert pending.cancelling()
+            released.set()
+            await asyncio.wait_for(stopping, 1)
+            with contextlib.suppress(asyncio.CancelledError):
+                await pending
+            assert agent.memory.as_messages() == [
+                {"role": "user", "content": "question"}, {"role": "assistant", "content": "answer"}]
+            assert agent.context_bridge.status()["pending_writes"] == 1
+            events = await agent.context_bridge.poll(wait=0)
+            commits = [event for event in events if event["operation"] == "commit"]
+            assert len(commits) == 1
+            assert commits[0]["payload"]["reply_text"] == "answer"
+        finally:
+            released.set()
+            await agent.leave()
     asyncio.run(run())
