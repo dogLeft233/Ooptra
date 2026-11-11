@@ -10,7 +10,7 @@ from aiohttp import BodyPartReader, web
 
 from dialogue import create_voice_library
 from dialogue.api import VoiceLibrary
-from dialogue.models import ManagedVoice, VoiceSample
+from dialogue.models import VoiceSample
 
 
 def voice_library_handlers(runtime: Any, library: VoiceLibrary | None = None) -> list[tuple]:
@@ -21,10 +21,7 @@ def voice_library_handlers(runtime: Any, library: VoiceLibrary | None = None) ->
             settings = copy.deepcopy(runtime.agent.settings)
             page = int(request.query.get("page", "0"))
             result = await service.list(settings, page)
-            voices = list(result.voices)
-            if page == 0 and settings.aliyun_tts_model == "qwen-audio-3.1-tts-flash":
-                voices.insert(0, ManagedVoice("longanhuan_v3.1", settings.aliyun_tts_model, "OK", "system"))
-            return web.json_response({"ok": True, "voices": [asdict(v) for v in voices],
+            return web.json_response({"ok": True, "voices": [asdict(v) for v in result.voices],
                 "page": result.page, "has_more": result.has_more,
                 "current_voice": settings.aliyun_tts_voice, "model": settings.aliyun_tts_model})
         except ValueError as exc:

@@ -294,7 +294,7 @@ def build_voice_routes(
         try:
             result = await preview_service.generate(
                 current_agent().settings, str(body.get("kind") or "voice"),
-                str(body.get("text") or ""), str(body.get("voice") or ""))
+                str(body.get("text") or ""), str(body.get("voice") or ""), str(body.get("model") or ""))
             return ok(result)
         except (ValueError, asyncio.TimeoutError) as exc:
             return err(str(exc) or "试听超时，请检查模型连接")

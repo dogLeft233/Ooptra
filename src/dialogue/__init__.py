@@ -104,10 +104,10 @@ def audio_output(job: ExpressionJob) -> GeneratedAudio:
     return Audio(job)
 
 
-def create_preview_service(*, backend_factory=None) -> PreviewService:
+def create_preview_service(*, backend_factory=None, voice_library: VoiceLibrary | None = None) -> PreviewService:
     """临时试听供应商工厂；不读取真实房间历史，不创建任何渠道会话。"""
     from dialogue._internal.preview import PreviewService as Service
-    return Service(backend_factory)
+    return Service(backend_factory, voice_library)
 
 
 def create_voice_library(*, endpoint: str | None = None) -> VoiceLibrary:

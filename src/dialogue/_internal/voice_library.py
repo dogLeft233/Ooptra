@@ -13,6 +13,7 @@ from dialogue.api import DialogueSettings
 from dialogue.models import ManagedVoice, VoicePage, VoiceSample
 
 logger = logging.getLogger(__name__)
+SYSTEM_VOICES = {"qwen-audio-3.1-tts-flash": ("longanhuan_v3.1",)}
 
 
 class VoiceLibraryError(ValueError):
@@ -83,7 +84,8 @@ class QwenVoiceLibrary:
         rows = output.get("voice_list")
         if not isinstance(rows, list) or len(rows) > 100:
             raise VoiceLibraryError("音色服务返回无效列表")
-        voices = []
+        voices = ([ManagedVoice(voice_id, settings.aliyun_tts_model, "OK", "system")
+                   for voice_id in SYSTEM_VOICES.get(settings.aliyun_tts_model, ())] if page == 0 else [])
         for row in rows:
             if not isinstance(row, dict):
                 raise VoiceLibraryError("音色服务返回无效列表项")
@@ -96,7 +98,7 @@ class QwenVoiceLibrary:
 
     async def check(self, settings: DialogueSettings, voice_id: str) -> ManagedVoice:
         voice_id = _voice_id(voice_id)
-        if voice_id == "longanhuan_v3.1" and settings.aliyun_tts_model == "qwen-audio-3.1-tts-flash":
+        if voice_id in SYSTEM_VOICES.get(settings.aliyun_tts_model, ()):
             self._url(settings)
             return ManagedVoice(voice_id, settings.aliyun_tts_model, "OK", "system")
         output = await self._call(settings, {"action": "query_voice", "voice_id": voice_id})

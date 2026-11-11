@@ -7,6 +7,8 @@
   let audioUrl = '';
   let voices = new Map();
   const feedback = message => text('voices-feedback', message);
+  const requestId = () => crypto.randomUUID ? crypto.randomUUID() :
+    Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
 
   function updateControls() {
     const ready = voices.get($('voices-select').value)?.status === 'OK';
@@ -86,7 +88,7 @@
     await api('/api/voice/voices/check', {method: 'POST', body: {voice_id: voice}});
     const result = await api('/api/config', {method: 'POST', body: {
       updates: {voice: {'aliyun_deepseek.tts_voice': voice}},
-      expected_revision: config.revision, request_id: crypto.randomUUID(),
+      expected_revision: config.revision, request_id: requestId(),
     }});
     if (result.hot_reload_failed || !['applied', undefined].includes(result.application_state)) {
       feedback('音色已保存，但运行应用未完成：' + (result.notes || []).join('；') + '。请重试切换。');
@@ -98,9 +100,8 @@
 
   $('voices-preview').onclick = () => run(async () => {
     const voice = $('voices-select').value;
-    await api('/api/voice/voices/check', {method: 'POST', body: {voice_id: voice}});
     const result = await api('/api/voice/preview', {method: 'POST', body: {
-      kind: 'voice', text: $('voices-text').value.trim(), voice,
+      kind: 'voice', text: $('voices-text').value.trim(), voice, model,
     }});
     const bytes = Uint8Array.from(atob(result.wav_base64), char => char.charCodeAt(0));
     const player = $('voices-player');

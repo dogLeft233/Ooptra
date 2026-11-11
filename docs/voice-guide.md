@@ -293,12 +293,13 @@ DELETE /memory
 
 音色与创建时的目标模型绑定，目录只列当前模型的音色。切换会保存 `VOICE_AGENT_CONFIG.aliyun_deepseek.tts_voice`，
 使用配置版本检查和运行应用回执；保存与应用失败会分别提示。下一次新生成语音使用新音色，已生成或播放中的语音不会被改写。
-音色创建本身不进房、不切换当前声音；试听只在浏览器播放。
+音色创建本身不进房、不切换当前声音；试听只在浏览器播放。试听携带目录模型身份，服务端以同一配置快照校验就绪并合成；模型已改变时先刷新目录，不把前一次校验用于另一配置。
 
 接口（独立语音端口没有 `/api` 前缀）：
 
 - `GET /api/voice/voices?page=0`：每页查询 100 个云端条目，返回匹配模型的音色、当前选择和 `has_more`。
 - `POST /api/voice/voices`：multipart 表单 `prefix` 与 `audio`，返回新音色 ID；就绪状态需随后刷新查询。
+- 音色库调用 `POST /api/voice/preview` 时同时传 `kind=voice`、`voice`、`model` 和 `text`，由生成模块一次完成受校验试听；系统音色由同一目录能力交付。
 - `POST /api/voice/voices/check`：JSON `voice_id`，确认当前模型与云端就绪状态。
 - 保存选择复用 `POST /api/config`，字段为 `voice.aliyun_deepseek.tts_voice`，携带 `expected_revision` 和 `request_id`。
 

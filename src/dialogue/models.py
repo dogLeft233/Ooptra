@@ -245,10 +245,13 @@ class PreviewRequest:
     text: str
     voice: str = ""
     persona: str = ""
+    model: str = ""
 
     def __post_init__(self) -> None:
         if (not self.preview_id or self.kind not in {"voice", "enter", "leave"}
-                or not 1 <= len(self.text.strip()) <= 500 or len(self.voice) > 80):
+                or not 1 <= len(self.text.strip()) <= 500 or len(self.voice) > 80
+                or not isinstance(self.model, str) or len(self.model) > 200
+                or (self.model and (self.kind != "voice" or not self.voice))):
             raise ValueError("试听须有身份、合法类型、1-500字文本和至多80字音色")
 
 

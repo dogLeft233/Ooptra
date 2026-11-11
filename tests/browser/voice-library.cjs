@@ -22,9 +22,19 @@ const server = http.createServer((req, res) => {
   const browser = await chromium.launch({headless: true, executablePath: process.env.OOPTRA_BROWSER_EXECUTABLE || undefined});
   try {
     const page = await browser.newPage({viewport: {width: 1280, height: 1000}});
-    const errors = [], writes = [];
+    const errors = [], writes = [], previews = [];
+    let checks = 0;
     page.on('pageerror', error => errors.push(error.message));
     page.on('console', message => {if (message.type() === 'error') errors.push(message.text());});
+    // Keep the real insecure HTTP origin while serving production assets without
+    // depending on system DNS/proxy rules for this synthetic LAN hostname.
+    await page.route(url => url.hostname === 'ooptra-lan.test', async route => {
+      const pathname = new URL(route.request().url()).pathname;
+      const name = pathname.startsWith('/assets/') ? path.basename(pathname) : 'index.html';
+      const contentType = name.endsWith('.js') ? 'text/javascript' : name.endsWith('.css') ? 'text/css' :
+        name.endsWith('.svg') ? 'image/svg+xml' : 'text/html';
+      await route.fulfill({contentType, body: fs.readFileSync(path.join(assets, name))});
+    });
     let selected = 'longanhuan_v3.1', created = false, failApply = false;
     await page.route('**/api/**', async route => {
       const request = route.request();
@@ -53,14 +63,18 @@ const server = http.createServer((req, res) => {
           backend: {value: 'aliyun_deepseek'}, 'aliyun_deepseek.tts_model': {value: model},
         }}}};
       }
+      if (endpoint === '/api/voice/voices/check') checks++;
       if (endpoint === '/api/voice/preview') {
+        previews.push(body);
         assert.equal(body.voice, custom);
         assert.equal(selected, 'longanhuan_v3.1');
         result = {wav_base64: wav.toString('base64')};
       }
       await route.fulfill({json: {ok: true, ...result}});
     });
-    await page.goto(`http://127.0.0.1:${server.address().port}/voice`);
+    await page.goto(`http://ooptra-lan.test:${server.address().port}/voice`);
+    assert.equal(await page.evaluate(() => isSecureContext), false);
+    assert.equal(await page.evaluate(() => typeof crypto.randomUUID), 'undefined');
     await page.locator('#screen-app').waitFor({state: 'visible'});
     await page.locator('[data-tab="voices"]').click();
     await page.waitForFunction(() => document.querySelector('#voices-current').textContent.includes('longanhuan'));
@@ -78,7 +92,10 @@ const server = http.createServer((req, res) => {
     await page.locator('#voices-player').waitFor({state: 'visible'});
     await page.screenshot({path: path.join(artifacts, '03-preview.png'), fullPage: true});
     await page.locator('#voices-use').click();
-    await page.waitForFunction(() => document.querySelector('#voices-feedback').textContent.startsWith('已切换'));
+    await page.waitForFunction(() => !document.querySelector('#voices-use').disabled);
+    assert.match(await page.locator('#voices-feedback').textContent(), /^已切换/);
+    assert.equal(previews[0].model, model, 'preview must identify its directory model');
+    assert.equal(checks, 1, 'only persistent selection needs a separate configuration check');
     assert.equal(writes[0].expected_revision, 'fixture-revision');
     assert.equal(writes[0].updates.voice['aliyun_deepseek.tts_voice'], custom);
     await page.screenshot({path: path.join(artifacts, '04-selected.png'), fullPage: true});

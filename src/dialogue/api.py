@@ -175,10 +175,15 @@ class LiveSession(Protocol):
 
 
 class PreviewService(Protocol):
+    """独立试听；request.model指定音色目录模型时，同一配置快照完成就绪校验和合成。
+
+    模型不匹配或未就绪抛ValueError，不开始合成；配置后续变化不改写已受理试听。
+    校验连接最多45秒、生成30秒，取消收尾不影响活跃后端。
+    """
     @property
     def busy(self) -> bool: ...
     async def preview(self, settings: DialogueSettings, request: PreviewRequest) -> PreviewArtifact | PreviewFailure: ...
-    async def generate(self, settings: DialogueSettings, kind: str, text: str, voice: str = "") -> dict: ...
+    async def generate(self, settings: DialogueSettings, kind: str, text: str, voice: str = "", model: str = "") -> dict: ...
 
 
 class RecognitionStream(Protocol):
@@ -242,7 +247,8 @@ class VoiceLibrary(Protocol):
     """Qwen 云端音色；不保存原始样本或修改 bot 配置。
 
     每次操作独占有期限的 HTTP 连接，取消时关闭。创建不重试；超时或取消可能已在云端
-    创建，调用者应先刷新列表。列表每页 100 项，按当前模型筛选；has_more 针对云端原页。
+    创建，调用者应先刷新列表。列表每页最多100个云端项，首屏附当前模型的系统音色；
+    系统目录与就绪规则由本能力唯一拥有，has_more 针对云端原页。
     创建返回 ID，仅 status=OK 可选用；未就绪时通过刷新查询，不伪称创建即已应用。
     """
 
