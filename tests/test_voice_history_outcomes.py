@@ -6,6 +6,7 @@ import base64
 import contextlib
 import json
 
+import pytest
 from support.channel_fixtures import Duplex, make_voice_agent
 
 from dialogue import create_gemini_backend
@@ -271,4 +272,84 @@ def test_tts_failure_preserves_recognized_input_in_real_history(tmp_path):
         finally:
             await agent.leave()
             await backend.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("stage", ["chat", "tts"])
+def test_stop_after_nonstream_recognition_preserves_only_original_input(tmp_path, stage):
+    async def run():
+        from support.dialogue_fixtures import mimo_backend
+        agent = make_voice_agent(tmp_path)
+        agent.bind_duplex(Playback())
+        backend = mimo_backend(agent.settings, agent.memory)
+        agent.backend = backend
+        waiting = asyncio.Event()
+
+        async def asr(*args):
+            return "recognized before stop"
+        async def chat(*args, **kwargs):
+            if stage == "chat":
+                waiting.set()
+                await asyncio.Event().wait()
+            return "unplayed assistant draft"
+        async def tts(*args):
+            waiting.set()
+            await asyncio.Event().wait()
+        backend.asr, backend.chat, backend.tts = asr, chat, tts
+        await agent.join("area", "room")
+        try:
+            pending = asyncio.create_task(agent._handle_utterance("speaker", b"\x00\x40" * 16000, 16000))
+            await asyncio.wait_for(waiting.wait(), 1)
+            await agent.stop_current_reply()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pending
+            assert agent.memory.as_messages() == [{"role": "user", "content": "recognized before stop"}]
+            rows = [json.loads(line) for line in (tmp_path / "memory.jsonl").read_text(encoding="utf-8").splitlines()]
+            assert len(rows) == 1
+            assert rows[0]["user_key"] == "oopz:speaker"
+            assert agent.duplex.pushed == 0
+        finally:
+            await agent.leave()
+            await backend.aclose()
+    asyncio.run(run())
+
+
+def test_live_announcement_records_confirmed_assistant_without_human_input(tmp_path):
+    async def run():
+        agent = make_voice_agent(tmp_path)
+        playback, socket = Playback(), LiveSocket()
+        sent = asyncio.Event()
+        original_send = socket.send
+        async def send(text):
+            await original_send(text)
+            if "realtimeInput" in json.loads(text):
+                sent.set()
+        socket.send = send
+        agent.settings.backend = "gemini_live"
+        agent.settings.gemini_api_key = "synthetic-key"
+        async def connect(*args, **kwargs):
+            return socket
+        from behavior import create_reply_policy
+        agent.backend = create_gemini_backend(agent.settings, agent.memory,
+            reply_policy=create_reply_policy(), connector=connect)
+        agent.live_mode = True
+        agent.bind_duplex(playback)
+        await agent.join("area", "room")
+        try:
+            pending = asyncio.create_task(agent.speak_announcement("enter", "大家好"))
+            await asyncio.wait_for(sent.wait(), 1)
+            await socket.deliver({"serverContent": {
+                "outputTranscription": {"text": "大家好"},
+                "modelTurn": {"parts": [{"inlineData": {
+                    "data": base64.b64encode(b"\x00\x40" * 480).decode(),
+                    "mimeType": "audio/pcm;rate=24000"}}]}, "turnComplete": True}})
+            result = await asyncio.wait_for(pending, 1)
+            assert result["ok"], result
+            assert playback.pushed > 0
+            assert agent.memory.as_messages() == [{"role": "assistant", "content": "大家好"}]
+            rows = [json.loads(line) for line in (tmp_path / "memory.jsonl").read_text(encoding="utf-8").splitlines()]
+            assert len(rows) == 1 and rows[0]["role"] == "assistant"
+        finally:
+            await agent.leave()
+            await agent.backend.aclose()
     asyncio.run(run())

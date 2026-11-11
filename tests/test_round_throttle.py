@@ -46,7 +46,7 @@ class _RecordingBackend:
     async def aclose(self) -> None:
         pass
 
-    async def handle_utterance(self, pcm, *, sample_rate, user_key="", channel_key=""):
+    async def handle_utterance(self, pcm, *, sample_rate, user_key="", channel_key="", on_recognition=None):
         self.seen.append(pcm)
         return VoiceReply(user_text="", text="", pcm16=b"")
 

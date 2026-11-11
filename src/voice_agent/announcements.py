@@ -70,8 +70,8 @@ async def run_announcement(agent: Any, kind: str, template: str, visit_id: str |
         if not drain.get("ok"):
             raise RuntimeError(drain.get("error") or "playback did not complete")
         agent.last_reply = text
+        await agent._record_output("", text, "announcement", session, "completed")
         if not agent.live_mode:
-            await agent._record_output("", text, "announcement", session, "completed")
             agent.turns += 1
         return {"ok": True, "text": text, "error": ""}
 

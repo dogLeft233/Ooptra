@@ -347,7 +347,7 @@ class _FakeBackend:
     def __init__(self) -> None:
         self.called = 0
 
-    async def handle_utterance(self, pcm, *, sample_rate, user_key="", channel_key=""):
+    async def handle_utterance(self, pcm, *, sample_rate, user_key="", channel_key="", on_recognition=None):
         self.called += 1
         return VoiceReply(user_text="嗯。", text="", pcm16=b"")
 

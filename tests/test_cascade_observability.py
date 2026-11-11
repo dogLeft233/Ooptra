@@ -65,7 +65,7 @@ class FakeCascade:
         self.reply = reply
 
     async def handle_utterance(
-        self, pcm: bytes, *, sample_rate: int, user_key: str = "", channel_key: str = ""
+        self, pcm: bytes, *, sample_rate: int, user_key: str = "", channel_key: str = "", on_recognition=None
     ) -> VoiceReply:
         return self.reply
 

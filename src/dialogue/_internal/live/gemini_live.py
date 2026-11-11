@@ -1000,6 +1000,7 @@ class GeminiLiveBackend(VoiceBackend):
         sample_rate: int,
         user_key: str = "",
         channel_key: str = "",
+        on_recognition: Callable[[str], None] | None = None,
     ) -> VoiceReply:
         if pcm16:
             await self.push_audio(pcm16, sample_rate)

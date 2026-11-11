@@ -231,7 +231,9 @@ class VoiceBackend(ABC):
         sample_rate: int,
         user_key: str = "",
         channel_key: str = "",
+        on_recognition: RecognitionSink | None = None,
     ) -> VoiceReply:
+        """识别完成后同步交付本次输入；取消不撤销已交付事实，不写历史。"""
         raise NotImplementedError
 
     async def aclose(self) -> None:

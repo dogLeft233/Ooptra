@@ -1439,79 +1439,101 @@ class VoiceAgent:
             if isinstance(self.backend, StreamingUtterance):
                 await self._handle_streamed_reply(uid, pcm, sample_rate)
                 return
+            memory = getattr(self, "memory", None)
+            record_turn = bridge.bind_turn(speaker=uid)
+            recognized_text = ""
+            recorded = False
+
+            def on_recognition(text: str) -> None:
+                nonlocal recognized_text
+                recognized_text = text
+
             try:
-                reply = await self.backend.handle_utterance(
-                    pcm,
-                    sample_rate=sample_rate,
-                    user_key=f"oopz:{uid}",
-                    channel_key=f"{self._area}/{self._channel}",
-                )
-            except RecognizedGenerationFailed as exc:
-                self.last_reply = f"[error] {exc}"
-                if epoch == self._operation_epoch and bridge.session_id == source_session:
-                    await self._record_output(exc.user_text, "", uid, session, "failed")
-                logger.exception("event=voice.generation.failed stage=after_recognition")
-                return
-            except Exception as exc:
-                logger.exception("voice backend failed")
-                self.last_reply = f"[error] {exc}"
-                return
-
-            if (epoch != self._operation_epoch or self.channels.snapshot().session != session
-                    or bridge.session_id != source_session):
-                return
-
-            # 级联这条链路以前**一句话都不记**（mimo_cascade 整份文件只有一条
-            # debug），出问题只能靠 WebUI 的 last_user_text/last_reply 两个字段猜，
-            # 看不到识别历史、也看不出 VAD 是不是把句子切碎了。音频时长放在这里
-            # 就是为了这个：识别结果正常但时长只有 0.3 秒，那是 VAD 在切句，不是
-            # 模型听不懂。
-            logger.info(
-                "event=voice.asr.completed input_chars=%d audio_seconds=%.1f reply_chars=%d",
-                len(reply.user_text or ""),
-                len(pcm) / 2 / max(1, sample_rate),
-                len(reply.text or ""),
-            )
-            if epoch != self._operation_epoch or self.context_bridge.session_id != source_session:
-                return
-            self.last_user_text = reply.user_text or self.last_user_text
-            if reply.control is not None and reply.control.leave:
-                await self._record_output(reply.user_text, "", uid, session, "silent")
-                self.request_voice_leave()
-                return
-            if reply.control is not None and reply.control.volume is not None:
-                await self._record_output(reply.user_text, "", uid, session, "silent")
-                result = await self._apply_volume_command(reply.control.volume)
-                if not self.output_muted:
-                    await self.speak_text(result.get("message") or "语音输出调整失败，请查看控制台。")
-                return
-            if reply.text:
-                self.last_reply = reply.text
-
-            confirmation: Literal["completed", "silent", "interrupted", "failed", "unknown"] = "silent"
-            if reply.pcm16 and self.duplex is not None:
-                self._speaking = True
-                self.turns += 1
-                playback = self._start_playback(session, self.duplex)
                 try:
-                    chunk = max(2, int(reply.sample_rate * 0.04) * 2)
-                    for offset in range(0, len(reply.pcm16), chunk):
-                        if not self._speaking:
-                            playback.interrupt()
-                            break
-                        pushed = await playback.push(reply.pcm16[offset:offset + chunk], reply.sample_rate)
-                        if not pushed.ok:
-                            logger.warning("模型音频推流失败，房间听不到：%s", pushed.reason)
-                            break
-                        await asyncio.sleep(0.02)
-                    confirmation = (await playback.finish(reply.sample_rate)).status
-                finally:
-                    self._playbacks.discard(playback)
-                    self._speaking = False
-            if confirmation == "completed" and not reply.text:
-                confirmation = "unknown"
-            if epoch == self._operation_epoch and bridge.session_id == source_session:
-                await self._record_output(reply.user_text or "", reply.text, uid, session, confirmation)
+                    reply = await self.backend.handle_utterance(
+                        pcm,
+                        sample_rate=sample_rate,
+                        user_key=f"oopz:{uid}",
+                        channel_key=f"{self._area}/{self._channel}",
+                        on_recognition=on_recognition,
+                    )
+                except RecognizedGenerationFailed as exc:
+                    self.last_reply = f"[error] {exc}"
+                    if epoch == self._operation_epoch and bridge.session_id == source_session:
+                        await self._record_output(exc.user_text, "", uid, session, "failed")
+                        recorded = True
+                    logger.exception("event=voice.generation.failed stage=after_recognition")
+                    return
+                except Exception as exc:
+                    logger.exception("voice backend failed")
+                    self.last_reply = f"[error] {exc}"
+                    return
+
+                if (epoch != self._operation_epoch or self.channels.snapshot().session != session
+                        or bridge.session_id != source_session):
+                    return
+
+                # 级联这条链路以前**一句话都不记**（mimo_cascade 整份文件只有一条
+                # debug），出问题只能靠 WebUI 的 last_user_text/last_reply 两个字段猜，
+                # 看不到识别历史、也看不出 VAD 是不是把句子切碎了。音频时长放在这里
+                # 就是为了这个：识别结果正常但时长只有 0.3 秒，那是 VAD 在切句，不是
+                # 模型听不懂。
+                logger.info(
+                    "event=voice.asr.completed input_chars=%d audio_seconds=%.1f reply_chars=%d",
+                    len(reply.user_text or ""),
+                    len(pcm) / 2 / max(1, sample_rate),
+                    len(reply.text or ""),
+                )
+                if epoch != self._operation_epoch or self.context_bridge.session_id != source_session:
+                    return
+                self.last_user_text = reply.user_text or self.last_user_text
+                if reply.control is not None and reply.control.leave:
+                    await self._record_output(reply.user_text, "", uid, session, "silent")
+                    recorded = True
+                    self.request_voice_leave()
+                    return
+                if reply.control is not None and reply.control.volume is not None:
+                    await self._record_output(reply.user_text, "", uid, session, "silent")
+                    recorded = True
+                    result = await self._apply_volume_command(reply.control.volume)
+                    if not self.output_muted:
+                        await self.speak_text(result.get("message") or "语音输出调整失败，请查看控制台。")
+                    return
+                if reply.text:
+                    self.last_reply = reply.text
+
+                confirmation: Literal["completed", "silent", "interrupted", "failed", "unknown"] = "silent"
+                if reply.pcm16 and self.duplex is not None:
+                    self._speaking = True
+                    self.turns += 1
+                    playback = self._start_playback(session, self.duplex)
+                    try:
+                        chunk = max(2, int(reply.sample_rate * 0.04) * 2)
+                        for offset in range(0, len(reply.pcm16), chunk):
+                            if not self._speaking:
+                                playback.interrupt()
+                                break
+                            pushed = await playback.push(reply.pcm16[offset:offset + chunk], reply.sample_rate)
+                            if not pushed.ok:
+                                logger.warning("模型音频推流失败，房间听不到：%s", pushed.reason)
+                                break
+                            await asyncio.sleep(0.02)
+                        confirmation = (await playback.finish(reply.sample_rate)).status
+                    finally:
+                        self._playbacks.discard(playback)
+                        self._speaking = False
+                if confirmation == "completed" and not reply.text:
+                    confirmation = "unknown"
+                if epoch == self._operation_epoch and bridge.session_id == source_session:
+                    await self._record_output(reply.user_text or "", reply.text, uid, session, confirmation)
+                    recorded = True
+            finally:
+                if not recorded and recognized_text:
+                    record_turn(recognized_text, "", interrupted=True)
+                    turn = ConfirmedTurn(recognized_text, "", "interrupted", user_key=f"oopz:{uid}",
+                                         channel_key=f"{session.room_target.area}/{session.room_target.channel}")
+                    if memory is not None:
+                        await asyncio.to_thread(memory.record, turn)
 
     async def _handle_streamed_reply(self, uid: str, pcm: bytes, sample_rate: int) -> None:
         session = self.channels.snapshot().session
