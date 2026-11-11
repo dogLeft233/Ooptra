@@ -220,6 +220,7 @@ function switchVoiceTab(tab) {
   document.querySelectorAll('.vpane').forEach((el) => {
     el.classList.toggle('is-active', el.id === 'vpane-' + name);
   });
+  if (name === 'voices') window.loadVoiceLibrary?.();
   if (name === 'members') refreshMembers();
   if (name === 'bindings') loadBindings();
   if (name === 'auto-visit') refreshAutoVisit(true);

@@ -275,3 +275,33 @@ DELETE /memory
 双实例隔离配置、`cascade_turn_limit` 的额度语义、同频道复测步骤、停止与退房要求，
 统一见 [双机器人语音联调验收](bot-pair-acceptance.md)。该文档同时保存首次实测结论和回放证据，
 作为语音功能的验收标准之一。
+
+
+## 音色管理
+
+控制台进入「语音工作台 → 音色管理」，当前支持「阿里语音 + DeepSeek」及 Qwen Audio TTS。
+先配置 DashScope API Key 和对应地域的语音 WS 地址；音色管理使用同一域名与凭据。
+
+1. 填写 1 到 10 位英文字母或数字名称，上传参考录音，点击「创建音色」。
+2. 记录创建结果中的音色 ID，再点「刷新音色」。云端目录跨重启保留，不另建本地目录。
+3. 选择状态就绪的音色，先「试听所选音色」，再点「让 Bot 使用此音色」。可选回默认系统音色。
+
+推荐 10 到 20 秒清晰单人录音，最长 60 秒、最大 10 MB；支持 16-bit WAV、MP3、M4A，采样率至少 16 kHz。
+避免音乐、噪音、其他人声与超过 2 秒的停顿。WAV 的格式和时长在本地检查，压缩音频由云端继续检查。
+上传录音会交给阿里云创建音色；应用不将原始录音存到 `data/`。
+创建请求超时或被取消时，云端可能已创建成功，请先刷新确认，避免重复创建。
+
+音色与创建时的目标模型绑定，目录只列当前模型的音色。切换会保存 `VOICE_AGENT_CONFIG.aliyun_deepseek.tts_voice`，
+使用配置版本检查和运行应用回执；保存与应用失败会分别提示。下一次新生成语音使用新音色，已生成或播放中的语音不会被改写。
+音色创建本身不进房、不切换当前声音；试听只在浏览器播放。试听携带目录模型身份，服务端以同一配置快照校验就绪并合成；模型已改变时先刷新目录，不把前一次校验用于另一配置。
+
+接口（独立语音端口没有 `/api` 前缀）：
+
+- `GET /api/voice/voices?page=0`：每页查询 100 个云端条目，返回匹配模型的音色、当前选择和 `has_more`。
+- `POST /api/voice/voices`：multipart 表单 `prefix` 与 `audio`，返回新音色 ID；就绪状态需随后刷新查询。
+- 音色库调用 `POST /api/voice/preview` 时同时传 `kind=voice`、`voice`、`model` 和 `text`，由生成模块一次完成受校验试听；系统音色由同一目录能力交付。
+- `POST /api/voice/voices/check`：JSON `voice_id`，确认当前模型与云端就绪状态。
+- 保存选择复用 `POST /api/config`，字段为 `voice.aliyun_deepseek.tts_voice`，携带 `expected_revision` 和 `request_id`。
+
+规格与协议参考：[声音复刻](https://help.aliyun.com/zh/model-studio/voice-cloning-user-guide)、
+[HTTP API](https://help.aliyun.com/zh/model-studio/voice-clone-design-http-api)。

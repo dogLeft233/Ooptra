@@ -1109,6 +1109,14 @@ form[inert] { opacity: .65; }
 @media (max-width: 1000px) { .binding-layout { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 400px) { .binding-row { padding: 12px; } .binding-route { gap: 6px; grid-template-columns: minmax(0, 1fr) 16px minmax(0, .85fr); } .binding-route strong { font-size: 14px; } }
 
+/* 音色管理：录音创建与当前选择并排展示，小屏沿用工具工作区的单列布局。 */
+#vpane-voices .field { display: grid; gap: 6px; margin: 14px 0; }
+#vpane-voices .control { width: 100%; min-width: 0; }
+#vpane-voices .save-row { display: flex; gap: 8px; flex-wrap: wrap; }
+#voices-player { display: block; max-width: 100%; margin-top: 12px; }
+#voices-player[hidden] { display: none; }
+#voices-created, #voices-current { overflow-wrap: anywhere; }
+
 </style>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiIgZmlsbD0ibm9uZSI+PHBhdGggZD0iTTE0IDEyYTcgNyAwIDEgMC04IDExbC0yIDQgNi0zYTcgNyAwIDAgMCA0LTEyWiIgc3Ryb2tlPSIjMzE1RERDIiBzdHJva2Utd2lkdGg9IjMiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48cGF0aCBkPSJNMTggMjBhNyA3IDAgMSAwIDgtMTFsMi00LTYgM2E3IDcgMCAwIDAtNCAxMloiIHN0cm9rZT0iIzE2N0Y3QSIgc3Ryb2tlLXdpZHRoPSIzIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PHBhdGggZD0iTTEyIDE2aDgiIHN0cm9rZT0iIzE3MzQ1MSIgc3Ryb2tlLXdpZHRoPSIzIiBzdHJva2UtbGluZWNhcD0icm91bmQiLz48L3N2Zz4K" />
 </head>
@@ -1140,6 +1148,7 @@ form[inert] { opacity: .65; }
   const channels = [{id: 'demo-channel-1', name: '游戏语音'}, {id: 'demo-channel-2', name: '休息室'}];
   let bindings = [{group_id: 'Demo:GroupMessage:123456789', umo: 'Demo:GroupMessage:123456789', area: areas[0].id, areas: [areas[0].id], channel: '', label: '演示开黑群'}];
   let sourceRules = [];
+  const demoVoices = [{voice_id: 'longanhuan_v3.1', target_model: 'qwen-audio-3.1-tts-flash', status: 'OK', kind: 'system'}];
   const logs = ['14:20:00 INFO [Preview] 离线演示已启动，没有连接真实服务。',
     '14:20:01 INFO [Bridge] 演示数据：Oopz / OneBot 已连接',
     '14:20:02 INFO [Voice] 回复概率 30%，连续对话窗口 30 秒，独处 30 秒退出'];
@@ -1289,6 +1298,15 @@ form[inert] { opacity: .65; }
       return {config: visit, status: visitStatus};
     }
     if (endpoint === '/api/voice/diagnostics') return {checks};
+    if (endpoint === '/api/voice/voices/check') return {voice: demoVoices.find(row => row.voice_id === body.voice_id)};
+    if (endpoint === '/api/voice/voices') {
+      if (method === 'POST') {
+        const item = {voice_id: 'qwen-audio-3.1-tts-flash-' + body.prefix + '-demo', target_model: 'qwen-audio-3.1-tts-flash', status: 'OK', kind: 'custom'};
+        demoVoices.push(item); return {voice: item};
+      }
+      return {voices: demoVoices, model: groups.voice.fields['aliyun_deepseek.tts_model'].value,
+        current_voice: groups.voice.fields['aliyun_deepseek.tts_voice'].value, page: 0, has_more: false};
+    }
     if (endpoint === '/api/voice/preview/prompts') return {prompts: visit.defaults[query.get('kind') === 'leave' ? 'leave_prompts' : 'enter_prompts']};
     if (endpoint === '/api/voice/preview') throw {status: 400, error: '离线预览不调用模型或合成音频；请在正式部署中试听'};
     if (endpoint === '/api/maintenance/network/test') return {elapsed_ms: 0, detail: '离线演示，没有实际联网；正式部署将在部署机器测试'};
@@ -1327,7 +1345,7 @@ form[inert] { opacity: .65; }
     try {
       if (!url.pathname.startsWith('/api/') || url.origin !== 'https://preview.invalid') throw {status: 400, error: '离线预览禁止真实 API 请求'};
       if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-      const body = options.body ? JSON.parse(options.body) : {};
+      const body = options.body instanceof FormData ? Object.fromEntries(options.body) : options.body ? JSON.parse(options.body) : {};
       result = {ok: true, ...clone(await dispatch(url.pathname, options.method || 'GET', body, url.searchParams))};
     } catch (err) {status = err.status || 400; result = {ok: false, error: err.error || err.message};}
     return new Response(JSON.stringify(result), {status, headers: {'Content-Type': 'application/json'}});
@@ -1581,6 +1599,7 @@ form[inert] { opacity: .65; }
         <button class="subtab" data-tab="members">房间成员</button>
         <button class="subtab" data-tab="bindings">会话对应</button>
         <button class="subtab" data-tab="persona">人格与记忆</button>
+        <button class="subtab" data-tab="voices">音色管理</button>
         <button class="subtab" data-tab="tools">自检与试听</button>
       </div>
 
@@ -1748,6 +1767,30 @@ form[inert] { opacity: .65; }
       </div>
 
       <!-- 成员 -->
+      <div class="vpane" id="vpane-voices">
+        <div class="tool-workspace">
+          <section class="card">
+            <header class="card-head"><h3>Bot 的声音</h3><button class="btn ghost sm" id="voices-refresh" type="button">刷新音色</button></header>
+            <p class="hint" id="voices-current">读取当前音色…</p>
+            <label class="field"><span>可用音色</span><select class="control" id="voices-select" aria-label="可用音色"></select></label>
+            <div class="save-row"><button class="btn ghost" id="voices-more" type="button" hidden>加载更多</button><button class="btn primary" id="voices-use" type="button" disabled>让 Bot 使用此音色</button></div>
+            <p class="hint">切换会保存配置，用于下一次新生成的语音；正在播放的语音保持原音色。当前支持「阿里语音 + DeepSeek」后端。</p>
+            <label class="field"><span>试听台词</span><textarea class="control" id="voices-text" rows="2" maxlength="100">你好呀，今天有什么有趣的事情想和我聊聊？</textarea></label>
+            <button class="btn ghost" id="voices-preview" type="button" disabled>试听所选音色</button>
+            <audio id="voices-player" controls hidden></audio>
+          </section>
+          <section class="card">
+            <header class="card-head"><h3>从录音创建音色</h3><span class="chip">Qwen 声音复刻</span></header>
+            <p class="hint">推荐 10～20 秒清晰单人录音，最长 60 秒、最大 10 MB，采样率至少 16 kHz。避免音乐、噪声和超过 2 秒的停顿。</p>
+            <label class="field"><span>音色名称</span><input class="control" id="voices-prefix" maxlength="10" pattern="[A-Za-z0-9]{1,10}" placeholder="例如 dafeiyu" /><small class="hint">1～10 个英文字母或数字，会成为云端音色 ID 的一部分。</small></label>
+            <label class="field"><span>参考录音</span><input class="control" id="voices-file" type="file" accept=".wav,.mp3,.m4a" /><small class="hint">支持 16-bit WAV、MP3、M4A。压缩音频的时长和采样率由云端校验。录音会上传阿里云用于创建音色。</small></label>
+            <button class="btn primary" id="voices-create" type="button">创建音色</button>
+            <p class="hint" id="voices-created" role="status"></p>
+          </section>
+        </div>
+        <p class="hint" id="voices-feedback" role="status" aria-live="polite"></p>
+      </div>
+
       <div class="vpane" id="vpane-tools">
         <div class="tool-workspace">
           <section class="card">
@@ -1997,8 +2040,8 @@ async function api(path, opts = {}) {
   try {
     const res = await fetch(withToken(path), {
       method: opts.method || 'GET',
-      headers: opts.body ? { 'Content-Type': 'application/json' } : {},
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      headers: opts.body && !(opts.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {},
+      body: opts.body instanceof FormData ? opts.body : opts.body ? JSON.stringify(opts.body) : undefined,
       signal: controller.signal,
     });
     let payload = null;
@@ -3569,6 +3612,7 @@ function switchVoiceTab(tab) {
   document.querySelectorAll('.vpane').forEach((el) => {
     el.classList.toggle('is-active', el.id === 'vpane-' + name);
   });
+  if (name === 'voices') window.loadVoiceLibrary?.();
   if (name === 'members') refreshMembers();
   if (name === 'bindings') loadBindings();
   if (name === 'auto-visit') refreshAutoVisit(true);
@@ -4309,6 +4353,124 @@ async function saveVisitConfig(scope) {
   } catch (err) { feedback.textContent = '保存失败：' + err.message; toast('保存失败', err.message, 'err'); }
   finally { form.inert = false; }
 }
+
+</script>
+<script>
+/* 云端目录是音色权威；选择复用配置事务，不保存第二份当前音色。 */
+(() => {
+  let pageIndex = 0;
+  let model = '';
+  let busy = false;
+  let sequence = 0;
+  let audioUrl = '';
+  let voices = new Map();
+  const feedback = message => text('voices-feedback', message);
+  const requestId = () => crypto.randomUUID ? crypto.randomUUID() :
+    Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
+
+  function updateControls() {
+    const ready = voices.get($('voices-select').value)?.status === 'OK';
+    for (const id of ['voices-refresh', 'voices-create', 'voices-more', 'voices-select']) $(id).disabled = busy;
+    $('voices-use').disabled = busy || !ready;
+    $('voices-preview').disabled = busy || !ready;
+  }
+
+  function render(selected) {
+    const select = $('voices-select');
+    select.replaceChildren();
+    for (const voice of voices.values()) {
+      const option = document.createElement('option');
+      option.value = voice.voice_id;
+      option.textContent = (voice.kind === 'system' ? '系统音色 · ' : '') + voice.voice_id +
+        (voice.status === 'OK' ? '' : ' · ' + voice.status);
+      option.disabled = voice.status !== 'OK';
+      select.appendChild(option);
+    }
+    if (voices.get(selected)?.status === 'OK') select.value = selected;
+    updateControls();
+  }
+
+  async function load(append = false) {
+    const generation = ++sequence;
+    const result = await api('/api/voice/voices?page=' + (append ? pageIndex + 1 : 0));
+    if (generation !== sequence) return;
+    const selected = append ? $('voices-select').value : result.current_voice;
+    if (!append) voices = new Map();
+    for (const voice of result.voices) voices.set(voice.voice_id, voice);
+    model = result.model;
+    pageIndex = result.page;
+    text('voices-current', '当前模型：' + model + '；当前音色：' + result.current_voice);
+    $('voices-more').hidden = !result.has_more;
+    render(selected);
+  }
+
+  async function run(action) {
+    if (busy) return;
+    busy = true;
+    updateControls();
+    feedback('处理中…');
+    try { await action(); }
+    catch (error) { feedback(error.message); }
+    finally { busy = false; updateControls(); }
+  }
+
+  window.loadVoiceLibrary = () => run(async () => { await load(); feedback('音色列表已更新'); });
+  $('voices-refresh').onclick = window.loadVoiceLibrary;
+  $('voices-more').onclick = () => run(async () => { await load(true); feedback('已加载更多音色'); });
+  $('voices-select').onchange = updateControls;
+
+  $('voices-create').onclick = () => run(async () => {
+    const file = $('voices-file').files[0];
+    const prefix = $('voices-prefix').value.trim();
+    if (!/^[A-Za-z0-9]{1,10}$/.test(prefix)) throw new Error('音色名称须为 1～10 个英文字母或数字');
+    if (!file || !/\.(wav|mp3|m4a)$/i.test(file.name) || !file.size || file.size > 10 * 1024 * 1024) {
+      throw new Error('请选择不超过 10 MB 的 WAV、MP3 或 M4A 文件');
+    }
+    const body = new FormData();
+    body.append('prefix', prefix);
+    body.append('audio', file);
+    feedback('正在创建音色，请勿重复提交；超时后先刷新列表确认结果。');
+    const result = await api('/api/voice/voices', {method: 'POST', body});
+    text('voices-created', '已创建：' + result.voice.voice_id + '。刷新列表确认就绪后，即可试听和使用。');
+    // 单独保留创建回执；后续目录查询失败不会把成功创建报成失败。
+    feedback('创建成功，请刷新音色列表。');
+  });
+
+  $('voices-use').onclick = () => run(async () => {
+    const voice = $('voices-select').value;
+    const config = await api('/api/config');
+    const fields = config.groups.voice.fields;
+    if (fields.backend.value !== 'aliyun_deepseek' || fields['aliyun_deepseek.tts_model'].value !== model) {
+      throw new Error('语音后端或模型已改变，请刷新音色列表后再切换');
+    }
+    await api('/api/voice/voices/check', {method: 'POST', body: {voice_id: voice}});
+    const result = await api('/api/config', {method: 'POST', body: {
+      updates: {voice: {'aliyun_deepseek.tts_voice': voice}},
+      expected_revision: config.revision, request_id: requestId(),
+    }});
+    if (result.hot_reload_failed || !['applied', undefined].includes(result.application_state)) {
+      feedback('音色已保存，但运行应用未完成：' + (result.notes || []).join('；') + '。请重试切换。');
+      return;
+    }
+    await load();
+    feedback('已切换：' + voice + '。Bot 的下一次新生成语音将使用此音色。');
+  });
+
+  $('voices-preview').onclick = () => run(async () => {
+    const voice = $('voices-select').value;
+    const result = await api('/api/voice/preview', {method: 'POST', body: {
+      kind: 'voice', text: $('voices-text').value.trim(), voice, model,
+    }});
+    const bytes = Uint8Array.from(atob(result.wav_base64), char => char.charCodeAt(0));
+    const player = $('voices-player');
+    player.pause();
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+    audioUrl = URL.createObjectURL(new Blob([bytes], {type: 'audio/wav'}));
+    player.src = audioUrl;
+    player.hidden = false;
+    feedback('试听已生成，可播放对比；Bot 当前音色未改变。');
+  });
+})();
 
 </script>
 <script>

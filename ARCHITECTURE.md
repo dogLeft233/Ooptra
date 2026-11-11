@@ -11,7 +11,7 @@ Ooptra 连接 Oopz 与 OneBot v11/AstrBot，提供文字代理、实时语音和
 | 渠道交互 | 外部发生了什么，动作实际执行了吗？ | Oopz/OneBot 协议、身份映射、账号和浏览器绑定、实际房间、输入授权/VAD、播放和执行台账 | [channels](src/channels/README.md) → `api.py` / `models.py` |
 | 上下文管理 | 机器人现在知道什么，哪些信息可使用或写入？ | 版本化情境、来源绑定、近期历史、授权、SQLite 事务及外部记忆 outbox/回执 | [context](src/context/README.md) → `api.py` / `models.py` |
 | 行为决策 | 下一步应做什么？ | 输入尝试配额、触发去重、接话概率/关键词/窗口、冷却、抢话许可、串门阶段和耐久访问额度 | [behavior](src/behavior/README.md) → `api.py` / `models.py` |
-| 对话生成 | 如何识别输入并形成表达？ | 供应商协议、识别/控制候选、表达任务与有界事件流、Live 提议/许可、独立试听/自检 | [dialogue](src/dialogue/README.md) → `api.py` / `models.py` |
+| 对话生成 | 如何识别输入并形成表达？ | 供应商协议、识别/控制候选、表达任务与有界事件流、Live 提议/许可、独立试听/自检、云端音色管理 | [dialogue](src/dialogue/README.md) → `api.py` / `models.py` |
 | 系统维护 | 应用如何配置、运行和恢复？ | 配置版本/CAS、保存与应用回执、凭据、维护计划/任务、备份、父子交接、进程监督和激活屏障 | [operations](src/operations/README.md) → `api.py` / `models.py` |
 
 五模块在同一个 Python/asyncio 应用中协作。模块内部按独有知识组织，不为每次调用增加转发层；不要求独立进程或消息中间件。[应用目录](src/app/README.md) 只装配端口、关联原会话与因果 ID、传递结果并管理流程取消。
@@ -97,6 +97,8 @@ Oopz → OneBot → AstrBot → OneBot → Oopz 的代理路由全部在渠道�
 管理入口解析请求 → 维护模块检查版本/屏障并提交配置或维护计划 → 装配管理端口报告各组件应用结果。重复请求按持久回执处理；保存成功和应用失败可分别查询。候选版本在父提交前只开放查询/health，不连接平台或启动自动行为。
 
 维护先停止接收业务、静默流程和资源，持久化 handoff 后通知主循环退出；父确认进程身份及真实退出后切换、重启、健康检查，失败回滚。外部 Oopz 暂时断连不单独视作版本回滚理由。备份通过 SQLite backup 捕获一致状态，归档完整校验后原子发布。
+
+音色目录中的系统与云端音色都由生成模块的 `VoiceLibrary` 统一交付。音色库试听携带原目录模型，生成模块在同一配置快照完成就绪校验及独立合成，HTTP 与浏览器不承担跨请求保持校验有效性的责任。
 
 ## 实现取舍与验证入口
 

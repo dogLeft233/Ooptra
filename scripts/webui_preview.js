@@ -21,6 +21,7 @@
   const channels = [{id: 'demo-channel-1', name: '游戏语音'}, {id: 'demo-channel-2', name: '休息室'}];
   let bindings = [{group_id: 'Demo:GroupMessage:123456789', umo: 'Demo:GroupMessage:123456789', area: areas[0].id, areas: [areas[0].id], channel: '', label: '演示开黑群'}];
   let sourceRules = [];
+  const demoVoices = [{voice_id: 'longanhuan_v3.1', target_model: 'qwen-audio-3.1-tts-flash', status: 'OK', kind: 'system'}];
   const logs = ['14:20:00 INFO [Preview] 离线演示已启动，没有连接真实服务。',
     '14:20:01 INFO [Bridge] 演示数据：Oopz / OneBot 已连接',
     '14:20:02 INFO [Voice] 回复概率 30%，连续对话窗口 30 秒，独处 30 秒退出'];
@@ -170,6 +171,15 @@
       return {config: visit, status: visitStatus};
     }
     if (endpoint === '/api/voice/diagnostics') return {checks};
+    if (endpoint === '/api/voice/voices/check') return {voice: demoVoices.find(row => row.voice_id === body.voice_id)};
+    if (endpoint === '/api/voice/voices') {
+      if (method === 'POST') {
+        const item = {voice_id: 'qwen-audio-3.1-tts-flash-' + body.prefix + '-demo', target_model: 'qwen-audio-3.1-tts-flash', status: 'OK', kind: 'custom'};
+        demoVoices.push(item); return {voice: item};
+      }
+      return {voices: demoVoices, model: groups.voice.fields['aliyun_deepseek.tts_model'].value,
+        current_voice: groups.voice.fields['aliyun_deepseek.tts_voice'].value, page: 0, has_more: false};
+    }
     if (endpoint === '/api/voice/preview/prompts') return {prompts: visit.defaults[query.get('kind') === 'leave' ? 'leave_prompts' : 'enter_prompts']};
     if (endpoint === '/api/voice/preview') throw {status: 400, error: '离线预览不调用模型或合成音频；请在正式部署中试听'};
     if (endpoint === '/api/maintenance/network/test') return {elapsed_ms: 0, detail: '离线演示，没有实际联网；正式部署将在部署机器测试'};
@@ -208,7 +218,7 @@
     try {
       if (!url.pathname.startsWith('/api/') || url.origin !== 'https://preview.invalid') throw {status: 400, error: '离线预览禁止真实 API 请求'};
       if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-      const body = options.body ? JSON.parse(options.body) : {};
+      const body = options.body instanceof FormData ? Object.fromEntries(options.body) : options.body ? JSON.parse(options.body) : {};
       result = {ok: true, ...clone(await dispatch(url.pathname, options.method || 'GET', body, url.searchParams))};
     } catch (err) {status = err.status || 400; result = {ok: false, error: err.error || err.message};}
     return new Response(JSON.stringify(result), {status, headers: {'Content-Type': 'application/json'}});

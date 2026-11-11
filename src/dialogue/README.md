@@ -15,6 +15,7 @@
 | 渠道输出适配 | `audio_output(job)` 的 `GeneratedAudio.frames()` 单订阅产生渠道帧；`evidence()` 不消费源、不缓存全量PCM、不代表已播放 | [_internal/output.py](_internal/output.py) |
 | 持续 Live | `open_live` 固定渠道/来源绑定，`LiveSession.events()` 单订阅提议、输出和控制事件；许可与实际执行分别确认 | [实时模型会话](_internal/live/README.md) |
 | 独立试听 | `create_preview_service().preview` 返回 WAV 产物或具名失败，无真实房间、行为尝试或记忆授权 | [_internal/preview.py](_internal/preview.py) |
+| 音色管理 | `create_voice_library()` 的 `VoiceLibrary` 创建、分页查询与就绪校验；云端拥有目录，当前音色选择仍由维护配置拥有 | [_internal/voice_library.py](_internal/voice_library.py) |
 | 模型自检 | 临时后端 `probe` 返回分阶段证据；不对活跃房间后端调用，调用方负责关闭 | [_internal/diagnostics.py](_internal/diagnostics.py) |
 
 MiMo、阿里 ASR/DeepSeek/阿里 TTS、Gemini Live 为实际适配。OpenAI Realtime 尚未实现，选择它会明确失败；不会用 Gemini 协议伪装支持。`capabilities` 声明 Live、流式表达和固定合成差异，不靠供应商名猜测能力。
@@ -53,3 +54,11 @@ MiMo、阿里 ASR/DeepSeek/阿里 TTS、Gemini Live 为实际适配。OpenAI Rea
 - [来源绑定](../../tests/dialogue/test_context_binding.py)、[日志隐私](../../tests/dialogue/test_generation_logging.py)、[独立自检](../../tests/test_voice_audio_diagnostics.py)及[试听](../../tests/test_voice_tools.py)验证对应边界。
 
 更换共同能力不变的模型供应商，应主要修改此模块适配与装配配置；调整回复概率、冷却或抢话规则应修改行为模块。真实供应商和 Oopz 时序仍由应用的[双机器人验收](../../docs/bot-pair-acceptance.md)另行证明，协议夹具通过不替代真实模型验收。
+
+
+音色管理只支持当前 Qwen Audio TTS 级联后端，沿用语音 WS 域名与 DashScope 凭据。
+每个请求独占最长 45 秒的 HTTP 会话，取消关闭连接；创建无自动重试，超时或取消不代表云端未创建，需先刷新确认。
+上传样本只在请求内存中使用，不新增本地音频目录。WAV 在本地校验格式、采样率、时长和完整性，MP3/M4A 的声学规格由供应商检查。
+创建返回 ID 不代表就绪；只有 `OK` 且模型匹配才允许界面使用。控制台选择经现有配置 CAS、持久化与热应用回执执行，下一次新生成语音使用新配置。
+系统音色映射及首屏目录合并也由 `VoiceLibrary.list/check` 唯一拥有，HTTP 不补写供应商目录。音色库试听在 `PreviewRequest.model` 中携带目录模型，`PreviewService` 在同一配置快照内核对模型、查询就绪并合成；模型已变明确拒绝，校验期间热更新不改变本次临时后端。校验与合成分别遵循45秒、30秒期限，取消回收独立连接；浏览器只发送一次试听请求。
+协议与输入验证见 [音色管理测试](../../tests/dialogue/test_voice_library.py)，保存与运行应用见 [选择配置测试](../../tests/integration/test_selected_voice_configuration.py)。

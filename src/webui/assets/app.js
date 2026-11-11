@@ -43,8 +43,8 @@ async function api(path, opts = {}) {
   try {
     const res = await fetch(withToken(path), {
       method: opts.method || 'GET',
-      headers: opts.body ? { 'Content-Type': 'application/json' } : {},
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      headers: opts.body && !(opts.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {},
+      body: opts.body instanceof FormData ? opts.body : opts.body ? JSON.stringify(opts.body) : undefined,
       signal: controller.signal,
     });
     let payload = null;

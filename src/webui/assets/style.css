@@ -1064,3 +1064,11 @@ form[inert] { opacity: .65; }
 .binding-warning { color: var(--warn-text); font-size: 12px; line-height: 1.6; margin: 12px 0 0; }
 @media (max-width: 1000px) { .binding-layout { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 400px) { .binding-row { padding: 12px; } .binding-route { gap: 6px; grid-template-columns: minmax(0, 1fr) 16px minmax(0, .85fr); } .binding-route strong { font-size: 14px; } }
+
+/* 音色管理：录音创建与当前选择并排展示，小屏沿用工具工作区的单列布局。 */
+#vpane-voices .field { display: grid; gap: 6px; margin: 14px 0; }
+#vpane-voices .control { width: 100%; min-width: 0; }
+#vpane-voices .save-row { display: flex; gap: 8px; flex-wrap: wrap; }
+#voices-player { display: block; max-width: 100%; margin-top: 12px; }
+#voices-player[hidden] { display: none; }
+#voices-created, #voices-current { overflow-wrap: anywhere; }

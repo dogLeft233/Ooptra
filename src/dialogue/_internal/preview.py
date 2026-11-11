@@ -9,6 +9,7 @@ import wave
 from typing import Literal
 from uuid import uuid4
 
+from dialogue.api import VoiceLibrary
 from dialogue.models import PreviewArtifact, PreviewFailure, PreviewRequest
 
 
@@ -83,9 +84,10 @@ async def generate_preview(backend, request: PreviewRequest):
 
 
 class PreviewService:
-    def __init__(self, backend_factory=None):
+    def __init__(self, backend_factory=None, voice_library: VoiceLibrary | None = None):
         self._lock = asyncio.Lock()
         self._factory = backend_factory
+        self._voice_library = voice_library
 
     @property
     def busy(self):
@@ -95,10 +97,16 @@ class PreviewService:
         if self.busy:
             return PreviewFailure(request.preview_id, "busy")
         async with self._lock:
-            from dialogue import create_backend
+            from dialogue import create_backend, create_voice_library
             fresh = copy.deepcopy(settings)
+            if request.model:
+                if fresh.backend != "aliyun_deepseek" or fresh.aliyun_tts_model != request.model:
+                    raise ValueError("语音后端或模型已改变，请刷新音色列表后再试听")
+                voice = await (self._voice_library or create_voice_library()).check(fresh, request.voice)
+                if voice.status != "OK":
+                    raise ValueError("音色尚未就绪，请稍后刷新列表")
             fresh.voice_leave_enabled = fresh.voice_volume_enabled = False
-            fresh.persona = request.persona or settings.persona
+            fresh.persona = request.persona or fresh.persona
             if request.voice:
                 fresh.mimo_tts_voice = fresh.gemini_voice = fresh.aliyun_tts_voice = request.voice
             backend = (self._factory(fresh) if self._factory else
@@ -119,9 +127,9 @@ class PreviewService:
                     cleanup.cancel()
                     await asyncio.gather(cleanup, return_exceptions=True)
 
-    async def generate(self, settings, kind, text, voice=""):
+    async def generate(self, settings, kind, text, voice="", model: str = ""):
         """现有HTTP响应适配；WAV仅在此出口编码。"""
-        request = PreviewRequest(uuid4().hex, kind, text.strip(), voice.strip(), settings.persona)
+        request = PreviewRequest(uuid4().hex, kind, text.strip(), voice.strip(), settings.persona, model)
         result = await self.preview(settings, request)
         if isinstance(result, PreviewFailure):
             raise ValueError(f"试听生成失败：{result.reason}")
