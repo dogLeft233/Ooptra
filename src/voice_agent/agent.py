@@ -921,7 +921,15 @@ class VoiceAgent:
             if result.interrupted or discarded or self._discard_live_audio:
                 completed_playback.interrupt()
 
+            submission = create_turn_submission(self.memory, self.context_bridge,
+                                                speaker="api" if result.internal else result.user_key)
+            input_turn = ConfirmedTurn(result.user_text, "", "interrupted",
+                user_key=(result.user_key if result.user_key.startswith("oopz:")
+                          else f"oopz:{result.user_key}"),
+                channel_key=f"{session.room_target.area}/{session.room_target.channel}" if session else "")
+
             async def complete() -> None:
+                recorded = False
                 try:
                     evidence = await completed_playback.finish(finished_rate)
                     confirmation: Literal["completed", "silent", "interrupted", "failed", "unknown"] = evidence.status
@@ -939,10 +947,15 @@ class VoiceAgent:
                             "" if result.internal else result.user_text,
                             result.text if confirmation == "completed" else "",
                             "api" if result.internal else result.user_key,
-                            session, confirmation,
+                            session, confirmation, submission,
                         )
+                        recorded = True
                 finally:
-                    self._playbacks.discard(completed_playback)
+                    try:
+                        if not recorded and not result.internal and result.user_text and session is not None:
+                            await submission.record(input_turn)
+                    finally:
+                        self._playbacks.discard(completed_playback)
 
             if not emitted or result.interrupted or discarded or failed:
                 await complete()

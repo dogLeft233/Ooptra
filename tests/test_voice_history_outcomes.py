@@ -387,12 +387,15 @@ def test_stop_during_accepted_history_write_commits_once(tmp_path, monkeypatch, 
         try:
             pending = asyncio.create_task(agent._handle_utterance("speaker", b"\x01\x00", 16000))
             assert await asyncio.to_thread(entered.wait, 1)
+            cancelled = asyncio.Event()
+            original_cancel = pending.cancel
+            def cancel(*args, **kwargs):
+                accepted = original_cancel(*args, **kwargs)
+                cancelled.set()
+                return accepted
+            monkeypatch.setattr(pending, "cancel", cancel)
             stopping = asyncio.create_task(agent.stop_current_reply())
-            for _ in range(100):
-                if pending.cancelling():
-                    break
-                await asyncio.sleep(0)
-            assert pending.cancelling()
+            await asyncio.wait_for(cancelled.wait(), 1)
             released.set()
             await asyncio.wait_for(stopping, 1)
             with contextlib.suppress(asyncio.CancelledError):
@@ -407,4 +410,76 @@ def test_stop_during_accepted_history_write_commits_once(tmp_path, monkeypatch, 
         finally:
             released.set()
             await agent.leave()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("operation", ["stop", "leave", "refresh"])
+def test_live_drain_cancel_preserves_only_input_in_original_scope(tmp_path, operation):
+    async def run():
+        from support.context_fixtures import prepare_source
+        agent = make_voice_agent(tmp_path)
+        playback, socket = Playback(), LiveSocket()
+        waiting, released = asyncio.Event(), asyncio.Event()
+        first_connection = True
+        async def connect(*args, **kwargs):
+            nonlocal first_connection
+            if first_connection:
+                first_connection = False
+                return socket
+            return LiveSocket()
+        async def drain(timeout=30):
+            waiting.set()
+            await released.wait()
+            return {"ok": True}
+        from behavior import create_reply_policy
+        agent.settings.backend = "gemini_live"
+        agent.settings.gemini_api_key = "synthetic"
+        agent.backend = create_gemini_backend(agent.settings, agent.memory,
+            reply_policy=create_reply_policy(), connector=connect)
+        agent.live_mode = True
+        agent.bind_duplex(playback)
+        playback.wait_tts_complete = drain
+        await agent.join("area", "room")
+        await prepare_source(agent.context_bridge, {"ok": True, "provider": "memory_companion",
+            "memory_scopes": [{"umo": "original"}]}, "area", "room")
+        await agent._wire_live()
+        async def worker():
+            while True:
+                for event in await agent.context_bridge.poll(wait=0):
+                    if event["operation"] == "prepare":
+                        agent.context_bridge.resolve(event["request_id"], {"ok": True,
+                            "provider": "memory_companion", "memory_scopes": [{"umo": "new"}]})
+                await asyncio.sleep(0)
+        worker_task = asyncio.create_task(worker())
+        try:
+            await socket.deliver({"serverContent": {
+                "inputTranscription": {"text": "recognized original input"},
+                "outputTranscription": {"text": "unconfirmed assistant tail"},
+                "modelTurn": {"parts": [{"inlineData": {
+                    "data": base64.b64encode(b"\x00\x40" * 480).decode(),
+                    "mimeType": "audio/pcm;rate=24000"}}]}, "turnComplete": True}})
+            await asyncio.wait_for(waiting.wait(), 1)
+            if operation == "stop":
+                await agent.stop_current_reply()
+            elif operation == "leave":
+                await agent.leave()
+            else:
+                await agent.refresh_astrbot_context()
+            released.set()
+            assert agent.memory.as_messages() == [
+                {"role": "user", "content": "recognized original input"}]
+            commits = [event for event in json.loads(
+                (tmp_path / "astrbot_voice_outbox.json").read_text(encoding="utf-8"))
+                       if event["operation"] == "commit"]
+            assert len(commits) == 1
+            assert commits[0]["scope"]["memory_scopes"] == [{"umo": "original"}]
+            assert commits[0]["payload"]["user_text"] == "recognized original input"
+            assert commits[0]["payload"]["reply_text"] == ""
+        finally:
+            released.set()
+            worker_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await worker_task
+            await agent.leave()
+            await agent.backend.aclose()
     asyncio.run(run())

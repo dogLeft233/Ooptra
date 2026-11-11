@@ -45,3 +45,5 @@ python -m pytest -v -o faulthandler_timeout=60
 历史收尾：`tests/test_voice_history_outcomes.py` 覆盖非流式识别后等待 chat/TTS 时停止，仅保留原用户输入；Live 公告在渠道成功确认后仅追加助手文本。
 
 提交取消窗口：`tests/test_voice_history_outcomes.py` 用真实阻塞 JSONL 写入覆盖流式/非流式 stop 后仅一份输入/助手及一个 outbox 请求；`tests/context/test_turn_submission.py` 检查取消同时磁盘失败仍被观察且不重复受理。
+
+Live 排空取消：`tests/test_voice_history_outcomes.py` 经真实模型消息、阻塞渠道排空与真实 JSONL/outbox，覆盖停止、退房及来源刷新，确保仅保留原scope输入。阻塞提交回归通过取消事件握手同步，兼容 Python 3.10，不依赖 `Task.cancelling`。
