@@ -149,3 +149,61 @@ def test_live_close_does_not_hide_a_failed_transaction_commit(tmp_path):
             await flow.close()
         await context.close()
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("kind", ["output", "silent_input"])
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_delivery_transaction_failure_keeps_prior_input_and_retry_is_scoped_once(tmp_path, monkeypatch, kind, cancelled):
+    import sqlite3
+
+    from support.context_fixtures import prepare_source
+
+    from app.flows import commit_output, finish_input
+    from channels.models import ActionOutcome
+    from context.models import ConfirmedTurn, ContextRequest, Observation, OutputRecord
+    async def scenario():
+        context = create_context_service(str(tmp_path / "history.jsonl"))
+        channel = create_channel(Transport())
+        session = (await channel.execute(JoinRoom("join", RoomTarget("a", "b"), 0))).session
+        await prepare_source(context.bridge, {"ok": True, "provider": "memory_companion",
+            "memory_scopes": [{"umo": "original"}]}, "a", "b")
+        context.observe(Observation("input", session, "wire", 1, "recognized", "original question", "speaker", "input"))
+        prepared = await context.prepare_context(ContextRequest(session, "speaker", "input"))
+        record = OutputRecord("output", session, ConfirmedTurn("original question", "answer", "completed", "speaker"),
+                              ActionOutcome("output", "completed", session), prepared.context_ref, "input")
+        entered, release = threading.Event(), threading.Event()
+        connect = sqlite3.connect
+        def failing_delivery(*args, **kwargs):
+            db = connect(*args, **kwargs)
+            def authorize(operation, table, *_):
+                if operation == sqlite3.SQLITE_INSERT and table == "deliveries":
+                    entered.set()
+                    assert release.wait(3)
+                    return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_OK
+            db.set_authorizer(authorize)
+            return db
+        with monkeypatch.context() as patch:
+            patch.setattr(sqlite3, "connect", failing_delivery)
+            pending = asyncio.create_task(commit_output(context, record) if kind == "output" else finish_input(context, "input"))
+            try:
+                assert await asyncio.to_thread(entered.wait, 1)
+                if cancelled:
+                    pending.cancel()
+                release.set()
+                with pytest.raises(asyncio.CancelledError if cancelled else sqlite3.DatabaseError):
+                    await pending
+            finally:
+                release.set()
+                await asyncio.gather(pending, return_exceptions=True)
+        assert context.history.as_messages() == [{"role": "user", "content": "original question"}]
+        assert await context.bridge.poll(wait=0) == []
+        context.finish_input("input")
+        context.finish_input("input")
+        await asyncio.sleep(0)
+        events = await context.bridge.poll(wait=0)
+        assert len(events) == 1
+        assert events[0]["scope"]["memory_scopes"] == [{"umo": "original"}]
+        assert events[0]["payload"]["user_text"] == "original question"
+        await context.close()
+    asyncio.run(scenario())

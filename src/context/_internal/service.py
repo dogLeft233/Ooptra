@@ -70,6 +70,16 @@ class ContextService:
         # Only explicit session observations can replace an active session. Delayed transcription remains history.
         active = (observation.session.session_id not in self._retired_sessions and
                   (current is None or current[0].session == observation.session or observation.kind == "session"))
+        if observation.kind == "recognized" and not observation.user_key:
+            previous_input = self._inputs.get(observation.input_ref)
+            projected = current[0] if current is not None else None
+            if ((previous_input is not None and previous_input.user_key)
+                    or (projected is not None and projected.input_ref == observation.input_ref and projected.user_key)):
+                self._grants = {key: grant for key, grant in self._grants.items()
+                                if grant.input_ref != observation.input_ref}
+                if previous_input is not None:
+                    self._inputs[observation.input_ref] = replace(previous_input, user_key="")
+                self._ledger.revoke_input_identity(observation.input_ref)
         if observation.kind == "recognized" and observation.complete:
             source = self.bridge.context
             event = None
@@ -202,13 +212,15 @@ class ContextService:
     async def remember(self, request: RememberRequest):
         self._validate_ref(request.context_ref)
         grant = self._grants.get(request.authorization.grant_id)
-        if (grant is None or grant != request.authorization or grant.context_ref != request.context_ref or grant.expires_at < time.time()
+        observed = self._inputs.get(grant.input_ref) if grant is not None else None
+        if (observed is None or not observed.user_key or (bool(request.speaker) and observed.user_key != request.speaker)
+                or grant is None or grant != request.authorization or grant.context_ref != request.context_ref or grant.expires_at < time.time()
                 or not request.tool_call_id or not 1 <= len(request.content.strip()) <= 2000):
             raise ValueError("记忆写入没有有效授权")
         binding = self._bindings[request.context_ref]
         event = {"protocol": 1, "request_id": "tool-" + request.tool_call_id, **copy.deepcopy(binding),
                  "operation": "remember", "created_at": grant.expires_at - 120,
-                 "payload": {"content": request.content, "speaker": request.speaker}}
+                 "payload": {"content": request.content, "speaker": request.speaker or observed.user_key}}
         receipt = self._ledger.commit("tool:" + request.tool_call_id,
                                       {"content": request.content, "context_ref": asdict(request.context_ref), "grant": grant.grant_id},
                                       ConfirmedTurn("", "", "silent"), event=event)

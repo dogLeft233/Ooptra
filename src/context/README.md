@@ -39,3 +39,5 @@
 公开行为测试：`python -m pytest -q tests/context tests/test_astrbot_context_bridge.py tests/test_astrbot_live_context.py tests/test_memory_recent.py`。覆盖真实 SQLite 回滚、重启、同键冲突、满载补受理、原来源、逐目标重试、增量输入、授权伪造/撤销和旧文件导出。原协议测试继续验证切房、取消、peer 与持久化故障。模块只允许引用 `channels.models` 和公共技术机制。
 
 完整输入的观察事务耐久捕获原来源和稳定 input_ref。无输出终态调用 `finish_input` 采集原输入；正常表达通过 `record_output` 一次合并原输入和确认输出。两者共用输入投递身份，已领取/确认载荷不改写；已采集终态后出现迟到输出只记录独立本地事实，不再次投递问题。容量拒绝保留原载荷，重试不跟随新来源。
+
+同 input_ref 的归属从已知变为未知时，observe 撤销该输入已有写授权，清除已记录输入及未发布来源载荷中的 speaker。旧 PreparedContext/工具端口仍需通过当前授权及原输入身份校验，不能借旧成员写记忆；不改写已经对外受理的历史载荷。

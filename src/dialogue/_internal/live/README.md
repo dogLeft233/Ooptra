@@ -41,3 +41,7 @@ resolve_control仅转换实际结果，不执行SDK。scheduled仅表示已安�
 `LiveSessionRequest.limits` 省略时采用后端构造时配置的限制，显式请求优先。未许可提议的硬截止不因工具请求或晚转录延长。输入定稿计时器和工具等待由会话持有并在关闭时回收；应用等待定稿仍受原播放期限约束，供应商失败会先交付带真实原因的定稿终态，关闭前唤醒应用；取消和失败也不把临时输入提前作为完整记录提交。
 
 [公开许可测试](../../../../tests/dialogue/test_live_permissions.py)守未授权零输出、重复/修订许可、完成后的晚转录、客户端打断、容量与期限；[连接生命周期](../../../../tests/test_gemini_session_lifecycle.py)、[工具控制](../../../../tests/test_voice_volume_intents.py)、[AstrBot真实事务工具](../../../../tests/test_astrbot_live_context.py)验证对应边界。真实网络和 Oopz 音频质量仍由应用双机器人验收记录；测试夹具不是实际Gemini平台验收。
+
+待选轮次在真实供应商边界前使用 `provider_turn_seconds` 硬等待（默认/最大60秒），不能用迟到转录窗口替代；收到边界后才开启 `late_transcription_seconds`。本地超时/断连/取消的 turn_finished 只解挂，`input_complete` 为假时不宣称整句完成。工具授权的有界输入定稿仍经 input_finalized/authorize_input 交接。
+
+输入成员发生混合时，该轮 speaker 不可恢复地清空，撤下已交授权并以 updated 传播身份变化；原表达上下文保持冻结，未来记忆调用不能继续使用旧身份。

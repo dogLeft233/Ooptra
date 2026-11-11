@@ -340,3 +340,29 @@ def test_normal_expression_collects_input_and_reply_once_in_original_wire_event(
         assert events[0]["payload"]["reply_text"] == "answer"
         await context.close()
     asyncio.run(scenario())
+
+
+def test_mixed_input_revokes_previously_prepared_grant_and_persisted_speaker(tmp_path):
+    from support.context_fixtures import prepare_source
+
+    from context.models import RememberRequest
+    async def scenario():
+        context = create_context_service(str(tmp_path / "history.jsonl"))
+        ref = session()
+        await prepare_source(context.bridge, {"ok": True, "provider": "memory_companion",
+            "memory_scopes": [{"umo": "original"}]}, "area", "room")
+        context.observe(Observation("alice", ref, "wire", 1, "recognized", "请记住我喜欢茶", "Alice", "input"))
+        old = await context.prepare_context(ContextRequest(ref, "Alice", "input"))
+        assert len(old.authorized_write_grants) == 1
+        old_tools = context.tools(old)
+        context.observe(Observation("mixed", ref, "wire", 2, "recognized", "请记住我喜欢茶", "", "input", complete=False))
+        with pytest.raises(ValueError, match="授权"):
+            await old_tools.remember(RememberRequest("stale-write", old.context_ref, "喜欢茶", old.authorized_write_grants[0], "Alice"))
+        refreshed = await context.prepare_context(ContextRequest(ref, "Alice", "input"))
+        assert not refreshed.authorized_write_grants
+        context.finish_input("input")
+        event = (await context.bridge.poll(wait=1))[0]
+        assert event["operation"] == "commit" and event["payload"]["speaker"] == ""
+        assert context.history.recent()[0]["user_key"] == ""
+        await context.close()
+    asyncio.run(scenario())

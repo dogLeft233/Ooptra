@@ -54,3 +54,7 @@ PR 审查反例入口：[静音和长排空](channels/test_review_playback.py)�
 `tests/operations/test_plan_lifecycle.py` 使用真实变更锁及子进程 watchdog 验证计划/配置并发无死锁和取消后的实际落盘。`tests/app/test_input_delivery.py`、上下文事务及Live定稿回归验证无输出输入的原来源采集、poll/resolve后迟到输出不重复用户句子和重启幂等。
 
 PR3 的旧 TurnSubmission/JSONL 回归已映射到当前 SQLite 事务回滚、`test_output_commit_lifecycle.py` 的受理后取消及 `test_voice_history_outcomes.py` 的输入提交/Live drain取消，未保留退休生成入口或非原子双写约定。
+
+后续上游双存储故障矩阵在当前单 SQLite 设计中映射为 `test_output_commit_lifecycle.py` 的真实投递 SQL 故障/取消/重试：已观察输入不丢失，失败输出事务回滚，原来源恢复采集一次。第九轮拥塞回归覆盖关闭后九句均只有用户且原scope投递各一次，不恢复旧 JSONL/outbox 双写能力。
+
+Live 边界回归覆盖 Hold 跨晚转录窗口继续等待、无真实边界的硬超时/断连不提交半句、Alice/Bob 同轮输入无错误归属，以及旧 PreparedContext 工具授权撤销。使用真实 LiveFlow/ContextService 与本地协议替身；等待输入定稿不以播放结束替代。

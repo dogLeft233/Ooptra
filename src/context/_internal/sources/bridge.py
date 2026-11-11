@@ -126,7 +126,7 @@ class ContextBridge:
         self._wake.set()
         try:
             return await asyncio.wait_for(future, max(self.timeout, 20) if operation in {"bindings", "remember"} else self.timeout)
-        except TimeoutError:
+        except asyncio.TimeoutError:
             self._error = "AstrBot 请求超时"
             result = {"ok": False, "error": self._error}
             return self._retry_write(event, result) if operation == "remember" else result
@@ -229,7 +229,7 @@ class ContextBridge:
             if now >= deadline:
                 return []
             self._wake.clear()
-            with contextlib.suppress(TimeoutError):
+            with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._wake.wait(), min(1, deadline - now))
 
     def resolve(self, request_id: str, result: dict) -> bool:

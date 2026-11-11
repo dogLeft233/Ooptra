@@ -168,6 +168,19 @@ class ContextLedger:
         return self.commit("observation:" + identifier, asdict(turn), turn, room=room, session=session,
                            input_ref=identifier, event=event, defer_event=True)
 
+    def revoke_input_identity(self, identifier):
+        with self.transaction() as db:
+            db.execute("UPDATE history SET user_key='' WHERE entry_id=?", ("input:" + identifier,))
+            row = db.execute("SELECT payload,event FROM idempotency WHERE key=?", ("observation:" + identifier,)).fetchone()
+            if row:
+                payload = json.loads(row[0])
+                payload["user_key"] = ""
+                event = json.loads(row[1]) if row[1] else None
+                if event:
+                    event["payload"]["speaker"] = ""
+                db.execute("UPDATE idempotency SET payload=?,event=? WHERE key=?",
+                    (encoded(payload), encoded(event) if event else None, "observation:" + identifier))
+
     def finish_input(self, identifier):
         with self.transaction() as db:
             if not db.execute("SELECT 1 FROM idempotency WHERE key=?", ("observation:" + identifier,)).fetchone():

@@ -53,6 +53,7 @@ class _Turn:
     authorized_tools: Any = None
     rejection_reason: str = ""
     input_reported: bool = False
+    speaker_ambiguous: bool = False
 
 
 class LiveSession:
@@ -121,7 +122,8 @@ class LiveSession:
         self._state, self._reason = "failed", reason
         if self._turn is not None:
             turn = self._turn
-            unfinished = turn.state in {"pending", "allowed", "rejected"} and not turn.input_reported
+            unfinished = not turn.input_reported
+            input_complete = turn.input_ready.is_set()
             turn.state = "failed"
             turn.provider_done.set()
             turn.input_ready.set()
@@ -129,7 +131,7 @@ class LiveSession:
                 turn.input_reported = True
                 self._publish(LiveEvent("turn_finished", self.request.session, turn.ref,
                     turn.user_text, turn.speaker, action_id=turn.action_id, reason=reason,
-                    internal=turn.internal))
+                    internal=turn.internal, input_complete=input_complete))
         self._closed.set()
         # 独立关闭任务，不能让provider reader取消并await自己。
         self._spawn(self._backend.close())
@@ -144,6 +146,17 @@ class LiveSession:
         self._speaker = next(iter(self._speakers)) if len(self._speakers) == 1 else ""
         if len(self._speakers) > 2:
             self._speakers = {"__mixed__", "__unknown__"}
+        turn = self._turn
+        if (turn is not None and not turn.internal and not turn.speaker_ambiguous
+                and (not turn.provider_done.is_set() or not turn.input_ready.is_set())
+                and (len(self._speakers) > 1 or bool(turn.speaker and input.user_key
+                                                    and turn.speaker != input.user_key))):
+            turn.speaker_ambiguous = True
+            turn.speaker = ""
+            turn.authorized_context = turn.authorized_tools = None
+            turn.authorization_ready.clear()
+            turn.ref = ProposalRef(self.live_session_id, turn.ref.turn_id, turn.ref.revision + 1)
+            self._propose(turn, "updated")
         # 音频输入不经过旧provider策略/自动重连路径。
         async with self._writer:
             await self._backend._send({"realtimeInput": {"audio": {
@@ -178,7 +191,7 @@ class LiveSession:
         self._sequence += 1
         now = time.monotonic()
         turn = _Turn(ProposalRef(self.live_session_id, str(self._sequence), 0),
-                     now + self._limits.late_transcription_seconds, now + 60,
+                     now + self._limits.provider_turn_seconds, now + self._limits.provider_turn_seconds,
                      context=self.request.context, tools=self._tools,
                      speaker=self._speaker, internal=internal)
         self._turn = turn
@@ -202,9 +215,10 @@ class LiveSession:
             turn.input_ready.set()
             if not turn.provider_done.is_set() and turn.state == "allowed":
                 self._publish(LiveEvent("input_finalized", self.request.session, turn.ref,
-                    turn.user_text, turn.speaker, action_id=turn.action_id, internal=turn.internal))
-        if turn.provider_done.is_set() and turn.state in {"allowed", "rejected"} and not turn.input_reported:
-            reason = turn.rejection_reason if turn.state == "rejected" else "completed"
+                    turn.user_text, turn.speaker, action_id=turn.action_id, internal=turn.internal,
+                    input_complete=True))
+        if turn.provider_done.is_set() and turn.state in {"allowed", "rejected", "interrupted", "cancelled"} and not turn.input_reported:
+            reason = turn.rejection_reason if turn.state == "rejected" else turn.state if turn.state in {"interrupted", "cancelled"} else "completed"
             if turn.state == "allowed":
                 turn.state = "completed"
             turn.input_reported = True
@@ -212,7 +226,7 @@ class LiveSession:
                 turn.timer.cancel()
             self._publish(LiveEvent("turn_finished", self.request.session, turn.ref,
                 turn.user_text, turn.speaker, action_id=turn.action_id, reason=reason,
-                internal=turn.internal))
+                internal=turn.internal, input_complete=True))
 
     def _schedule_input_finalization(self, turn: _Turn) -> None:
         if turn.input_ready.is_set():
@@ -245,22 +259,18 @@ class LiveSession:
         return ResolveReceipt("applied")
 
     async def _expire(self, turn: _Turn) -> None:
-        while turn.state in {"pending", "allowed", "rejected"}:
+        while turn.state in {"pending", "allowed", "rejected", "interrupted", "cancelled"}:
             await asyncio.sleep(max(0, turn.deadline - time.monotonic()))
             if time.monotonic() < turn.deadline:
                 continue
-            if turn.state == "pending":
-                boundary_known = turn.provider_done.is_set()
-                turn.state = "expired"
-                turn.provider_done.set()
-                self._publish(LiveEvent("turn_finished", self.request.session, turn.ref,
-                    turn.user_text, turn.speaker, reason="expired", internal=turn.internal))
-                if not boundary_known:
-                    self._fail("unresolved_turn_boundary")
-            elif turn.state in {"allowed", "rejected"} and not turn.provider_done.is_set():
-                turn.state = "failed"
-                turn.provider_done.set()
+            if not turn.provider_done.is_set():
                 self._fail("turn_deadline")
+            elif turn.state == "pending":
+                turn.state = "expired"
+                turn.input_reported = True
+                self._publish(LiveEvent("turn_finished", self.request.session, turn.ref,
+                    turn.user_text, turn.speaker, reason="expired", internal=turn.internal,
+                    input_complete=True))
             return
 
     async def resolve_turn(self, ref: ProposalRef, permission: Allow | Hold | Reject) -> ResolveReceipt:
@@ -339,7 +349,8 @@ class LiveSession:
                 if turn.state == "allowed" and not turn.provider_done.is_set():
                     turn.state = "cancelled"
                     self._publish(LiveEvent("turn_finished", self.request.session, turn.ref,
-                        turn.user_text, turn.speaker, action_id=turn.action_id, reason="cancelled"))
+                        turn.user_text, turn.speaker, action_id=turn.action_id, reason="cancelled",
+                        input_complete=turn.input_ready.is_set()))
         turn.job = ExpressionJob(intent.action_id, intent.session, produce,
                                  deadline=min(intent.deadline, turn.deadline))
         self._publish(LiveEvent("output_ready", self.request.session, turn.ref,
@@ -357,7 +368,10 @@ class LiveSession:
             turn.timer.cancel()
         if turn.input_timer is not None:
             turn.input_timer.cancel()
-        self._finalize_input(turn)
+            turn.input_timer = None
+        turn.timer = self._spawn(self._expire(turn))
+        if turn.provider_done.is_set():
+            self._schedule_input_finalization(turn)
         while not turn.audio.empty():
             turn.audio.get_nowait()
         turn.buffered_bytes = 0
@@ -365,7 +379,8 @@ class LiveSession:
         if turn.job is not None:
             await turn.job.aclose()
         self._publish(LiveEvent("turn_finished", self.request.session, turn.ref,
-            turn.user_text, turn.speaker, action_id=turn.action_id, reason="interrupted"))
+            turn.user_text, turn.speaker, action_id=turn.action_id, reason="interrupted",
+            input_complete=turn.input_ready.is_set()))
         await self._backend.interrupt()
 
     async def update_context(self, prepared, *, tools=None) -> ResolveReceipt:
@@ -572,12 +587,13 @@ class LiveSession:
             elif not model_turn and not output_text and input_text and turn.state in {"pending", "allowed"}:
                 pass  # 可证明属于待许可已完成轮次的晚转录。
             elif model_turn or output_text:
-                if turn.state in {"allowed", "rejected"}:
+                if turn.state in {"allowed", "rejected", "interrupted", "cancelled"}:
                     self._finalize_input(turn)
                 if turn.state == "pending":
                     turn.state = "superseded"
+                    turn.input_reported = True
                     self._publish(LiveEvent("turn_finished", self.request.session, turn.ref,
-                        turn.user_text, turn.speaker, reason="superseded"))
+                        turn.user_text, turn.speaker, reason="superseded", input_complete=True))
                 self._last = turn
                 turn = self._turn = None
         if turn is None and (model_turn or output_text or input_text):
@@ -622,7 +638,9 @@ class LiveSession:
             if turn.job is not None:
                 self._spawn(turn.job.aclose())
             self._publish(LiveEvent("turn_finished", self.request.session, turn.ref,
-                turn.user_text, turn.speaker, action_id=turn.action_id, reason="interrupted"))
+                turn.user_text, turn.speaker, action_id=turn.action_id, reason="interrupted",
+                input_complete=turn.input_ready.is_set()))
+            self._schedule_input_finalization(turn)
         elif server.get("turnComplete"):
             logger.info("event=dialogue.live.generated input_chars=%s output_chars=%s state=%s",
                         len(turn.user_text), len(turn.text), turn.state)
@@ -634,7 +652,7 @@ class LiveSession:
                     turn.timer.cancel()
                 turn.timer = self._spawn(self._expire(turn))
                 self._propose(turn, "updated")
-            elif turn.state in {"allowed", "rejected"}:
+            elif turn.state in {"allowed", "rejected", "interrupted", "cancelled"}:
                 if turn.internal:
                     self._finalize_input(turn)
                 else:

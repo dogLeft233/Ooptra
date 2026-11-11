@@ -23,14 +23,17 @@ AudioSink = Callable[[bytes, int], Awaitable[None]]
 
 @dataclass(frozen=True)
 class LiveLimits:
-    """实时迟到关联窗口与候选输出内存上限；不改变已生成回合的期限。"""
+    """真实供应商轮次硬等待、边界后迟到关联窗与候选输出内存上限。"""
     late_transcription_seconds: float = 2.0
     deferred_audio_bytes: int = 4 * 1024 * 1024
+    provider_turn_seconds: float = 60.0
 
     def __post_init__(self) -> None:
         if (type(self.late_transcription_seconds) not in {int, float}
                 or not math.isfinite(self.late_transcription_seconds)
                 or not 0 < self.late_transcription_seconds <= 30
+                or type(self.provider_turn_seconds) not in {int, float}
+                or not math.isfinite(self.provider_turn_seconds) or not 0 < self.provider_turn_seconds <= 60
                 or type(self.deferred_audio_bytes) is not int or self.deferred_audio_bytes < 1):
             raise ValueError("Invalid Live limits")
 
@@ -204,6 +207,7 @@ class ControlResolution:
 
 @dataclass(frozen=True)
 class LiveEvent:
+    """输出/失败终态不等于输入定稿；仅input_complete可触发完整输入提交。"""
     kind: Literal["proposed", "updated", "input_finalized", "output_ready", "turn_finished", "control_proposed", "control_cancelled"]
     session: SessionRef
     proposal: ProposalRef | None = None
@@ -216,6 +220,7 @@ class LiveEvent:
     candidate: VoiceControlDecision | None = None
     reason: str = ""
     internal: bool = False
+    input_complete: bool = False
 
 
 @dataclass(frozen=True)

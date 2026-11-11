@@ -179,3 +179,21 @@ def test_bound_turn_preserves_original_scope_and_never_updates_new_session(tmp_p
         restored = ContextBridge(outbox_path=tmp_path / "outbox.json")
         assert len(await restored.poll(wait=0)) == 1
     asyncio.run(run())
+
+
+def test_request_handles_pre_alias_asyncio_timeout_without_leaking_waiter(monkeypatch):
+    class LegacyAsyncTimeout(Exception):
+        pass
+    async def expired(waiter, timeout):
+        waiter.cancel()
+        raise LegacyAsyncTimeout
+    async def run():
+        bridge = ContextBridge()
+        await bridge.poll(wait=0)
+        monkeypatch.setattr(asyncio, "TimeoutError", LegacyAsyncTimeout)
+        monkeypatch.setattr(asyncio, "wait_for", expired)
+        result = await bridge.request("recall", {"query": "question"})
+        assert result == {"ok": False, "error": "AstrBot 请求超时"}
+        assert await bridge.poll(wait=0) == []
+        await bridge.close()
+    asyncio.run(run())

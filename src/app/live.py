@@ -142,11 +142,12 @@ class LiveFlow:
                 task.add_done_callback(self._observe)
                 task.add_done_callback(self._outputs.discard)
             elif event.kind in {"input_finalized", "turn_finished"} and event.proposal is not None:
-                prepared = await self._prepare(event, complete=True)
+                prepared = await self._prepare(event, complete=event.input_complete)
                 await self.live.authorize_input(event.proposal, prepared,
                     tools=self.context.tools(prepared) if prepared is not None else None)
                 key = self._key(event)
-                if event.kind == "turn_finished" and key not in self._active_turns and not event.internal:
+                if (event.kind == "turn_finished" and event.input_complete
+                        and key not in self._active_turns and not event.internal):
                     from app.flows import finish_input
                     if len(self._input_commits) >= 8:
                         await finish_input(self.context, key)
@@ -219,7 +220,7 @@ class LiveFlow:
                             elapsed_ms=dict(evidence.timings_ms).get('generation_total', 0),
                             timings_ms=dict(evidence.timings_ms), timing_mode='live_overlap')
                     final = self._metadata.get(key, event)
-                    user_text = '' if final.internal else final.text
+                    user_text = '' if final.internal or not final.input_complete else final.text
                     from app.flows import record_expression_outputs
                     text_outcome, text_reason = await record_expression_outputs(
                         context=self.context, channel=self.channel, session=self.session,

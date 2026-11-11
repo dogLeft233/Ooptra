@@ -171,6 +171,9 @@ def test_live_client_interrupt_discards_late_audio_and_keeps_next_turn_ready():
         await socket.incoming.put({"serverContent": {"turnComplete": True}})
         await socket.incoming.put(audio_message(b"\3\0"))
         second = await asyncio.wait_for(anext(events), 1)
+        if second.kind == "turn_finished":
+            assert second.input_complete and second.proposal.turn_id == first.proposal.turn_id
+            second = await asyncio.wait_for(anext(events), 1)
         assert second.kind == "proposed"
         assert second.proposal.turn_id != first.proposal.turn_id
         assert live.snapshot().state == "ready"
@@ -198,12 +201,14 @@ def test_live_control_queue_overflow_is_queryable_and_closes_transport():
 def test_unresolved_live_turn_expires_without_leaking_or_reviving_audio():
     from dialogue.models import LiveLimits
     async def scenario():
-        socket, live, prepared = await open_session(limits=LiveLimits(late_transcription_seconds=.01))
+        socket, live, prepared = await open_session(limits=LiveLimits(late_transcription_seconds=.01, provider_turn_seconds=.01))
         events = live.events()
         await socket.incoming.put(audio_message())
         proposed = await anext(events)
         await asyncio.sleep(.02)
         assert live.snapshot().state == "failed"
+        terminal = await asyncio.wait_for(anext(events), 1)
+        assert terminal.kind == "turn_finished" and not terminal.input_complete
         intent = SimpleNamespace(action_id="action", session=prepared.context_ref.session,
             context_version=prepared.version, deadline=time.monotonic() + 5)
         assert (await live.resolve_turn(proposed.proposal, Allow(intent))).status == "stale"

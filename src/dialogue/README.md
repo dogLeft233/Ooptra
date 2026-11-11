@@ -54,3 +54,5 @@ MiMo、阿里 ASR/DeepSeek/阿里 TTS、Gemini Live 为实际适配。OpenAI Rea
 - [来源绑定](../../tests/dialogue/test_context_binding.py)、[日志隐私](../../tests/dialogue/test_generation_logging.py)、[独立自检](../../tests/test_voice_audio_diagnostics.py)及[试听](../../tests/test_voice_tools.py)验证对应边界。
 
 更换共同能力不变的模型供应商，应主要修改此模块适配与装配配置；调整回复概率、冷却或抢话规则应修改行为模块。真实供应商和 Oopz 时序仍由应用的[双机器人验收](../../docs/bot-pair-acceptance.md)另行证明，协议夹具通过不替代真实模型验收。
+
+Live 提议的供应商总等待与边界后的迟到窗口分开，见 `LiveLimits`。`LiveEvent.input_complete` 是输入定稿证据，取消/失败终态不能代替它；混合成员使本轮归属失效，通过已有更新事件通知上下文撤销授权。

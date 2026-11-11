@@ -23,7 +23,7 @@ class Transport:
     async def wait_playback(self, timeout): return AudioPushResult(True)
 
 
-async def open_flow(tmp_path, *, shared=False, probability=100, late_seconds=.1, transport=None):
+async def open_flow(tmp_path, *, shared=False, probability=100, late_seconds=.1, transport=None, keywords=(), speaker="original-speaker", provider_seconds=60):
     context = create_context_service(str(tmp_path / "history.jsonl"))
     if shared:
         await prepare_source(context.bridge, {"ok": True, "provider": "memory_companion",
@@ -31,15 +31,15 @@ async def open_flow(tmp_path, *, shared=False, probability=100, late_seconds=.1,
     socket = Socket()
     async def connect(*args, **kwargs): return socket
     backend = create_gemini_backend(VoiceAgentSettings(gemini_api_key="synthetic"), connector=connect,
-        limits=LiveLimits(late_transcription_seconds=late_seconds))
+        limits=LiveLimits(late_transcription_seconds=late_seconds, provider_turn_seconds=provider_seconds))
     channel = create_channel(transport or Transport())
     session = (await channel.execute(JoinRoom("join", RoomTarget("a", "c"), 0))).session
     flow = LiveFlow(backend=backend, context=context, behavior=create_behavior(), channel=channel,
-        session=session, current=lambda: True, settings=lambda: ReplySettings(probability=probability),
+        session=session, current=lambda: True, settings=lambda: ReplySettings(probability=probability, keywords=keywords),
         on_state=lambda *args: None, on_leave=lambda **kwargs: False,
         output_state=lambda: {"volume": 50, "muted": False})
     await flow.start()
-    await flow.send_input("original-speaker", b"\0\x40" * 320, 16000)
+    await flow.send_input(speaker, b"\0\x40" * 320, 16000)
     return context, socket, flow
 
 
@@ -88,7 +88,7 @@ def test_live_remember_waits_for_context_grant_without_waiting_for_tool_dependen
 
 def test_provider_failure_before_input_finalization_does_not_hold_playback(tmp_path):
     async def scenario():
-        context, socket, flow = await open_flow(tmp_path)
+        context, socket, flow = await open_flow(tmp_path, shared=True)
         try:
             await socket.deliver(audio_message(user_text="尚未定稿"))
             await socket.close()
@@ -96,6 +96,8 @@ def test_provider_failure_before_input_finalization_does_not_hold_playback(tmp_p
                 while flow.busy:
                     await asyncio.sleep(0)
             await asyncio.wait_for(finished(), 1)
+            assert context.history.recent() == []
+            assert await context.bridge.poll(wait=0) == []
         finally:
             await flow.close()
             await context.close()
@@ -207,8 +209,96 @@ def test_ninth_live_turn_with_busy_output_still_collects_original_input(tmp_path
             assert len(ninth) == 1
             assert ninth[0]["payload"]["reply_text"] == ""
             assert ninth[0]["scope"]["memory_scopes"] == [{"umo": "group:original"}]
+            await flow.close()
+            events.extend(await context.bridge.poll(wait=0))
+            commits = {event["request_id"]: event for event in events}
+            assert len(commits) == 9
+            assert sorted(event["payload"]["user_text"] for event in commits.values()) == [f"问题{index}" for index in range(9)]
+            assert all(event["payload"]["reply_text"] == "" for event in commits.values())
+            assert all(event["scope"]["memory_scopes"] == [{"umo": "group:original"}] for event in commits.values())
+            assert [row["role"] for row in context.history.recent()] == ["user"] * 9
+
         finally:
             blocked.set()
+            await flow.close()
+            await context.close()
+    asyncio.run(scenario())
+
+
+def test_held_live_input_waits_for_real_provider_boundary_before_late_window(tmp_path):
+    async def scenario():
+        context, socket, flow = await open_flow(tmp_path, shared=True, probability=0,
+            keywords=("机器人",), late_seconds=.03)
+        try:
+            await socket.deliver({"serverContent": {"inputTranscription": {"text": "这是"}}})
+            await asyncio.sleep(.1)
+            assert flow.live.snapshot().state == "ready"
+            assert context.history.recent() == []
+            assert await context.bridge.poll(wait=0) == []
+            await socket.deliver({"serverContent": {"inputTranscription": {"text": "一个完整问题"}, "turnComplete": True}})
+            events = await context.bridge.poll(wait=1)
+            assert len(events) == 1
+            assert events[0]["payload"]["user_text"] == "这是一个完整问题"
+            assert context.history.as_messages() == [{"role": "user", "content": "这是一个完整问题"}]
+            assert flow.live.snapshot().state == "ready"
+        finally:
+            await flow.close()
+            await context.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("boundary_first", [False, True])
+def test_mixed_live_speakers_are_unattributed_and_cannot_authorize_remember(tmp_path, boundary_first):
+    from context.models import ContextRequest
+    async def scenario():
+        context, socket, flow = await open_flow(tmp_path, shared=True, speaker="Alice", late_seconds=.03)
+        try:
+            await socket.deliver(audio_message(user_text="请记住我", text="好的", done=boundary_first))
+            await flow.send_input("Bob", b"\0\x40" * 320, 16000)
+            await socket.deliver({"serverContent": {"inputTranscription": {"text": "喜欢茶"}}})
+            await socket.deliver({"toolCall": {"functionCalls": [{"id": "mixed-write", "name": "astrbot_remember",
+                "args": {"content": "喜欢茶"}}]}})
+            async def denied():
+                while not any("toolResponse" in message for message in socket.sent):
+                    await asyncio.sleep(0)
+            await asyncio.wait_for(denied(), 1)
+            response = next(message["toolResponse"]["functionResponses"][0]["response"] for message in socket.sent if "toolResponse" in message)
+            assert response["ok"] is False
+            proposal = flow.live.snapshot().current_proposal
+            prepared = await context.prepare_context(ContextRequest(flow.session, "Alice",
+                f"{flow.live.live_session_id}:{proposal.turn_id}"))
+            assert not prepared.authorized_write_grants
+            if not boundary_first:
+                await socket.deliver({"serverContent": {"turnComplete": True}})
+            async def completed():
+                while flow.busy:
+                    await asyncio.sleep(0)
+            await asyncio.wait_for(completed(), 1)
+            rows = context.history.recent()
+            assert rows[0]["content"] == "请记住我喜欢茶" and rows[0]["user_key"] == ""
+            events = await context.bridge.poll(wait=0)
+            assert all(event["operation"] != "remember" for event in events)
+            assert events[0]["payload"]["speaker"] == ""
+        finally:
+            await flow.close()
+            await context.close()
+    asyncio.run(scenario())
+
+
+def test_local_provider_deadline_without_boundary_never_commits_partial_input(tmp_path):
+    async def scenario():
+        context, socket, flow = await open_flow(tmp_path, shared=True, probability=0,
+            keywords=("机器人",), late_seconds=.01, provider_seconds=.03)
+        try:
+            await socket.deliver({"serverContent": {"inputTranscription": {"text": "未结束的半句"}}})
+            async def expired():
+                while flow.live.snapshot().state != "failed":
+                    await asyncio.sleep(0)
+            await asyncio.wait_for(expired(), 1)
+            await flow.close()
+            assert context.history.recent() == []
+            assert await context.bridge.poll(wait=0) == []
+        finally:
             await flow.close()
             await context.close()
     asyncio.run(scenario())

@@ -19,6 +19,10 @@ def test_client_interruption_never_records_the_full_generated_reply(tmp_path):
             assert playback.stops == 1
             await sockets[0].deliver({"serverContent": {"turnComplete": True}})
             await agent.wait_for_reply_end(timeout=1)
+            async def input_finalized():
+                while not agent.memory.as_messages():
+                    await asyncio.sleep(0)
+            await asyncio.wait_for(input_finalized(), 1)
             assert agent.memory.as_messages() == [{"role": "user", "content": "question"}]
         finally:
             await agent.leave()
@@ -324,6 +328,16 @@ def test_live_drain_cancel_preserves_only_input_in_original_scope(tmp_path, oper
             await release.wait()
             return {"ok": True}
         playback.wait_tts_complete = drain
+        collected = []
+        async def serve_prepare():
+            while True:
+                for event in await agent.context_bridge.poll(wait=.1):
+                    if event["operation"] == "prepare":
+                        agent.context_bridge.resolve(event["request_id"], {"ok": True,
+                            "provider": "memory_companion", "memory_scopes": [{"umo": "replacement"}]})
+                    else:
+                        collected.append(event)
+        worker = asyncio.create_task(serve_prepare()) if operation == "refresh" else None
         try:
             await socket.deliver(audio_message(user_text="recognized original input",
                 text="unconfirmed assistant tail", done=True))
@@ -336,12 +350,15 @@ def test_live_drain_cancel_preserves_only_input_in_original_scope(tmp_path, oper
                 await agent.refresh_astrbot_context()
             release.set()
             assert agent.memory.as_messages() == [{"role": "user", "content": "recognized original input"}]
-            events = await agent.context_bridge.poll(wait=0)
+            events = collected + await agent.context_bridge.poll(wait=0)
             assert len(events) == 1
             assert events[0]["scope"]["memory_scopes"] == [{"umo": "original"}]
             assert events[0]["payload"]["user_text"] == "recognized original input"
             assert events[0]["payload"]["reply_text"] == ""
         finally:
             release.set()
+            if worker is not None:
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
             await agent.stop()
     asyncio.run(run())
