@@ -65,3 +65,25 @@ def test_wrong_input_or_session_cannot_supply_semantic_candidate():
         with pytest.raises(ValueError):
             RecognitionObserved(trigger, permit, "你好", ContextRevision(),
                 reply_assessment=ReplyAssessment(other, ref, "addressed"))
+
+
+def test_priority_control_keeps_attempt_identity_and_cannot_be_redecided():
+    from behavior.models import ControlAction, ControlProposal, VoiceControlDecision, VolumeCommand
+
+    session = SessionRef("run", "bind", "session", RoomTarget("a", "b"))
+    behavior = create_behavior()
+    behavior.start_session(session)
+    trigger = AudioReady("input", session, "alice", ContextRevision())
+    permit = behavior.admit(trigger, 1)
+    candidate = VoiceControlDecision(leave=True)
+    settings = ReplySettings(voice_leave_enabled=True, voice_volume_enabled=True)
+    proposal = ControlProposal("input", session, candidate, permit)
+    decided = behavior.decide_control(proposal, settings)
+    assert isinstance(decided, ControlAction)
+    assert behavior.decide(RecognitionObserved(trigger, permit, "请退房", ContextRevision(), control=candidate), settings) == decided
+    forged = replace(permit, expires_at=permit.expires_at + 10)
+    assert behavior.decide_control(replace(proposal, permit=forged), settings).reason == "stale_attempt"
+    changed = replace(proposal, candidate=VoiceControlDecision(volume=VolumeCommand("mute")))
+    assert behavior.decide_control(changed, settings).reason == "control_conflict"
+    with pytest.raises(ValueError):
+        replace(proposal, trigger_id="other")

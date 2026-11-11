@@ -13,6 +13,7 @@ from behavior.models import (
     AttemptRejected,
     AudioReady,
     ControlAction,
+    ControlProposal,
     NoAction,
     NotExecuted,
     RecognitionObserved,
@@ -177,6 +178,14 @@ async def run_cascade(*, backend, context, behavior, channel,
                 end_reason = "classification_" + interpreted.status
                 return FlowResult(user_text=recognized.text, reason=end_reason)
             control = interpreted.candidate
+        if control is not None and (control.leave or control.volume is not None):
+            priority = behavior.decide_control(ControlProposal(trigger_id, session, control, permit), settings)
+            if isinstance(priority, ControlAction):
+                trace_reason = end_reason = "control"
+                return FlowResult(user_text=recognized.text, control=priority)
+            if priority.reason != "control_disabled":
+                trace_reason = end_reason = priority.reason
+                return FlowResult(user_text=recognized.text, reason=priority.reason)
         assessment = None
         capabilities = getattr(backend, "capabilities", None)
         if recognized.text.strip() and capabilities is not None and capabilities().semantic_reply:
