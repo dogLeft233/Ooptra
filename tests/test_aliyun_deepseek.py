@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -574,7 +575,9 @@ def test_new_effort_applies_to_next_generation_without_changing_started_reply():
                 state.audio_seen.set()
 
             def change_effort():
-                backend.settings.deepseek_reasoning_effort = ReasoningEffort.HIGH
+                fresh = replace(backend.settings, deepseek_reasoning_effort=ReasoningEffort.HIGH)
+                update = backend.update_settings(fresh, ("deepseek_reasoning_effort",))
+                assert not update.reopen_live
 
             first = await run_expression_protocol(backend, b"\x01\x00" * 8000,
                 sample_rate=16000, user_key="member", channel_key="area/channel",

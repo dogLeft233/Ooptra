@@ -125,6 +125,10 @@ class GeminiLiveBackend(VoiceBackend):
     """Gemini连接/编解码适配；提议、许可与有界轮次状态归LiveSession。"""
     name = "gemini_live"
 
+    def update_settings(self, settings, changed):
+        from dialogue._internal.settings import update_settings
+        return update_settings(self, settings, changed)
+
     def __init__(self, settings, **options):
         self.settings = settings
         self._connector = options.get("connector")

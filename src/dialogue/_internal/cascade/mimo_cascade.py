@@ -265,6 +265,10 @@ def _parse_decision_json(raw: str):
 class MimoCascadeBackend(VoiceBackend):
     name = "mimo_cascade"
 
+    def update_settings(self, settings, changed):
+        from dialogue._internal.settings import update_settings
+        return update_settings(self, settings, changed)
+
     def __init__(self, settings) -> None:
         self.settings = settings
         self._session = None  # aiohttp.ClientSession，懒加载

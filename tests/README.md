@@ -48,3 +48,5 @@ python -m pytest -v -o faulthandler_timeout=60
 表达任务覆盖单订阅、背压、首帧前关闭、失败EOS和真实HTTP/WS边界；输入、播放覆盖字节预算、断点、帧序号、取消及未知效果。`tests/app/test_output_commit_lifecycle.py` 验证已受理SQLite线程、切房/取消原scope提交及失败静默回执。配置/维护覆盖跨进程锁、CAS、部分应用、候选gate、handoff、父进程退出凭据与原子归档发布。
 
 已移除的供应商复合入口、私有音频回调、global历史绑定和`.__new__`状态拼装测试，分别由新公开任务/真实应用协议测试承接。测试数量不是完成标准；删除旧实现耦合用例时应注明保留的行为和新验证入口。
+
+生成配置：`tests/dialogue/test_settings_update.py` 验证公开设置应用结果及Live失效差异；`tests/test_voice_settings_reload.py` 验证思考强度与音量组合下在途公告/控制继续完成；`tests/test_aliyun_deepseek.py` 通过本地HTTP/WS确认当前任务保持原强度、后续任务使用新强度。

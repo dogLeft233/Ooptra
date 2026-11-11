@@ -105,3 +105,5 @@ Oopz → OneBot → AstrBot → OneBot → Oopz 的代理路由全部在渠道�
 测试入口见 [tests](tests/README.md)；真实语音验证见 [双机器人验收](docs/bot-pair-acceptance.md)。架构完成以公开路径实际使用、状态唯一归属、故障反例、旧调用者清零和实际验收为依据。Git 提交和验收分别绑定 SHA；本地协议测试不代替真实房间/模型验证。部署级进程崩溃、真实生产升级/恢复和人耳声学效果不能仅靠本地测试声称已验证。
 
 配置、密钥和用户数据位置继续遵循 [配置与维护](docs/operations.md)、[语音指南](docs/voice-guide.md) 及 [AstrBot 同步](docs/astrbot-context-sync.md)。
+
+生成公开 `VoiceBackend.update_settings` 拥有生成配置捕获及模型会话失效规则，返回无损延后字段与需重开Live的不可变效果；应用只组合音量应用和跨模块旧流程收尾，供应商字段规则不放在协调器。维护继续拥有配置版本/CAS。
