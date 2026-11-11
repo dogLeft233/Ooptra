@@ -665,8 +665,6 @@ class MimoCascadeBackend(VoiceBackend):
         child._tools = tools
         child._trace = (intent.session.session_id, intent.action_id, intent.trigger_id)
         async def produce(emit):
-            generation_started = time.monotonic()
-            status = "failed"
             async def timing(stage, elapsed):
                 await emit("timing", timings_ms=((stage, elapsed),))
             child._timing_sink = timing
@@ -697,16 +695,9 @@ class MimoCascadeBackend(VoiceBackend):
                     raise RuntimeError("Empty generated audio")
                 if not streaming:
                     await on_audio(pcm, rate)
-                status = "completed"
-            except asyncio.CancelledError:
-                status = "cancelled"
-                raise
             finally:
-                logger.info("event=voice.generation.finished status=%s duration_ms=%.1f session_id=%s action_id=%s input_ref=%s generation_id=%s",
-                            status, (time.monotonic()-generation_started)*1000, intent.session.session_id,
-                            intent.action_id, intent.trigger_id, child._generation_id)
                 await child.aclose()
-        job = ExpressionJob(intent.action_id, intent.session, produce, deadline=intent.deadline)
+        job = ExpressionJob(intent.action_id, intent.session, produce, deadline=intent.deadline, input_ref=intent.trigger_id)
         child._generation_id = job.generation_id
         self._jobs.add(job)
         job._task.add_done_callback(lambda _: self._jobs.discard(job))

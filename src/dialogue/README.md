@@ -23,7 +23,7 @@ MiMo、阿里 ASR/DeepSeek/阿里 TTS、Gemini Live 为实际适配。OpenAI Rea
 
 `ExpressionJob` 独占供应商任务及资源，状态为 running → completed / failed / cancelled。事件含稳定 generation/action/session、连续 event_seq，区分文字增量、最终文字、音频和单一终态。应用不逐供应商解析、不为生成流重新编号。
 
-任务队列默认16项，供应商音频先按完整 PCM16 采样切为每项至多64KiB，再进入有界队列。慢消费者形成背压，绝对单调时钟截止同时约束生产和等待；不是不断重设的滑动超时。关闭/取消等待本任务资源回收，不关闭其他任务。`Recognition.elapsed_ms`、`ControlInterpretation.elapsed_ms` 和 `GenerationEvidence.timings_ms` 交付安全耗时事实；`generation_total` 包含本任务背压等待，串行MiMo额外报告chat/tts，重叠流不伪造可相加的独立阶段。程序错误和供应商失败的对外证据均不含原始响应或凭据。
+任务队列默认16项，供应商音频先按完整 PCM16 采样切为每项至多64KiB，再进入有界队列。慢消费者形成背压，绝对单调时钟截止同时约束生产和等待；不是不断重设的滑动超时。关闭/取消等待本任务资源回收，不关闭其他任务。`Recognition.elapsed_ms`、`ControlInterpretation.elapsed_ms` 和 `GenerationEvidence.timings_ms` 交付安全耗时事实；`generation_total` 包含本任务背压等待，串行MiMo额外报告chat/tts，重叠流不伪造可相加的独立阶段。任务唯一持有有界阶段计时快照（最多31个供应商阶段及generation_total），消费者提前关闭仍能读取已产生的计时；最终状态日志由任务在供应商资源收尾后发布，供应商适配仅报告阶段事实。程序错误和供应商失败的对外证据均不含原始响应或凭据。
 
 `GeneratedAudio` 是消费适配，不是播放器。正常生成终态才是普通 EOS；失败、缺少正常终态或异常转换为渠道 `OutputSourceError`。输出帧使用 job generation_id 作为 output_id，从0连续编号。应用把整个流交渠道，再联合生成证据和真实播放结果提交上下文，不能把产出音频当作扬声器播放完成。
 

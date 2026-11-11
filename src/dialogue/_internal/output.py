@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import math
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
@@ -14,6 +16,8 @@ from dialogue.models import GenerationEvent, GenerationEvidence
 
 Emit = Callable[..., Awaitable[None]]
 Producer = Callable[[Emit], Awaitable[None]]
+logger = logging.getLogger(__name__)
+_MAX_TIMING_STAGES = 32
 
 
 class ExpressionJob:
@@ -24,7 +28,7 @@ class ExpressionJob:
     """
 
     def __init__(self, action_id: str, session: SessionRef, producer: Producer, *,
-                 deadline: float, queue_size: int = 16) -> None:
+                 deadline: float, queue_size: int = 16, input_ref: str = "") -> None:
         if not action_id or queue_size < 1 or deadline <= time.monotonic():
             raise ValueError("表达任务须有动作、有限容量及未来期限")
         self.generation_id = uuid4().hex
@@ -34,6 +38,9 @@ class ExpressionJob:
         self._seq = 0
         self._deadline = deadline
         self._closed = asyncio.Event()
+        self._input_ref = input_ref
+        self._started = time.monotonic()
+        self._finalized = False
         self._evidence = GenerationEvidence(self.generation_id, action_id, session, "running")
         self._task = asyncio.create_task(self._run(producer), name="dialogue-expression")
 
@@ -57,11 +64,22 @@ class ExpressionJob:
             raise asyncio.CancelledError
         event = GenerationEvent(self.generation_id, self.action_id, self.session,
                                 self._seq, kind, **values)
+        if kind == "timing":
+            if len(event.timings_ms) > _MAX_TIMING_STAGES:
+                raise ValueError("单事件阶段计时不能超过32项")
+            timings = dict(self._evidence.timings_ms)
+            for stage, elapsed in event.timings_ms:
+                if (not isinstance(stage, str) or not 1 <= len(stage) <= 80
+                        or type(elapsed) not in {int, float} or not math.isfinite(elapsed)
+                        or elapsed < 0):
+                    raise ValueError("阶段计时须为具名有限非负值")
+                if stage in timings or len(timings) < _MAX_TIMING_STAGES - 1:
+                    timings[stage] = elapsed
+            self._evidence = replace(self._evidence, timings_ms=tuple(timings.items()))
         await self._queue.put(event)
         self._seq += 1
 
     async def _run(self, producer: Producer) -> None:
-        started = time.monotonic()
         try:
             async def generate() -> None:
                 await producer(self._emit)
@@ -80,13 +98,26 @@ class ExpressionJob:
                 self._queue.put_nowait(GenerationEvent(self.generation_id, self.action_id,
                     self.session, self._seq, "failed", reason=reason))
         finally:
-            self._evidence = replace(self._evidence, timings_ms=(("generation_total", round((time.monotonic()-started)*1000, 1)),))
-            self._closed.set()
+            self._finalize()
+
+    def _finalize(self) -> None:
+        if self._finalized:
+            return
+        self._finalized = True
+        duration = round((time.monotonic()-self._started)*1000, 1)
+        timings = dict(self._evidence.timings_ms)
+        timings["generation_total"] = duration
+        self._evidence = replace(self._evidence, timings_ms=tuple(timings.items()))
+        self._closed.set()
+        logger.info("event=voice.generation.finished status=%s reason=%s duration_ms=%.1f session_id=%s action_id=%s input_ref=%s generation_id=%s",
+                    self._evidence.status, self._evidence.reason, duration,
+                    self.session.session_id, self.action_id, self._input_ref, self.generation_id)
 
     async def events(self) -> AsyncIterator[GenerationEvent]:
         if self._claimed:
             raise RuntimeError("generation events allow one consumer")
         self._claimed = True
+        terminal = False
         try:
             while True:
                 if not self._queue.empty():
@@ -107,11 +138,15 @@ class ExpressionJob:
                             if not task.done():
                                 task.cancel()
                         await asyncio.gather(getter, done, return_exceptions=True)
+                terminal = event.kind in {"completed", "failed"}
                 yield event
-                if event.kind in {"completed", "failed"}:
+                if terminal:
                     break
         finally:
-            await self.aclose()
+            if terminal:
+                await asyncio.gather(self._task, return_exceptions=True)
+            else:
+                await self.aclose()
 
     def snapshot(self) -> GenerationEvidence:
         return self._evidence
@@ -123,6 +158,7 @@ class ExpressionJob:
         self._closed.set()
         if self._evidence.status == "running":
             self._evidence = replace(self._evidence, status="cancelled", reason="cancelled")
+        self._finalize()
 
     async def cancel(self) -> None:
         await self.aclose()
@@ -138,8 +174,8 @@ class GeneratedAudio:
         status = self._job.snapshot()
         if self._evidence.status == "running" and status.status in {"cancelled", "failed"}:
             return replace(self._evidence, status=status.status, reason=status.reason,
-                           timings_ms=tuple(dict(self._evidence.timings_ms + status.timings_ms).items()))
-        return replace(self._evidence, timings_ms=tuple(dict(self._evidence.timings_ms + status.timings_ms).items()))
+                           timings_ms=status.timings_ms)
+        return replace(self._evidence, timings_ms=status.timings_ms)
 
     def frames(self) -> AsyncIterator[OutputFrame]:
         if self._claimed:
@@ -156,8 +192,6 @@ class GeneratedAudio:
                     text = (event.text if event.kind == "text_final"
                             else self._evidence.text + event.text)
                     self._evidence = replace(self._evidence, text=text)
-                elif event.kind == "timing":
-                    self._evidence = replace(self._evidence, timings_ms=tuple(dict(self._evidence.timings_ms + event.timings_ms).items()))
                 elif event.kind == "audio":
                     frame_seq = self._evidence.last_frame_seq + 1
                     self._evidence = replace(self._evidence, last_frame_seq=frame_seq)

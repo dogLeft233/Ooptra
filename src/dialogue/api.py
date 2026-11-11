@@ -139,7 +139,12 @@ class ConnectionReporter(Protocol):
 
 
 class ExpressionJob(Protocol):
-    """独占生成任务；events单订阅、有界背压，aclose只关闭本任务。"""
+    """独占生成任务；events单订阅、有界背压，aclose只关闭本任务。
+
+    snapshot 保留已产生的有界阶段计时，消费方提前关闭不会丢失未消费计时。
+    最多31个供应商阶段（名称至多80字），另保留本任务 generation_total；
+    重复阶段更新其值，超出容量的新阶段不入快照。终态日志在资源收尾后由任务发布。
+    """
     generation_id: str
     action_id: str
     session: SessionRef

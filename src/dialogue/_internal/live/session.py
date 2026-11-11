@@ -266,7 +266,7 @@ class LiveSession:
                     self._publish(LiveEvent("turn_finished", self.request.session, turn.ref,
                         turn.user_text, turn.speaker, action_id=turn.action_id, reason="cancelled"))
         turn.job = ExpressionJob(intent.action_id, intent.session, produce,
-                                 deadline=min(intent.deadline, turn.deadline))
+                                 deadline=min(intent.deadline, turn.deadline), input_ref=intent.trigger_id)
         self._publish(LiveEvent("output_ready", self.request.session, turn.ref,
             turn.user_text, turn.speaker, action_id=turn.action_id, job=turn.job,
             internal=turn.internal))

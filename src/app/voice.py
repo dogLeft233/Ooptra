@@ -496,14 +496,18 @@ class VoiceCoordinator:
             tuple(self.settings.listen_only_uids), minimum, _MIN_UTTERANCE_RMS)
 
     async def refresh(self, changed: list[str]) -> list[str]:
-        if changed and set(changed) <= {"first_audio_timeout_seconds", "audio_gap_timeout_seconds"}:
-            return ["音频等待设置已更新，从下一轮生效"]
-        # 思考强度由新生成任务复制；不取消当前回复、问候或控制任务。
-        if changed == ["deepseek_reasoning_effort"]:
-            return ["思考强度已更新，从下一次生成回复生效"]
-        # 音量只改播放增益；不取消播报，也不等待进退房或重建模型会话。
-        if changed == ["output_volume"]:
-            return [await self._apply_output_volume()]
+        changed_set = set(changed)
+        noninterrupting = {"first_audio_timeout_seconds", "audio_gap_timeout_seconds",
+                           "deepseek_reasoning_effort", "output_volume"}
+        if changed_set <= noninterrupting:
+            notes = []
+            if changed_set & {"first_audio_timeout_seconds", "audio_gap_timeout_seconds"}:
+                notes.append("音频等待设置已更新，从下一轮生效")
+            if "deepseek_reasoning_effort" in changed_set:
+                notes.append("思考强度已更新，从下一次生成回复生效")
+            if "output_volume" in changed_set:
+                notes.append(await self._apply_output_volume())
+            return notes
         await self._cancel_voice_control()
         await self._cancel_announcement()
         async with self._operation_lock:
