@@ -185,6 +185,9 @@ async def run_cascade(*, backend, context, behavior, channel,
                 trace_reason = end_reason
                 return FlowResult(user_text=recognized.text, reason=end_reason)
             control = interpreted.candidate
+        # 控制解释期间其他成员的识别仍会提交房间事实；准备与决策使用
+        # 最新版本，但保留本次已核对的原会话、说话者和 input_ref。
+        revision = context.snapshot(session.room_target).revision
         assessment = None
         capabilities = getattr(backend, "capabilities", None)
         if recognized.text.strip() and capabilities is not None and capabilities().semantic_reply:
