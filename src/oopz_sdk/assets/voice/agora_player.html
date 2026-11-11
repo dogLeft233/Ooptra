@@ -1209,23 +1209,39 @@ window.agoraJoin = async (...args) => {
 let screenClient = null;
 let screenKey = "";
 let screenPublisher = "";
+let screenConnection = null;
+let screenRetiring = null;
+let screenClosing = null;
 let screenEpoch = 0;
 window.agoraCloseScreen = async () => {
   screenEpoch++;
   window.agoraClearScreen();
-  const previous = screenClient;
-  screenClient = null; screenKey = ""; screenPublisher = "";
-  if (previous) {
-    try {await previous.leave();}
-    catch (_) {if (!screenClient) screenClient = previous; return {ok: false};}
+  if (screenClient) screenRetiring = screenClient;
+  screenClient = null; screenKey = ""; screenPublisher = ""; screenConnection = null;
+  if (!screenRetiring) return {ok: true};
+  if (!screenClosing) {
+    const previous = screenRetiring;
+    screenClosing = (async () => {
+      try {
+        await previous.leave();
+        if (screenRetiring === previous) screenRetiring = null;
+        return {ok: true};
+      } catch (_) {return {ok: false};}
+    })();
   }
-  return {ok: true};
+  const closing = screenClosing;
+  try {return await closing;}
+  finally {if (screenClosing === closing) screenClosing = null;}
 };
 window.agoraWatchScreen = async data => {
-  if (screenKey === data.key && screenClient?.connectionState === "CONNECTED") return {ok: true};
+  const fields = ["key", "appId", "roomId", "token", "uid", "publisher"];
+  if (screenKey === data.key && screenClient?.connectionState === "CONNECTED"
+      && fields.every(field => screenConnection?.[field] === data[field])) return {ok: true};
+  // close increments synchronously; a later close/watch invalidates this operation
+  // even while the previous client's leave is still pending.
+  const epoch = screenEpoch + 1;
   const closed = await window.agoraCloseScreen();
-  if (!closed.ok) return closed;
-  const epoch = screenEpoch;
+  if (!closed.ok || screenEpoch !== epoch) return {ok: false};
   await loadAgoraSdk();
   if (screenEpoch !== epoch) return {ok: false};
   const watching = AgoraRTC.createClient({mode: "live", codec: "vp8"});
@@ -1246,11 +1262,12 @@ window.agoraWatchScreen = async data => {
       await watching.leave(); return {ok: false};
     }
     screenKey = data.key; screenPublisher = data.publisher;
+    screenConnection = Object.fromEntries(fields.map(field => [field, data[field]]));
     for (let i = 0; i < 10; i++) {
       if (watching.remoteUsers.some(user => user.hasVideo && String(user.uid) === data.publisher)) break;
       await new Promise(resolve => setTimeout(resolve, 100));
     }
-    return {ok: true};
+    return {ok: screenEpoch === epoch && screenClient === watching};
   } catch (_) {
     if (screenClient === watching) await window.agoraCloseScreen();
     else {try {await watching.leave();} catch (_) {}}
@@ -1260,6 +1277,7 @@ window.agoraWatchScreen = async data => {
 let screenPreview = null;
 window.agoraClearScreen = () => {
   if (screenPreview) {
+    screenPreview.video.cancelVideoFrameCallback(screenPreview.frameCallback);
     screenPreview.video.pause(); screenPreview.video.srcObject = null; screenPreview.video.remove(); screenPreview = null;
   }
 };
@@ -1282,7 +1300,15 @@ window.agoraCaptureScreen = async () => {
       video.style.cssText = "position:fixed;width:1px;height:1px;opacity:0;pointer-events:none";
       document.body.append(video);
       video.srcObject = new MediaStream([track]);
-      screenPreview = {source, track, video};
+      if (!video.requestVideoFrameCallback) {video.srcObject = null; video.remove(); return {status: "unavailable"};}
+      const preview = {source, track, video, frameAt: 0};
+      const onFrame = () => {
+        if (screenPreview !== preview) return;
+        preview.frameAt = performance.now();
+        preview.frameCallback = video.requestVideoFrameCallback(onFrame);
+      };
+      screenPreview = preview;
+      preview.frameCallback = video.requestVideoFrameCallback(onFrame);
     }
     video = screenPreview.video;
     let timer;
@@ -1291,6 +1317,27 @@ window.agoraCaptureScreen = async () => {
         timer = setTimeout(() => reject(new Error("frame timeout")), 800);
       })]);
     } finally {clearTimeout(timer);}
+    const preview = screenPreview;
+    if (!preview || preview.video !== video) return {status: "unavailable"};
+    if (!preview.frameAt || performance.now() - preview.frameAt > 3000) {
+      let arrived;
+      try {
+        arrived = await new Promise(resolve => {
+          const callback = video.requestVideoFrameCallback(() => {
+            // Frame callbacks can run with microtasks between them; this waiter
+            // must publish its own decoded-frame evidence before resolving.
+            if (screenPreview === preview) preview.frameAt = performance.now();
+            resolve(true);
+          });
+          timer = setTimeout(() => {video.cancelVideoFrameCallback(callback); resolve(false);}, 800);
+        });
+      } finally {clearTimeout(timer);}
+      // Keep the decoder when no new frame arrived; recreating a video element
+      // could decode the same retained image again and make it appear fresh.
+      if (!arrived) return {status: "unavailable"};
+    }
+    const frameAge = performance.now() - preview.frameAt;
+    if (screenPreview !== preview || !preview.frameAt || frameAge > 3000) return {status: "unavailable"};
     if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) return {status: "unavailable"};
     if (source !== (screenClient || client) || !(source.remoteUsers || []).includes(user) || !user.hasVideo) return {status: "unavailable"};
     const scale = Math.min(1, 1920 / Math.max(video.videoWidth, video.videoHeight));
@@ -1300,7 +1347,8 @@ window.agoraCaptureScreen = async () => {
     canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
     const jpeg = canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
     if (!jpeg || jpeg.length > 1398104) return {status: "unavailable"};
-    return {status: "captured", publisher_id: String(user.uid), width: canvas.width, height: canvas.height, jpeg_base64: jpeg};
+    return {status: "captured", publisher_id: String(user.uid), width: canvas.width, height: canvas.height,
+      frame_age_ms: frameAge, jpeg_base64: jpeg};
   } catch (_) {window.agoraClearScreen(); return {status: "unavailable"};}
 };
 const screenOriginalLeave = window.agoraLeave;

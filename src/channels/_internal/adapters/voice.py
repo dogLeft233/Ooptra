@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import math
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, TypeVar
@@ -72,6 +73,7 @@ class OopzRoomTransport:
                 "appId": self._bot.voice.backend.config.agora_app_id, "roomId": sign["roomId"],
                 "token": sign["signPid"], "uid": int(viewer.pid), "publisher": str(int(publisher.pid))}
             self._screen_watch_key, self._screen_watch_at = key, started
+        capture_started = time.monotonic()
         raw = await self._bot.voice.backend.capture_screen(self._screen_watch)
         if isinstance(raw, dict) and raw.get("status") == "unavailable":
             self._screen_watch = None
@@ -88,9 +90,14 @@ class OopzRoomTransport:
         publisher, width, height = raw.get("publisher_id"), raw.get("width"), raw.get("height")
         if not isinstance(publisher, str) or type(width) is not int or type(height) is not int:
             return ScreenCapture("unavailable")
+        age = raw.get("frame_age_ms")
+        if isinstance(age, bool) or not isinstance(age, (int, float)):
+            return ScreenCapture("unavailable")
+        if not math.isfinite(age) or not 0 <= age <= 3000:
+            return ScreenCapture("unavailable")
         try:
             frame = ScreenFrame(session, publisher,
-                base64.b64decode(encoded, validate=True), width, height, time.monotonic())
+                base64.b64decode(encoded, validate=True), width, height, capture_started - age / 1000)
         except (ValueError, TypeError):
             return ScreenCapture("unavailable")
         return ScreenCapture("captured", frame)
