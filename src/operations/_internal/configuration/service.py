@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from pathlib import Path
@@ -19,9 +20,24 @@ class FileConfiguration:
         self._path = path
         self._runtime_config = runtime_config
 
-    def save_output_volume(self, volume: OutputVolume) -> VolumeSaveReceipt:
+    async def save_output_volume(self, volume: OutputVolume) -> VolumeSaveReceipt:
         if not isinstance(volume, OutputVolume):
             raise TypeError("volume 必须是已解析的 OutputVolume")
+        work = asyncio.create_task(asyncio.to_thread(self._save_output_volume, volume))
+        cancelled = False
+        while True:
+            try:
+                result = await asyncio.shield(work)
+                break
+            except asyncio.CancelledError:
+                if work.cancelled():
+                    raise
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
+    def _save_output_volume(self, volume: OutputVolume) -> VolumeSaveReceipt:
         with config_file_write_lock():
             with self._path.open(encoding="utf-8", newline="") as source:
                 text = source.read()

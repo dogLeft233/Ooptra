@@ -18,11 +18,11 @@
 
 ## 已实现的配置切片
 
-`create_configuration(path=..., runtime_config=...)` 返回 `Configuration` 协议。调用方将原始音量解析为不可变 `OutputVolume`，随后调用 `save_output_volume`；磁盘与运行配置字典同步后返回 `VolumeSaveReceipt`，播放增益由语音输出能力继续应用。此切片不把保存称为运行组件已热应用，也尚无版本检查、请求台账或跨进程互斥。
+`create_configuration(path=..., runtime_config=...)` 返回 `Configuration` 协议。调用方将原始音量解析为不可变 `OutputVolume`，随后等待异步 `save_output_volume`；磁盘与运行配置字典同步后返回 `VolumeSaveReceipt`，播放增益由语音输出能力继续应用。此切片不把保存称为运行组件已热应用，也尚无版本检查、请求台账或跨进程互斥。
 
 `patch_config_text` 与 `validate_config_text` 是兼容迁移所用的公开文档操作，不授予字段写入权限。前者只转换正文，后者沿用旧编辑器的求值校验，会执行部署方可信的 Python 配置，不能用于不可信上传脚本；字段白名单先由调用方解析。WebUI 编辑器复用此算法与 `OutputVolume` 规则，其展示元数据及其他字段解析暂留原位。改变音量合法范围只需修改 `OutputVolume`；改变 AST 补丁算法只需修改本模块。
 
-`VoiceRuntime` 已通过注入的配置能力保存音量，不再导入 WebUI。其他配置保存/热应用和维护流程尚未迁移，不能宣称维护模块整体隔离完成。
+维护模块唯一拥有保存线程及取消后的真实完成观察，重复取消也不丢失收尾；保存失败优先返回原异常。`VoiceRuntime` 直接等待注入的配置能力，不再启动线程或导入 WebUI。语音侧仍拥有跨保存与热应用的事务顺序、播放增益及会话代次；其事务取消保护不承担存储线程清理。其他配置保存/热应用和维护流程尚未迁移，不能宣称维护模块整体隔离完成。
 
 ## 待实现公开契约
 

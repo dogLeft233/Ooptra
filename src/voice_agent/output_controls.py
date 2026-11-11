@@ -95,8 +95,8 @@ class VoiceOutputControls:
             if volume is not None:
                 if self._saver is None:
                     raise RuntimeError("音量保存服务尚未就绪")
-                # Threaded config writes cannot be stopped by cancelling the voice
-                # worker. Let the write settle before releasing the shared lock.
+                # 维护能力拥有持久化收尾；此处只保护跨保存与播放配置同步的
+                # 语音事务，保证取消前同步已保存的值，再释放配置/会话锁。
                 save_task = asyncio.ensure_future(self._saver(volume))
                 cancelled = False
                 while True:
