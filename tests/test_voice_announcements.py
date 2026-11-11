@@ -284,7 +284,8 @@ def test_live_audio_without_any_text_is_an_empty_ai_result(tmp_path, monkeypatch
     asyncio.run(run())
 
 
-def test_manual_leave_cancels_live_audio_push_before_waiting_for_output_lock(tmp_path, monkeypatch):
+@pytest.mark.parametrize("release_push", [False, True])
+def test_manual_leave_drains_live_push_before_closing_reader(tmp_path, monkeypatch, release_push):
     async def run():
         from support import dialogue_fixtures as ws_transport
         from support.dialogue_fixtures import gemini_backend as GeminiLiveBackend
@@ -300,18 +301,37 @@ def test_manual_leave_cancels_live_audio_push_before_waiting_for_output_lock(tmp
         agent.backend = GeminiLiveBackend(agent.settings, agent.memory)
         agent.live_mode = True
         await agent.join("a", "c")
-        entered = asyncio.Event()
+        entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        close = agent.backend.aclose
+
+        async def close_after_transport_settles():
+            assert finished.is_set(), "model close raced the in-flight transport deadline"
+            await close()
+
+        monkeypatch.setattr(agent.backend, "aclose", close_after_transport_settles)
 
         async def stalled_push(*args, **kwargs):
             entered.set()
-            await asyncio.Event().wait()
+            try:
+                await release.wait()
+                return {"ok": True}
+            finally:
+                finished.set()
 
         agent.duplex.push_tts_pcm = stalled_push
         await ws._queue.put(json.dumps({"serverContent": {
             "modelTurn": {"parts": [{"inlineData": {"data": base64.b64encode(b"pcm").decode()}}]},
         }}))
         await entered.wait()
-        assert (await asyncio.wait_for(agent.leave(), 0.2))["ok"]
+        leaving = asyncio.create_task(agent.leave())
+        await asyncio.sleep(0)
+        assert not leaving.done()
+        if release_push:
+            release.set()
+        # 未释放时由真实渠道三秒期限终止推送；此处只是失败上限。
+        assert (await asyncio.wait_for(leaving, 5))["ok"]
+        assert finished.is_set()
         assert ws.closed and not agent.status()["joined"]
     asyncio.run(run())
 

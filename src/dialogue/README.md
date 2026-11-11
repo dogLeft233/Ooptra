@@ -97,3 +97,6 @@ Live实现 → 私有供应商窄端口、本地轮次/闸门
 ## 当前失败与公告证据
 
 `RecognizedGenerationFailed` 保留已完成的用户识别事实，排除助手草稿；应用将该输入交上下文记录失败回合，生成模块不恢复直接写历史。Live 公告通过公开 `GeneratedTurn(internal=True)` 的文字及生成终态交付，应用不读取供应商的私有转写缓存；实际播放结果仍由渠道 `Playback` 确认。相关入口以 `dialogue.models`、`LiveDialogue.set_generated_out` 为准。
+
+
+流式 `StreamingUtterance` 的可选 `on_recognition` 在最终识别完成时同步交付本次输入，取消不撤销已交付事实。应用将取消后的输入交给已绑定的上下文记录端口；生成仍不直接追加权威历史。此回调仅属于本次调用，不使用共享的最后转写字段。自动合成的任务及音频 sink 固定所属调用，独立 `tts(text)` 不复用自动任务或其回调。

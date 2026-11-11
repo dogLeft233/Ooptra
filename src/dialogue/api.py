@@ -5,7 +5,13 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Protocol, runtime_checkable
 
 from behavior.models import VoiceControlDecision, VolumeCommand
-from dialogue.models import AudioSink, DialogueCapabilities, GeneratedTurn, VoiceReply
+from dialogue.models import (
+    AudioSink,
+    DialogueCapabilities,
+    GeneratedTurn,
+    RecognitionSink,
+    VoiceReply,
+)
 
 
 class DialogueSettings(Protocol):
@@ -158,7 +164,7 @@ class StreamingUtterance(Protocol):
 
     async def handle_utterance_stream(
         self, pcm16: bytes, *, sample_rate: int, user_key: str, channel_key: str,
-        on_audio: AudioSink,
+        on_audio: AudioSink, on_recognition: RecognitionSink | None = None,
     ) -> VoiceReply: ...
 
 

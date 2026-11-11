@@ -96,6 +96,9 @@ async def model_servers(*, fail_asr=False, truncate=False, control=False):
         if body.get('response_format'):
             value = {'leave': control, 'volume': None}
             return web.json_response({'choices': [{'message': {'content': json.dumps(value)}}]})
+        if body.get("tools"):
+            assert body["stream"] is False
+            return web.json_response({"choices": [{"message": {"content": "共享记忆回复。"}}]})
         response = web.StreamResponse(headers={'Content-Type': 'text/event-stream'})
         await response.prepare(request)
 
@@ -321,5 +324,169 @@ def test_concurrent_generation_keeps_each_output_sink_separate():
             assert all(outputs), "each request must receive its own audio"
             assert [reply.pcm16 for reply in replies] == list(map(bytes, outputs))
             assert [reply.user_key for reply in replies] == ['member-0', 'member-1']
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("operation", ["_interrupt_speaking", "stop_current_reply", "round_stop", "manual_stop"])
+def test_barge_in_drains_inflight_push_before_stopping_and_room_remains_usable(tmp_path, operation):
+    async def run():
+        agent = make_agent(tmp_path)
+        await establish_room(agent)
+        started, release = asyncio.Event(), asyncio.Event()
+        events = []
+
+        async def push(pcm, rate, **kwargs):
+            started.set()
+            await release.wait()
+            events.append("push")
+            return {"ok": True}
+
+        async def stop():
+            events.append("stop")
+            return {"ok": True}
+
+        agent.duplex.push_tts_pcm = push
+        agent.duplex.stop_tts = stop
+
+        class Backend:
+            async def handle_utterance_stream(self, pcm, *, on_audio, **kwargs):
+                try:
+                    await on_audio(b"\x01\x00" * 4000, 24000)
+                finally:
+                    # 取消清理再次尝试输出，必须被拒绝且不能死锁。
+                    await on_audio(b"\x02\x00", 24000)
+
+        agent.backend = Backend()
+        if operation == "manual_stop":
+            agent.backend.tts = AsyncMock(return_value=(b"\x01\x00" * 4000, 24000))
+            worker = asyncio.create_task(agent.speak_text("手动播报"))
+        elif operation == "round_stop":
+            await agent._start_round_worker()
+            worker = agent._round_task
+            agent._offer_utterance("member", b"\x00\x00", 16000)
+        else:
+            worker = asyncio.create_task(agent._handle_utterance("member", b"\x00\x00", 16000))
+        await started.wait()
+        stopping = "stop_current_reply" if operation.endswith("_stop") else operation
+        interrupt = asyncio.create_task(getattr(agent, stopping)())
+        await asyncio.sleep(0)
+        assert not interrupt.done()
+        release.set()
+        await asyncio.wait_for(asyncio.gather(worker, interrupt, return_exceptions=True), 1)
+        assert interrupt.exception() is None
+        assert events[0] == "push"
+        assert events[1:] and all(event == "stop" for event in events[1:])
+        session = agent.channels.snapshot().session
+        assert agent.channels.snapshot().confirmed
+        assert (await agent._push_room_pcm(session, b"\x03\x00", 24000))["ok"]
+        assert events[-1] == "push"
+        assert events.count("push") == 2
+
+    asyncio.run(run())
+
+
+def test_manual_speech_uses_own_text_and_never_enters_automatic_audio_sink(tmp_path):
+    async def run():
+        async with model_servers() as (backend, state):
+            agent = make_agent(tmp_path)
+            await establish_room(agent)
+            agent.backend = backend
+            agent.duplex.push_tts_pcm = AsyncMock(return_value={"ok": True})
+            first_audio, release = asyncio.Event(), asyncio.Event()
+            automatic_audio = []
+
+            async def sink(pcm, rate):
+                automatic_audio.append(pcm)
+                first_audio.set()
+                state.audio_seen.set()
+                await release.wait()
+
+            automatic = asyncio.create_task(backend.handle_utterance_stream(
+                b"\x01\x00" * 16000, sample_rate=16000,
+                user_key="member", channel_key="area/channel", on_audio=sink))
+            await first_audio.wait()
+            manual = asyncio.create_task(agent.speak_text("手动播报"))
+            await asyncio.sleep(0)
+            release.set()
+            reply, result = await asyncio.wait_for(asyncio.gather(automatic, manual), 5)
+            assert result["ok"]
+            assert "手动播报" in state.text
+            assert len(automatic_audio) == 4
+            assert len(reply.pcm16) == 12
+            assert result["pcm_bytes"] == 6
+
+    asyncio.run(run())
+
+
+def test_tools_enabled_reply_delivers_fallback_audio_to_stream_owner_only():
+    from context import create_context_bridge as ContextBridge
+    from tests.support.context_fixtures import prepare_source
+
+    async def run():
+        async with model_servers() as (backend, state):
+            bridge = ContextBridge()
+            await prepare_source(bridge, {"ok": True, "provider": "memory_companion"})
+            bridge.tool = AsyncMock(return_value={"ok": True, "context": ""})
+            backend.context_bridge = bridge
+            audio = []
+
+            async def sink(pcm, rate):
+                audio.append(pcm)
+
+            reply = await backend.handle_utterance_stream(
+                b"\x01\x00" * 16000, sample_rate=16000,
+                user_key="oopz:member", channel_key="area/channel", on_audio=sink)
+            assert any(body.get("tools") for body in state.chat_requests)
+            assert state.text == ["共享记忆回复。"]
+            assert b"".join(audio) == reply.pcm16 and reply.pcm16
+            before = list(audio)
+            pcm, _ = await backend.tts("手动播报")
+            assert pcm and state.text[-1] == "手动播报"
+            assert audio == before
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("operation", ["barge", "stop"])
+def test_interrupted_stream_keeps_recognized_input_under_original_identity(tmp_path, operation):
+    from context import create_context_bridge as ContextBridge
+    from tests.support.context_fixtures import prepare_source
+
+    async def run():
+        async with model_servers() as (backend, state):
+            agent = make_agent(tmp_path)
+            await agent.join("original-area", "original-room")
+            backend.bind_history(agent.memory)
+            agent.backend = backend
+            bridge = ContextBridge(outbox_path=tmp_path / "outbox.json")
+            await prepare_source(bridge, {"ok": True, "umo": "original-scope"})
+            backend.context_bridge = agent.context_bridge = bridge
+            audible = asyncio.Event()
+
+            async def push(*args, **kwargs):
+                audible.set()
+                return {"ok": True}
+
+            agent.duplex.push_tts_pcm = push
+            worker = asyncio.create_task(agent._handle_utterance("original-member", b"\x01\x00" * 16000, 16000))
+            await audible.wait()
+            assert not state.llm_finished
+            if operation == "barge":
+                await agent._interrupt_speaking()
+            else:
+                await agent.stop_current_reply()
+            await asyncio.gather(worker, return_exceptions=True)
+            state.audio_seen.set()
+            rows = agent.memory.recent(user_key="oopz:original-member")
+            assert [(row["role"], row["content"]) for row in rows] == [("user", "你好")]
+            assert rows[0]["channel_key"] == "original-area/original-room"
+            commits = await bridge.poll(wait=0)
+            assert len(commits) == 1
+            assert commits[0]["payload"]["user_text"] == "你好"
+            assert commits[0]["payload"]["reply_text"] == ""
+            assert commits[0]["payload"]["speaker"] == "original-member"
+            assert commits[0]["payload"]["interrupted"] is True
+            assert bridge.history == [{"role": "user", "content": "你好"}]
 
     asyncio.run(run())

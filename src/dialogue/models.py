@@ -32,6 +32,7 @@ class RecognizedGenerationFailed(VoiceStreamError):
 
 
 AudioSink = Callable[[bytes, int], Awaitable[None]]
+RecognitionSink = Callable[[str], None]
 
 
 @dataclass(frozen=True)

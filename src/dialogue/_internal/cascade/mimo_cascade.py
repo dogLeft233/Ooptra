@@ -21,6 +21,7 @@ from dialogue._internal.memory_tools import MEMORY_RULES, memory_tools
 from dialogue._internal.observation import DecisionTrace, VoiceObservation
 from dialogue.api import HistoryReader, VoiceBackend
 from dialogue.models import (
+    RecognitionSink,
     RecognizedGenerationFailed,
     VoiceReply,
     VoiceStreamError,
@@ -586,16 +587,17 @@ class MimoCascadeBackend(VoiceBackend):
         sample_rate: int,
         user_key: str = "",
         channel_key: str = "",
+        on_recognition: RecognitionSink | None = None,
     ) -> VoiceReply:
         async with self._generation_lock:
             return await self._generate_utterance(
-                pcm16, sample_rate=sample_rate, user_key=user_key, channel_key=channel_key)
+                pcm16, sample_rate=sample_rate, user_key=user_key, channel_key=channel_key, on_recognition=on_recognition)
 
     async def _generate_utterance(self, pcm16: bytes, *, sample_rate: int,
-                                  user_key: str, channel_key: str) -> VoiceReply:
+                                  user_key: str, channel_key: str, on_recognition: RecognitionSink | None = None) -> VoiceReply:
         trace = DecisionTrace(self.observation)
         try:
-            return await self._decide_utterance(pcm16, sample_rate, user_key, channel_key, trace)
+            return await self._decide_utterance(pcm16, sample_rate, user_key, channel_key, trace, on_recognition)
         except asyncio.CancelledError:
             trace.reason, trace.outcome = "interrupted", "skipped"
             raise
@@ -605,7 +607,7 @@ class MimoCascadeBackend(VoiceBackend):
         finally:
             trace.finish()
 
-    async def _decide_utterance(self, pcm16, sample_rate, user_key, channel_key, trace):
+    async def _decide_utterance(self, pcm16, sample_rate, user_key, channel_key, trace, on_recognition: RecognitionSink | None = None):
         if not pcm16:
             return VoiceReply()
         keywords = list(self.settings.force_reply_keywords)
@@ -622,6 +624,8 @@ class MimoCascadeBackend(VoiceBackend):
             text = await self.asr(pcm16, sample_rate)
         if not text.strip():
             return VoiceReply(user_text=text)
+        if on_recognition is not None:
+            on_recognition(text)
         try:
             return await self._respond_to_recognized(text, pcm16, sample_rate, user_key, trace,
                                                       keywords, control_enabled, window, preselected, percent)

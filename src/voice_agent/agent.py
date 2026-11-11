@@ -699,6 +699,9 @@ class VoiceAgent:
                     raise RuntimeError("voice operation superseded by manual control")
                 if source == "auto" and self._joined:
                     raise RuntimeError("voice room occupied; automatic join cannot replace it")
+                area, channel = self._resolve_target(area, channel)
+                if not area or not channel:
+                    raise RuntimeError("缺少 area/channel，请在配置或调用参数中指定")
                 if self._joined:
                     old = VoiceOperation("leave", "system", self._area, self._channel, self._visit_id)
                     result = await self._leave_locked()
@@ -796,7 +799,20 @@ class VoiceAgent:
     async def _push_room_pcm(self, session: SessionRef | None, pcm: bytes, rate: int, *, finish: bool = False) -> dict[str, Any]:
         if session is None:
             return {"ok": False, "error": "stale_session"}
-        result = await self.channels.push_audio(session, pcm, rate, finish=finish)
+        push = asyncio.create_task(self.channels.push_audio(session, pcm, rate, finish=finish))
+        try:
+            result = await asyncio.shield(push)
+        except asyncio.CancelledError:
+            while not push.done():
+                try:
+                    await asyncio.shield(push)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not push.cancelled():
+                push.exception()
+            raise
         return {"ok": result.ok, "error": result.reason}
 
     def _start_playback(self, session: SessionRef | None, output: Duplex) -> Playback:
@@ -1041,8 +1057,9 @@ class VoiceAgent:
         aclose = getattr(self.backend, "aclose", None)
         if aclose is not None:
             try:
-                # The session reader may own the output lock while a browser
-                # push is pending. Cancel that reader before taking its lock.
+                # 先等已受理推送终态，再使用独立预算关闭模型 reader。
+                async with self._live_output_lock:
+                    pass
                 await asyncio.wait_for(aclose(), 3.0)
             except Exception as exc:
                 return {"ok": False, "error": f"voice session close failed: {exc}"}
@@ -1121,6 +1138,8 @@ class VoiceAgent:
         await self._stop_round_worker()
         await self._cancel_reply_tasks()
         if self.live_mode:
+            async with self._live_output_lock:
+                pass
             await asyncio.wait_for(self.backend.aclose(), 3.0)
         async with self._live_output_lock:
             if self.duplex is not None:
@@ -1208,8 +1227,6 @@ class VoiceAgent:
                 or getattr(self, "_announcement_active", False) or getattr(self, "_retiring_visit_id", "")
                 or not getattr(self, "_connection_ready", True) or getattr(self, "_voice_suspended", False)):
             return
-        if self._cascade_limit_reached():
-            return
         if not self.settings.enabled or not pcm:
             return
         uid = str(uid or "unknown")
@@ -1273,6 +1290,8 @@ class VoiceAgent:
                 and (not isinstance(self.backend, StreamingUtterance)
                      or self._barge_in_reached(uid, pcm, sample_rate))):
             await self._interrupt_speaking()
+        if self._cascade_limit_reached():
+            return
         vad = self._vad_for(uid)
         utterance = vad.feed(pcm)
         if utterance:
@@ -1501,6 +1520,15 @@ class VoiceAgent:
         assert isinstance(backend, StreamingUtterance)
         sent = False
         failed = False
+        bridge, memory = self.context_bridge, self.memory
+        record_turn = bridge.bind_turn(speaker=uid)
+        recognized_text = ""
+        recorded = False
+
+        def on_recognition(text: str) -> None:
+            nonlocal recognized_text
+            recognized_text = text
+
         playback = self._start_playback(session, duplex) if duplex is not None else None
         self._barged_in = False
 
@@ -1519,6 +1547,8 @@ class VoiceAgent:
                 if self._barged_in or epoch != self._operation_epoch:
                     raise VoiceStreamInterrupted()
                 async with self._live_output_lock:
+                    if self._barged_in or epoch != self._operation_epoch:
+                        raise VoiceStreamInterrupted()
                     assert playback is not None
                     pushed = await playback.push(data[offset:offset + frame], rate)
                     result = {"ok": pushed.ok, "error": pushed.reason}
@@ -1529,7 +1559,7 @@ class VoiceAgent:
         try:
             stream_task = asyncio.create_task(backend.handle_utterance_stream(
                 pcm, sample_rate=sample_rate, user_key=f"oopz:{uid}",
-                channel_key=f"{self._area}/{self._channel}", on_audio=on_audio,
+                channel_key=f"{self._area}/{self._channel}", on_audio=on_audio, on_recognition=on_recognition,
             ))
             self._stream_reply_task = stream_task
             try:
@@ -1546,10 +1576,12 @@ class VoiceAgent:
             self.last_user_text = reply.user_text or self.last_user_text
             if reply.control is not None and reply.control.leave:
                 await self._record_output(reply.user_text, "", uid, session, "silent")
+                recorded = True
                 self.request_voice_leave()
                 return
             if reply.control is not None and reply.control.volume is not None:
                 await self._record_output(reply.user_text, "", uid, session, "silent")
+                recorded = True
                 result = await self._apply_volume_command(reply.control.volume)
                 if not self.output_muted:
                     await self.speak_text(result.get("message") or "语音输出调整失败")
@@ -1564,6 +1596,7 @@ class VoiceAgent:
                 confirmation = "unknown"
             if epoch == self._operation_epoch and self.context_bridge.session_id == source_session:
                 await self._record_output(reply.user_text, reply.text, uid, session, confirmation)
+                recorded = True
             logger.info("流式语音回合完成：已输出音频=%s", sent)
         except VoiceStreamInterrupted:
             failed = True
@@ -1576,12 +1609,18 @@ class VoiceAgent:
             self.last_reply = f"[error] {exc}"
             if epoch == self._operation_epoch and self.context_bridge.session_id == source_session:
                 await self._record_output(exc.user_text, "", uid, session, "failed")
+                recorded = True
             logger.exception("event=voice.generation.failed stage=after_recognition")
         except Exception as exc:
             failed = True
             self.last_reply = f"[error] {exc}"
             logger.exception("流式语音回合失败")
         finally:
+            if not recorded and recognized_text and session is not None:
+                record_turn(recognized_text, "", interrupted=True)
+                turn = ConfirmedTurn(recognized_text, "", "interrupted", user_key=f"oopz:{uid}",
+                                     channel_key=f"{session.room_target.area}/{session.room_target.channel}")
+                await asyncio.to_thread(memory.record, turn)
             if playback is not None:
                 self._playbacks.discard(playback)
             if epoch == self._operation_epoch:

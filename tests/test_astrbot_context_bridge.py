@@ -153,3 +153,29 @@ def test_binding_management_survives_voice_room_switch():
         assert bridge.resolve(event["request_id"], {"ok": True, "bindings": []})
         assert (await task)["ok"] is True
     asyncio.run(run())
+
+
+def test_bound_turn_preserves_original_scope_and_never_updates_new_session(tmp_path):
+    async def run():
+        bridge = ContextBridge(outbox_path=tmp_path / "outbox.json")
+        await prepare_source(bridge, {"ok": True, "provider": "memory_companion",
+                            "memory_scopes": [{"umo": "original"}]}, "original-area", "original-room")
+        original_session = bridge.session_id
+        record = bridge.bind_turn(speaker="original-member")
+        bridge.context["memory_scopes"][0]["umo"] = "mutated"
+        bridge.clear()
+        await prepare_source(bridge, {"ok": True, "provider": "other-provider"})
+        record("你好", "未完成回答", interrupted=True)
+        record("你好", "未完成回答", interrupted=True)
+        events = await bridge.poll(wait=0)
+        assert len(events) == 1
+        event = events[0]
+        assert event["session_id"] == original_session
+        assert event["scope"]["memory_scopes"] == [{"umo": "original"}]
+        assert event["room"] == {"area": "original-area", "channel": "original-room"}
+        assert event["payload"] == {"user_text": "你好", "reply_text": "",
+                                    "speaker": "original-member", "interrupted": True}
+        assert bridge.history == []
+        restored = ContextBridge(outbox_path=tmp_path / "outbox.json")
+        assert len(await restored.poll(wait=0)) == 1
+    asyncio.run(run())
