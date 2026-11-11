@@ -23,7 +23,7 @@ class Transport:
     async def wait_playback(self, timeout): return AudioPushResult(True)
 
 
-async def open_flow(tmp_path, *, shared=False, probability=100):
+async def open_flow(tmp_path, *, shared=False, probability=100, late_seconds=.1, transport=None):
     context = create_context_service(str(tmp_path / "history.jsonl"))
     if shared:
         await prepare_source(context.bridge, {"ok": True, "provider": "memory_companion",
@@ -31,8 +31,8 @@ async def open_flow(tmp_path, *, shared=False, probability=100):
     socket = Socket()
     async def connect(*args, **kwargs): return socket
     backend = create_gemini_backend(VoiceAgentSettings(gemini_api_key="synthetic"), connector=connect,
-        limits=LiveLimits(late_transcription_seconds=.1))
-    channel = create_channel(Transport())
+        limits=LiveLimits(late_transcription_seconds=late_seconds))
+    channel = create_channel(transport or Transport())
     session = (await channel.execute(JoinRoom("join", RoomTarget("a", "c"), 0))).session
     flow = LiveFlow(backend=backend, context=context, behavior=create_behavior(), channel=channel,
         session=session, current=lambda: True, settings=lambda: ReplySettings(probability=probability),
@@ -177,6 +177,38 @@ def test_live_probability_rejection_collects_only_final_complete_input(tmp_path)
             assert events[0]["payload"]["user_text"] == "这是完整的问题"
             assert events[0]["payload"]["reply_text"] == ""
         finally:
+            await flow.close()
+            await context.close()
+    asyncio.run(scenario())
+
+
+def test_ninth_live_turn_with_busy_output_still_collects_original_input(tmp_path):
+    async def scenario():
+        blocked = asyncio.Event()
+        class PendingDrain(Transport):
+            async def wait_playback(self, timeout):
+                await blocked.wait()
+                return AudioPushResult(True)
+        context, socket, flow = await open_flow(tmp_path, shared=True,
+                                               late_seconds=1, transport=PendingDrain())
+        try:
+            for index in range(9):
+                await socket.deliver(audio_message(user_text=f"问题{index}", text=f"回答{index}", done=True))
+            assert 1 <= len(flow._outputs) <= 8
+            events = []
+            async def collected():
+                while True:
+                    events.extend(await context.bridge.poll(wait=0))
+                    if any(event["payload"].get("user_text") == "问题8" for event in events):
+                        return
+                    await asyncio.sleep(0)
+            await asyncio.wait_for(collected(), 2)
+            ninth = [event for event in events if event["payload"].get("user_text") == "问题8"]
+            assert len(ninth) == 1
+            assert ninth[0]["payload"]["reply_text"] == ""
+            assert ninth[0]["scope"]["memory_scopes"] == [{"umo": "group:original"}]
+        finally:
+            blocked.set()
             await flow.close()
             await context.close()
     asyncio.run(scenario())

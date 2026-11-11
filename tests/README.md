@@ -52,3 +52,5 @@ PR 审查反例入口：[静音和长排空](channels/test_review_playback.py)�
 已移除的供应商复合入口、私有音频回调、global历史绑定和`.__new__`状态拼装测试，分别由新公开任务/真实应用协议测试承接。测试数量不是完成标准；删除旧实现耦合用例时应注明保留的行为和新验证入口。
 
 `tests/operations/test_plan_lifecycle.py` 使用真实变更锁及子进程 watchdog 验证计划/配置并发无死锁和取消后的实际落盘。`tests/app/test_input_delivery.py`、上下文事务及Live定稿回归验证无输出输入的原来源采集、poll/resolve后迟到输出不重复用户句子和重启幂等。
+
+PR3 的旧 TurnSubmission/JSONL 回归已映射到当前 SQLite 事务回滚、`test_output_commit_lifecycle.py` 的受理后取消及 `test_voice_history_outcomes.py` 的输入提交/Live drain取消，未保留退休生成入口或非原子双写约定。

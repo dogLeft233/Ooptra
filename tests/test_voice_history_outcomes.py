@@ -251,3 +251,97 @@ def test_live_announcement_records_confirmed_assistant_without_human_input(tmp_p
         finally:
             await agent.leave()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("probability", [0, 100])
+def test_stop_during_accepted_context_write_collects_original_input_once(tmp_path, monkeypatch, probability):
+    import threading
+
+    from support.context_fixtures import prepare_source
+
+    from dialogue import create_expression_job
+    from dialogue.models import Recognition
+    async def run():
+        agent = make_voice_agent(tmp_path)
+        playback = Playback()
+        agent.bind_duplex(playback)
+        agent.settings.reply_probability_percent = probability
+        agent.settings.force_reply_keywords = []
+        async def recognize(audio, permit):
+            return Recognition(audio.input_ref, audio.session, permit.attempt_id, audio.user_key,
+                               "recognized", "recognized before commit")
+        def generate(intent, prepared, **kwargs):
+            async def produce(emit):
+                await emit("text_final", text="confirmed reply")
+                await emit("audio", pcm16=b"\0\x40" * 320)
+            return create_expression_job(intent.action_id, intent.session, produce, deadline=intent.deadline)
+        monkeypatch.setattr(agent.backend, "recognize", recognize)
+        monkeypatch.setattr(agent.backend, "generate", generate)
+        await agent.join("area", "room")
+        await prepare_source(agent.context_bridge, {"ok": True, "provider": "memory_companion",
+            "memory_scopes": [{"umo": "original"}]}, "area", "room")
+        entered, release = threading.Event(), threading.Event()
+        method = "record_output" if probability else "finish_input"
+        original = getattr(agent.context_service, method)
+        def write(value):
+            entered.set()
+            assert release.wait(3)
+            return original(value)
+        monkeypatch.setattr(agent.context_service, method, write)
+        worker = asyncio.create_task(agent._handle_utterance("speaker", b"\0\x40" * 16000, 16000))
+        try:
+            assert await asyncio.to_thread(entered.wait, 1)
+            stopping = asyncio.create_task(agent.stop_current_reply())
+            await asyncio.sleep(0)
+            release.set()
+            await asyncio.wait_for(stopping, 1)
+            await asyncio.gather(worker, return_exceptions=True)
+            rows = agent.memory.recent()
+            assert [row["content"] for row in rows if row["role"] == "user"] == ["recognized before commit"]
+            events = await agent.context_bridge.poll(wait=0)
+            assert len(events) == 1
+            assert events[0]["scope"]["memory_scopes"] == [{"umo": "original"}]
+            assert events[0]["payload"]["user_text"] == "recognized before commit"
+        finally:
+            release.set()
+            await agent.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("operation", ["stop", "leave", "refresh"])
+def test_live_drain_cancel_preserves_only_input_in_original_scope(tmp_path, operation):
+    from support.context_fixtures import prepare_source
+    async def run():
+        agent, playback, sockets = await make_live_agent(tmp_path)
+        await agent._close_live_flow()
+        await prepare_source(agent.context_bridge, {"ok": True, "provider": "memory_companion",
+            "memory_scopes": [{"umo": "original"}]}, "area", "room")
+        await agent._wire_live()
+        socket = sockets[-1]
+        waiting, release = asyncio.Event(), asyncio.Event()
+        async def drain(timeout=30):
+            waiting.set()
+            await release.wait()
+            return {"ok": True}
+        playback.wait_tts_complete = drain
+        try:
+            await socket.deliver(audio_message(user_text="recognized original input",
+                text="unconfirmed assistant tail", done=True))
+            await asyncio.wait_for(waiting.wait(), 1)
+            if operation == "stop":
+                await agent.stop_current_reply()
+            elif operation == "leave":
+                await agent.leave()
+            else:
+                await agent.refresh_astrbot_context()
+            release.set()
+            assert agent.memory.as_messages() == [{"role": "user", "content": "recognized original input"}]
+            events = await agent.context_bridge.poll(wait=0)
+            assert len(events) == 1
+            assert events[0]["scope"]["memory_scopes"] == [{"umo": "original"}]
+            assert events[0]["payload"]["user_text"] == "recognized original input"
+            assert events[0]["payload"]["reply_text"] == ""
+        finally:
+            release.set()
+            await agent.stop()
+    asyncio.run(run())
