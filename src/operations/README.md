@@ -37,3 +37,5 @@ WebUI `/api/config` GET 返回版本；POST 可提供 `expected_revision` 和 `r
 运行 `.venv/bin/python -m pytest tests/operations tests/test_maintenance*.py tests/test_config_editor.py tests/test_auto_visit_config_editor.py -q`。公开契约测试覆盖 CAS、重复计划、保存/应用部分失败、回执发布失败后恢复、候选与损坏记录拒绝写入、取消保持互斥、部分静默禁止退出和停止身份复核。隔离真实子进程 rehearsal 覆盖候选等待提交及失败回滚；禁止为测试对当前部署执行更新或恢复。
 
 文件内容与请求回执不是跨文件原子事务：写前耐久 pending，文件替换后发布 saved；崩溃窗口按目标摘要恢复为 saved 或 unknown。手工写文件及不使用本模块的外部程序不受协作锁保护。强制杀进程不等于完成静默。业务停机与本地维护验收不等同于真实发布/灾难恢复验收。
+
+`ConfigurationStore.save_output_volume` 是异步持久化能力，由维护模块持有文件线程直到真实完成；重复取消也须完成收尾，磁盘失败不发布运行时快照。

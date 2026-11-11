@@ -2,6 +2,7 @@
 import asyncio
 import base64
 
+import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 from support.channel_fixtures import make_voice_agent
@@ -187,4 +188,66 @@ def test_tts_failure_preserves_recognized_input_in_real_history(tmp_path, monkey
         finally:
             await agent.leave()
             await backend.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("stage", ["chat", "tts"])
+def test_stop_after_nonstream_recognition_preserves_only_original_input(tmp_path, monkeypatch, stage):
+    async def run():
+        from support.dialogue_fixtures import mimo_backend
+        agent = make_voice_agent(tmp_path)
+        playback = Playback()
+        agent.bind_duplex(playback)
+        backend = mimo_backend(agent.settings)
+        agent.backend = backend
+        waiting = asyncio.Event()
+        async def asr(*args, **kwargs): return "recognized before stop"
+        async def chat(*args, **kwargs):
+            if stage == "chat":
+                waiting.set()
+                await asyncio.Event().wait()
+            return "unplayed assistant draft"
+        async def tts(*args, **kwargs):
+            waiting.set()
+            await asyncio.Event().wait()
+        monkeypatch.setattr(type(backend), "asr", asr)
+        monkeypatch.setattr(type(backend), "chat", chat)
+        monkeypatch.setattr(type(backend), "tts", tts)
+        await agent.join("area", "room")
+        try:
+            pending = asyncio.create_task(agent._handle_utterance("speaker", b"\x00\x40" * 16000, 16000))
+            await asyncio.wait_for(waiting.wait(), 1)
+            await agent.stop_current_reply()
+            await asyncio.gather(pending, return_exceptions=True)
+            assert agent.memory.as_messages() == [{"role": "user", "content": "recognized before stop"}]
+            assert agent.memory.recent()[0]["user_key"] == "oopz:speaker"
+            assert not playback.chunks
+        finally:
+            await agent.leave()
+            await backend.aclose()
+    asyncio.run(run())
+
+
+def test_live_announcement_records_confirmed_assistant_without_human_input(tmp_path):
+    async def run():
+        agent, playback, sockets = await make_live_agent(tmp_path)
+        socket = sockets[0]
+        sent = asyncio.Event()
+        original_send = socket.send
+        async def send(text):
+            import json
+            await original_send(text)
+            if "realtimeInput" in json.loads(text):
+                sent.set()
+        socket.send = send
+        try:
+            pending = asyncio.create_task(agent.speak_announcement("enter", "大家好"))
+            await asyncio.wait_for(sent.wait(), 1)
+            await socket.deliver(audio_message(user_text="", text="大家好", done=True))
+            result = await asyncio.wait_for(pending, 1)
+            assert result["ok"], result
+            assert playback.chunks
+            assert agent.memory.as_messages() == [{"role": "assistant", "content": "大家好"}]
+        finally:
+            await agent.leave()
     asyncio.run(run())
