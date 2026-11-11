@@ -413,8 +413,11 @@ class ControlProposal:
     trigger_id: str
     session: SessionRef
     candidate: VoiceControlDecision
+    permit: AttemptPermit | None = None
 
     def __post_init__(self) -> None:
         if (type(self.trigger_id) is not str or not self.trigger_id.strip()
-                or type(self.session) is not SessionRef or type(self.candidate) is not VoiceControlDecision):
+                or type(self.session) is not SessionRef or type(self.candidate) is not VoiceControlDecision
+                or (self.permit is not None and (type(self.permit) is not AttemptPermit
+                    or self.permit.session != self.session or self.permit.input_ref != self.trigger_id))):
             raise ValueError("控制提议需要触发身份、原会话和解析后的候选")
