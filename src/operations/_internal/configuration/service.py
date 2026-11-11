@@ -38,19 +38,25 @@ class FileConfiguration:
         return result
 
     def _save_output_volume(self, volume: OutputVolume) -> VolumeSaveReceipt:
+        source_name = "VOICE_AGENT_CONFIG"
         with config_file_write_lock():
             with self._path.open(encoding="utf-8", newline="") as source:
                 text = source.read()
             patched = patch_config_text(
                 text, {"voice": {"output_volume": volume.value}},
-                sources={"voice": "VOICE_AGENT_CONFIG"}, filename=str(self._path),
+                sources={"voice": source_name}, filename=str(self._path),
             )
             validate_config_text(patched, filename=str(self._path))
             runtime = self._runtime_config()
-            target = getattr(runtime, "VOICE_AGENT_CONFIG", None)
-            if not isinstance(target, dict):
+            missing = not hasattr(runtime, source_name)
+            target = getattr(runtime, source_name, None)
+            if not missing and not isinstance(target, dict):
                 raise RuntimeError("运行语音配置不是字典，已取消保存")
             replace_text_files_atomically(((self._path, patched),))
-            target["output_volume"] = volume.value
+            if missing:
+                setattr(runtime, source_name, {"output_volume": volume.value})
+            else:
+                assert isinstance(target, dict)
+                target["output_volume"] = volume.value
         logger.info("event=config.volume.saved field=voice.output_volume")
         return VolumeSaveReceipt(volume.value)

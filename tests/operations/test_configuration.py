@@ -129,3 +129,40 @@ def test_cancelled_save_observes_disk_completion_and_releases_storage(tmp_path, 
         assert runtime.VOICE_AGENT_CONFIG["output_volume"] == 42
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("runtime_group", [False, True])
+@pytest.mark.parametrize("disk_failure", [False, True])
+def test_legacy_configuration_without_voice_group_is_created_only_after_save(tmp_path, monkeypatch, runtime_group, disk_failure):
+    import os
+
+    path = tmp_path / "config.py"
+    original = '# legacy configuration\nCUSTOM = "preserved"\n'
+    path.write_text(original, encoding="utf-8")
+    runtime = SimpleNamespace()
+    if runtime_group:
+        runtime.VOICE_AGENT_CONFIG = {"persona": "runtime override"}
+    configuration = create_configuration(path=path, runtime_config=lambda: runtime)
+
+    def unavailable(*args):
+        raise OSError("synthetic disk unavailable")
+
+    if disk_failure:
+        monkeypatch.setattr(os, "replace", unavailable)
+        with pytest.raises(OSError, match="synthetic disk unavailable"):
+            asyncio.run(configuration.save_output_volume(OutputVolume(37)))
+        assert path.read_text(encoding="utf-8") == original
+        if runtime_group:
+            assert runtime.VOICE_AGENT_CONFIG == {"persona": "runtime override"}
+        else:
+            assert not hasattr(runtime, "VOICE_AGENT_CONFIG")
+    else:
+        assert asyncio.run(configuration.save_output_volume(OutputVolume(37))).volume == 37
+        namespace = {}
+        exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), namespace)
+        assert namespace["VOICE_AGENT_CONFIG"] == {"output_volume": 37}
+        assert namespace["CUSTOM"] == "preserved"
+        assert '# legacy configuration' in path.read_text(encoding="utf-8")
+        assert runtime.VOICE_AGENT_CONFIG["output_volume"] == 37
+        if runtime_group:
+            assert runtime.VOICE_AGENT_CONFIG["persona"] == "runtime override"
