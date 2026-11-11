@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 from typing import Any, Protocol, runtime_checkable
 
 from behavior.models import AttemptPermit, SpeechIntent
-from channels.models import OutputFrame, SessionRef
+from channels.models import OutputFrame, ScreenFrame, SessionRef
 from context.models import PreparedContext, RecallRequest, RememberRequest
 from dialogue.models import (
     Allow,
@@ -233,7 +233,7 @@ class VoiceBackend:
         """返回解析后的候选或明确非法/不可用，不执行控制。"""
         raise NotImplementedError("Control interpretation is unsupported")
 
-    def generate(self, intent: SpeechIntent, context: PreparedContext, *, tools: ContextToolPort | None = None) -> ExpressionJob:
+    def generate(self, intent: SpeechIntent, context: PreparedContext, *, tools: ContextToolPort | None = None, screen: ScreenFrame | None = None) -> ExpressionJob:
         """启动已批准意图的独占表达任务，返回ExpressionJob。"""
         raise NotImplementedError("Cascade generation is unsupported")
 

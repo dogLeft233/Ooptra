@@ -41,3 +41,7 @@
 现有 `reply_text_to_channel` 原先只有配置/UI 字段，本轮才实际接通。装配只使用已显式配置的 `OOPZ_CONFIG.default_area/default_channel`；未配置时应用报告 `target_unavailable`，不伪造渠道动作。字幕发送仍由渠道执行前查证频道类型；若配置指向语音频道就拒绝。验证见 `tests/channels/test_text_action_contract.py` 和 `tests/app/test_subtitle_outputs.py`，覆盖独立成败、取消/未知效果、用户输入和助手历史只记录一次。
 
 公开值的反例验证见 [输出值边界](../../tests/channels/test_public_output_guards.py)：动作身份必须是非空字符串，完成证据不能含未确认样本；采样率和帧窗口必须符合输入/整句预算。非法值在构造时拒绝，后续执行直接消费已解析结构。
+
+## 共享画面
+
+`Channel.capture_screen(session)` 在五秒内尝试取单一屏幕分享者的当前 JPEG，返回 `ScreenCapture`。无共享、多人共享、失败和旧会话分别报告；并发捕获不排队。Oopz 适配查询当前频道分享者，通过独立 Agora audience 观看连接取得最新帧，不发布音视频；退房关闭观看连接。图片至多 1 MiB、最长边 1920，只在当前回复中使用，不缓存编码图片或写入历史。协议和切房反例见 `tests/channels/test_screen_capture.py`，真实视频解码见 `tests/browser/screen-frame.cjs`。

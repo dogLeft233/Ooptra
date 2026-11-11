@@ -17,12 +17,13 @@ from support.dialogue_fixtures import aliyun_backend as AliyunDeepSeekBackend
 from test_voice_operations import make_agent
 
 from channels.models import OutputSourceError
+from dialogue import VoiceBackend
 from dialogue.models import VoiceStreamInterrupted
 from operations import load_voice_agent_settings
 from operations.models import ReasoningEffort, VoiceAgentSettings
 
 
-async def run_expression_protocol(backend, pcm, *, sample_rate, user_key, channel_key, on_audio, after_generate=None):
+async def run_expression_protocol(backend, pcm, *, sample_rate, user_key, channel_key, on_audio, after_generate=None, screen_jpeg=None):
     """按公开识别/分类/表达契约驱动真实供应商，不调用旧复合后端入口。"""
     import time
     from uuid import uuid4
@@ -50,7 +51,12 @@ async def run_expression_protocol(backend, pcm, *, sample_rate, user_key, channe
     action = uuid4().hex
     intent = SpeechIntent(action, action, session, input.input_ref, context.version,
                           time.monotonic()+5, recognized.text, user_key)
-    audio = audio_output(backend.generate(intent, context))
+    if screen_jpeg is not None:
+        from channels.models import ScreenFrame
+        screen = ScreenFrame(session, "publisher", screen_jpeg, 2, 2, time.monotonic())
+        audio = audio_output(backend.generate(intent, context, screen=screen))
+    else:
+        audio = audio_output(backend.generate(intent, context))
     if after_generate is not None:
         after_generate()
     output = bytearray()
@@ -302,7 +308,7 @@ def test_room_stream_is_not_replayed_and_stale_audio_is_rejected(tmp_path, inval
             return {'ok': True}
         agent.duplex.push_tts_pcm = push
         agent.duplex.stop_tts = AsyncMock(return_value={'ok': True})
-        class Backend:
+        class Backend(VoiceBackend):
             async def recognize(self, input, permit):
                 return Recognition(input.input_ref, input.session, permit.attempt_id,
                                    input.user_key, 'recognized', '你好')
@@ -342,7 +348,7 @@ def test_barge_in_cancels_generation_without_cancelling_room_worker(tmp_path):
         agent.duplex.push_tts_pcm = AsyncMock(return_value={'ok': True})
         started = asyncio.Event()
         cancelled = asyncio.Event()
-        class Backend:
+        class Backend(VoiceBackend):
             async def recognize(self, input, permit):
                 return Recognition(input.input_ref, input.session, permit.attempt_id,
                                    input.user_key, 'recognized', '你好')
@@ -375,7 +381,7 @@ def test_streaming_barge_in_ignores_silence_and_requires_hold_duration(tmp_path)
         agent._speaking = True
         agent.duplex.stop_tts = AsyncMock(return_value={'ok': True})
 
-        class Backend:
+        class Backend(VoiceBackend):
             def capabilities(self):
                 from dialogue.models import DialogueCapabilities
                 return DialogueCapabilities(streaming_utterance=True)
@@ -589,5 +595,25 @@ def test_new_effort_applies_to_next_generation_without_changing_started_reply():
             assert second.text == "你好。再见。"
             assert [request["reasoning_effort"] for request in state.chat_requests] == [
                 "low", "low", "high", "high"]
+            assert state.text == ["你好。", "再见。", "你好。", "再见。"]
+    asyncio.run(run())
+
+
+def test_screen_image_is_sent_only_with_this_reply_and_never_as_spoken_text():
+    async def run():
+        async with model_servers() as (backend, state):
+            async def sink(_pcm, _rate):
+                state.audio_seen.set()
+            for frame in (b"\xff\xd8\xff\xd9", None):
+                reply = await run_expression_protocol(backend, b"\x01\x00" * 8000,
+                    sample_rate=16000, user_key="member", channel_key="area/channel",
+                    on_audio=sink, screen_jpeg=frame)
+                assert reply.text == "你好。再见。"
+            first = state.chat_requests[1]["messages"][-1]["content"]
+            assert first[0]["type"] == "text" and first[0]["text"].startswith("你好")
+            assert first[1] == {"type": "image_url", "image_url": {
+                "url": "data:image/jpeg;base64,/9j/2Q==", "detail": "original"}}
+            assert state.chat_requests[3]["messages"][-1]["content"] == "你好"
+            assert isinstance(state.chat_requests[0]["messages"][-1]["content"], str)
             assert state.text == ["你好。", "再见。", "你好。", "再见。"]
     asyncio.run(run())

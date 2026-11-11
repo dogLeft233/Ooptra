@@ -191,7 +191,18 @@ async def run_cascade(*, backend, context, behavior, channel,
         if not current():
             end_reason = "superseded"
             return FlowResult(reason=end_reason)
-        job = backend.generate(intent, prepared, tools=context.tools(prepared))
+        screen = None
+        capabilities = getattr(backend, "capabilities", None)
+        if capabilities is not None and capabilities().image_input:
+            capture = await channel.capture_screen(session)
+            logger.info("event=voice.screen.captured status=%s session_id=%s input_ref=%s",
+                        capture.status, session.session_id, trigger_id)
+            if not current():
+                end_reason = "superseded"
+                return FlowResult(reason=end_reason)
+            screen = capture.frame
+        job = (backend.generate(intent, prepared, tools=context.tools(prepared), screen=screen)
+               if screen is not None else backend.generate(intent, prepared, tools=context.tools(prepared)))
         audio = audio_output(job)
         on_playing(True)
         execution_started = True

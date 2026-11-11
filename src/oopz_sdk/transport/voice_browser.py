@@ -660,6 +660,23 @@ class BrowserVoiceTransport:
         result = await self._run_on_browser("agoraState")
         return str(result or "idle")
 
+    async def capture_screen(self, watch=None) -> dict[str, Any]:
+        """按需截取当前RTC单一视频发布者，不保存图片。"""
+        if not self._started:
+            return {"status": "unavailable"}
+        if watch is not None:
+            joined = await self._run_on_browser("agoraWatchScreen", watch)
+            if not isinstance(joined, dict) or not joined.get("ok"):
+                return {"status": "unavailable"}
+        result = await self._run_on_browser("agoraCaptureScreen")
+        return result if isinstance(result, dict) else {"status": "unavailable"}
+
+    async def close_screen(self) -> None:
+        if self._started:
+            result = await self._run_on_browser("agoraCloseScreen")
+            if not isinstance(result, dict) or not result.get("ok"):
+                raise RuntimeError("screen viewer cleanup unconfirmed")
+
     async def get_status(self) -> dict[str, Any]:
         if not self._started:
             return {

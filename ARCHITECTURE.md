@@ -26,7 +26,7 @@ Ooptra 连接 Oopz 与 OneBot v11/AstrBot，提供文字代理、实时语音和
 flowchart LR
     O[Oopz / OneBot] --> C[渠道交互]
     C -->|输入与观察| X[上下文管理]
-    C -->|音频| G[对话生成]
+    C -->|音频 / 当前画面| G[对话生成]
     G -->|识别 / 提议| B[行为决策]
     X -->|准备上下文| G
     B -->|意图 / 许可| G
@@ -107,3 +107,5 @@ Oopz → OneBot → AstrBot → OneBot → Oopz 的代理路由全部在渠道�
 配置、密钥和用户数据位置继续遵循 [配置与维护](docs/operations.md)、[语音指南](docs/voice-guide.md) 及 [AstrBot 同步](docs/astrbot-context-sync.md)。
 
 生成公开 `VoiceBackend.update_settings` 拥有生成配置捕获及模型会话失效规则，返回无损延后字段与需重开Live的不可变效果；应用只组合音量应用和跨模块旧流程收尾，供应商字段规则不放在协调器。维护继续拥有配置版本/CAS。
+
+级联生成后端声明支持图像时，应用在发言决策后通过渠道 `capture_screen` 取原会话最新共享帧，作为当前表达任务的临时输入。渠道拥有屏幕观看连接与关闭，生成拥有图像 wire protocol；图片不进入权威历史或外部记忆。

@@ -19,6 +19,7 @@ from .models import (
     PlaybackResult,
     PlaybackState,
     RoomTarget,
+    ScreenCapture,
     SessionRef,
     UtteranceResult,
 )
@@ -54,6 +55,10 @@ class RoomTransport(Protocol):
 
 
 class Channel(Protocol):
+    async def capture_screen(self, session: SessionRef) -> ScreenCapture:
+        """五秒内按需取单发布者最新帧；切房/迟到/过期结果拒绝，无视频不复用旧帧。"""
+        ...
+
     async def play(self, request: PlaybackRequest, frames: AsyncIterator[OutputFrame]) -> PlaybackResult:
         """接管源及关闭；同动作重等，同一源的重复等待不关闭活跃源。
 

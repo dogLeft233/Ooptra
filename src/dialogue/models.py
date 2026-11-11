@@ -48,6 +48,7 @@ class DialogueCapabilities:
     live: bool = False
     streaming_utterance: bool = False
     streaming_recognition: bool = False
+    image_input: bool = False
     fixed_speech: bool = True
 
 

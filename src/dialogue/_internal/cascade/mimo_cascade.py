@@ -271,6 +271,7 @@ class MimoCascadeBackend(VoiceBackend):
 
     def __init__(self, settings) -> None:
         self.settings = settings
+        self._screen_frame = None
         self._session = None  # aiohttp.ClientSession，懒加载
         self._recognitions = {}
         self._jobs = set()
@@ -636,7 +637,7 @@ class MimoCascadeBackend(VoiceBackend):
             return ControlInterpretation("unavailable", reason="classification_unavailable", elapsed_ms=round((time.monotonic()-started)*1000, 1))
         return ControlInterpretation("candidate", candidate, elapsed_ms=round((time.monotonic()-started)*1000, 1))
 
-    def generate(self, intent, context, *, tools=None):
+    def generate(self, intent, context, *, tools=None, screen=None):
         import copy
 
         from dialogue._internal.output import ExpressionJob
@@ -647,6 +648,10 @@ class MimoCascadeBackend(VoiceBackend):
             raise ValueError("表达意图与准备上下文版本不一致")
         # 每任务独占supplier sink/分句队列/HTTP资源；不通过共享字段切换请求。
         child = type(self)(copy.deepcopy(self.settings))
+        if screen is not None and (not self.capabilities().image_input
+                or screen.session != intent.session or not 0 <= time.monotonic()-screen.captured_at <= 3):
+            raise ValueError("画面须受当前视觉后端支持且来自原会话的最新捕获")
+        child._screen_frame = screen
         child._prepared_context = context
         child._tools = tools
         async def produce(emit):
