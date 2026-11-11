@@ -7,7 +7,7 @@ from support.live_runtime import Playback, audio_message, make_live_agent, settl
 
 from behavior.models import VoiceControlDecision
 from dialogue import create_expression_job
-from dialogue.models import ControlInterpretation, DialogueCapabilities, Recognition
+from dialogue.models import ControlInterpretation, DialogueCapabilities, Recognition, SettingsUpdate
 from operations import load_voice_agent_settings
 from webui import config_editor
 
@@ -34,6 +34,10 @@ class Model:
         self.generated = asyncio.Event()
         self.release = asyncio.Event()
         self.jobs = set()
+
+    def update_settings(self, settings, changed):
+        self.settings = settings
+        return SettingsUpdate()
 
     def capabilities(self):
         return DialogueCapabilities()

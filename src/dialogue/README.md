@@ -8,6 +8,7 @@
 
 | 能力 | 公开入口与使用约束 | 实现导航 |
 | --- | --- | --- |
+| 配置应用 | `VoiceBackend.update_settings` 应用解析后的生成配置，返回无损延后字段与Live失效效果；应用只协调旧流程停止和重开，不维护供应商字段表 | [_internal/settings.py](_internal/settings.py) |
 | 级联识别 | `VoiceBackend.recognize` 接收有界 `AudioInput` 与原尝试许可；同尝试重复复用识别结果，异载荷冲突，不调用聊天 | [级联识别与表达](_internal/cascade/README.md) |
 | 流式识别 | `open_recognition` 以空音频头和许可建立 `RecognitionStream`，有界 `feed` / `finish_input` / `result`；临时转录只用于可替换投影，只有最终文本可交决策 | [级联识别与表达](_internal/cascade/README.md) |
 | 控制解释 | `interpret_control` 返回解析后的候选或 `invalid` / `unavailable`；非法模型响应不能当作 NoControl | [级联识别与表达](_internal/cascade/README.md) |
@@ -53,6 +54,8 @@ MiMo、阿里 ASR/DeepSeek/阿里 TTS、Gemini Live 为实际适配。OpenAI Rea
 - [来源绑定](../../tests/dialogue/test_context_binding.py)、[日志隐私](../../tests/dialogue/test_generation_logging.py)、[独立自检](../../tests/test_voice_audio_diagnostics.py)及[试听](../../tests/test_voice_tools.py)验证对应边界。
 
 更换共同能力不变的模型供应商，应主要修改此模块适配与装配配置；调整回复概率、冷却或抢话规则应修改行为模块。真实供应商和 Oopz 时序仍由应用的[双机器人验收](../../docs/bot-pair-acceptance.md)另行证明，协议夹具通过不替代真实模型验收。
+
+生成模块拥有配置捕获和模型会话失效规则；`SettingsUpdate` 是不可变应用结果。思考强度仅影响后续级联任务，已启动任务保持原配置。Live被判失效时，应用先按原会话撤销跨模块流程，再关闭并重开，不让生成配置能力操作渠道。维护仍唯一拥有配置版本/CAS；内存/VAD的独立重建仍由其使用者协调。
 
 ## 当前画面输入
 

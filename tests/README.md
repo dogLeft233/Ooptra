@@ -49,4 +49,6 @@ python -m pytest -v -o faulthandler_timeout=60
 
 已移除的供应商复合入口、私有音频回调、global历史绑定和`.__new__`状态拼装测试，分别由新公开任务/真实应用协议测试承接。测试数量不是完成标准；删除旧实现耦合用例时应注明保留的行为和新验证入口。
 
+生成配置：`tests/dialogue/test_settings_update.py` 验证公开设置应用结果及Live失效差异；`tests/test_voice_settings_reload.py` 验证思考强度与音量组合下在途公告/控制继续完成；`tests/test_aliyun_deepseek.py` 通过本地HTTP/WS确认当前任务保持原强度、后续任务使用新强度。
+
 共享画面：`tests/channels/test_screen_capture.py` 覆盖原会话、退房取消、帧年龄与 Oopz 数字发布者身份；`tests/browser/screen-frame.cjs` 执行真实 MediaStream 抽帧，`tests/browser/screen-viewer-lifecycle.cjs` 覆盖观看凭据刷新、清理代次与解码帧停滞；`tests/test_aliyun_deepseek.py` 验证当轮图像请求与 TTS 隔离。

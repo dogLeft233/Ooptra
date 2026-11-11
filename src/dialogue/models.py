@@ -14,6 +14,14 @@ if TYPE_CHECKING:
     from dialogue.api import ExpressionJob
 
 
+@dataclass(frozen=True)
+class SettingsUpdate:
+    """生成配置已更新；仅后续任务字段和持续会话失效效果，不是渠道执行结果。"""
+    deferred_fields: frozenset[str] = frozenset()
+    reopen_live: bool = False
+    notes: tuple[str, ...] = ()
+
+
 class VoiceStreamInterrupted(Exception):
     """准备来源已失效；生成失败由输出适配转换为渠道源错误。"""
 

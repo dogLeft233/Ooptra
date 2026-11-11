@@ -27,7 +27,7 @@ import pytest
 from support.channel_fixtures import establish_room
 
 from app.voice import VoiceCoordinator
-from dialogue.models import DialogueCapabilities, Recognition
+from dialogue.models import DialogueCapabilities, Recognition, SettingsUpdate
 from operations.models import VoiceAgentSettings, VoiceApiSettings
 
 SR = 16000
@@ -47,6 +47,10 @@ class _RecordingBackend:
 
     async def aclose(self) -> None:
         pass
+
+    def update_settings(self, settings, changed):
+        self.settings = settings
+        return SettingsUpdate()
 
     def capabilities(self):
         return DialogueCapabilities()
@@ -173,6 +177,10 @@ class _FakeLiveBackend:
     """够 ``_is_live_backend`` 认出来，且 aclose 可 await。"""
 
     name = "gemini_live"
+
+    def update_settings(self, settings, changed):
+        self.settings = settings
+        return SettingsUpdate()
 
     def capabilities(self):
         return DialogueCapabilities(live=True)

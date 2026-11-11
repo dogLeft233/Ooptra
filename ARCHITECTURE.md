@@ -106,4 +106,6 @@ Oopz → OneBot → AstrBot → OneBot → Oopz 的代理路由全部在渠道�
 
 配置、密钥和用户数据位置继续遵循 [配置与维护](docs/operations.md)、[语音指南](docs/voice-guide.md) 及 [AstrBot 同步](docs/astrbot-context-sync.md)。
 
+生成公开 `VoiceBackend.update_settings` 拥有生成配置捕获及模型会话失效规则，返回无损延后字段与需重开Live的不可变效果；应用只组合音量应用和跨模块旧流程收尾，供应商字段规则不放在协调器。维护继续拥有配置版本/CAS。
+
 级联生成后端声明支持图像时，应用在发言决策后通过渠道 `capture_screen` 取原会话最新共享帧，作为当前表达任务的临时输入。渠道拥有屏幕观看连接与关闭，生成拥有图像 wire protocol；图片不进入权威历史或外部记忆。
