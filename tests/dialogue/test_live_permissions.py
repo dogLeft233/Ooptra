@@ -52,7 +52,7 @@ def test_live_provider_waits_permission_then_releases_only_once():
         proposed = await asyncio.wait_for(anext(events), 1)
         assert proposed.kind == "proposed"
         assert live.snapshot().action_id == ""
-        intent = SimpleNamespace(action_id="action", session=session,
+        intent = SimpleNamespace(trigger_id="synthetic-input", action_id="action", session=session,
             context_version=prepared.version, deadline=time.monotonic() + 5)
         receipt = await live.resolve_turn(proposed.proposal, Allow(intent))
         assert receipt.status == "applied"
@@ -86,7 +86,7 @@ def test_rejected_live_turn_cannot_be_resurrected_by_late_allow():
         await socket.incoming.put({"serverContent": {"outputTranscription": {"text": "草稿"}}})
         proposed = await asyncio.wait_for(anext(events), 1)
         assert (await live.resolve_turn(proposed.proposal, Reject("policy"))).status == "rejected"
-        intent = SimpleNamespace(action_id="action", session=session,
+        intent = SimpleNamespace(trigger_id="synthetic-input", action_id="action", session=session,
             context_version=prepared.version, deadline=time.monotonic() + 5)
         assert (await live.resolve_turn(proposed.proposal, Allow(intent))).status == "stale"
         assert live.snapshot().action_id == ""
@@ -126,7 +126,7 @@ def test_live_hold_completed_audio_can_be_allowed_after_late_transcription():
         updated = await anext(events)
         assert updated.kind == "updated" and updated.text == "小蓝你好"
         assert updated.proposal.turn_id == first.proposal.turn_id
-        intent = SimpleNamespace(action_id="late-action", session=prepared.context_ref.session,
+        intent = SimpleNamespace(trigger_id="synthetic-input", action_id="late-action", session=prepared.context_ref.session,
             context_version=prepared.version, deadline=time.monotonic() + 5)
         assert (await live.resolve_turn(first.proposal, Allow(intent))).status == "stale"
         assert (await live.resolve_turn(updated.proposal, Allow(intent))).status == "applied"
@@ -144,7 +144,7 @@ def test_live_client_interrupt_discards_late_audio_and_keeps_next_turn_ready():
         events = live.events()
         await socket.incoming.put(audio_message())
         first = await anext(events)
-        intent = SimpleNamespace(action_id="action", session=prepared.context_ref.session,
+        intent = SimpleNamespace(trigger_id="synthetic-input", action_id="action", session=prepared.context_ref.session,
             context_version=prepared.version, deadline=time.monotonic() + 5)
         await live.resolve_turn(first.proposal, Allow(intent))
         output = await anext(events)
@@ -189,7 +189,7 @@ def test_unresolved_live_turn_expires_without_leaking_or_reviving_audio():
         proposed = await anext(events)
         await asyncio.sleep(.02)
         assert live.snapshot().state == "failed"
-        intent = SimpleNamespace(action_id="action", session=prepared.context_ref.session,
+        intent = SimpleNamespace(trigger_id="synthetic-input", action_id="action", session=prepared.context_ref.session,
             context_version=prepared.version, deadline=time.monotonic() + 5)
         assert (await live.resolve_turn(proposed.proposal, Allow(intent))).status == "stale"
         await events.aclose()

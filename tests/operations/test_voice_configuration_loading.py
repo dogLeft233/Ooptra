@@ -94,3 +94,26 @@ def test_invalid_reasoning_effort_is_rejected_at_configuration_boundary():
             environ={}, local_environment={})
     defaults, _ = load_voice_agent_settings(runtime_config=SimpleNamespace(), environ={}, local_environment={})
     assert defaults.deepseek_reasoning_effort == "low"
+
+
+def test_audio_wait_settings_roundtrip_and_invalid_values_are_rejected(tmp_path):
+    import pytest
+
+    from operations import create_configuration
+    from operations.models import ConfigurationChange
+    from webui.config_editor import GROUP_SOURCES, _normalize_updates
+
+    path = tmp_path / 'config.py'
+    path.write_text('VOICE_AGENT_CONFIG = {}\n')
+    runtime = SimpleNamespace(VOICE_AGENT_CONFIG={})
+    service = create_configuration(path=path, runtime_config=lambda: runtime)
+    values = {"first_audio_timeout_seconds": 50, "audio_gap_timeout_seconds": 7}
+    update = _normalize_updates({"voice": values})
+    service.save_fields(ConfigurationChange.from_normalized(update, sources=GROUP_SOURCES))
+    loaded, _ = load_voice_agent_settings(runtime_config=runtime, environ={}, local_environment={})
+    assert loaded.first_audio_timeout_seconds == 50 and loaded.audio_gap_timeout_seconds == 7
+    for key in values:
+        for value in (True, 0, "bad", 121):
+            with pytest.raises(ValueError):
+                load_voice_agent_settings(runtime_config=SimpleNamespace(VOICE_AGENT_CONFIG={key:value}),
+                    environ={}, local_environment={})

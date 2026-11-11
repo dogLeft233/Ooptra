@@ -255,3 +255,36 @@ def test_reasoning_effort_hot_reload_applies_without_replacing_backend(monkeypat
     assert rt.agent.backend is original_backend
     assert rt.agent.backend.settings.deepseek_reasoning_effort == ReasoningEffort.HIGH
     assert any("下一次" in note for note in result["notes"])
+
+
+@pytest.mark.parametrize("updates", [
+    {"first_audio_timeout_seconds": 60, "deepseek_reasoning_effort": "high"},
+    {"audio_gap_timeout_seconds": 7, "output_volume": 70},
+    {"first_audio_timeout_seconds": 60, "audio_gap_timeout_seconds": 7,
+     "deepseek_reasoning_effort": "high", "output_volume": 70},
+])
+def test_combined_noninterrupting_reload_preserves_active_flows(monkeypatch, tmp_path, updates):
+    async def run():
+        runtime = _make_runtime(monkeypatch, _settings(tmp_path, backend="aliyun_deepseek"))
+        original_backend = runtime.agent.backend
+        release = asyncio.Event()
+        announcement = asyncio.create_task(release.wait())
+        control = asyncio.create_task(release.wait())
+        runtime.agent._announcement_task = announcement
+        runtime.agent._voice_control_task = control
+        fresh = _settings(tmp_path, backend="aliyun_deepseek", **updates)
+        monkeypatch.setattr(runtime_module, "load_voice_agent_settings", lambda: (fresh, VoiceApiSettings()))
+        try:
+            result = await runtime.reload_settings()
+            assert not result["hot_reload_failed"]
+            assert not announcement.done() and not control.done()
+            assert runtime.agent.backend is original_backend
+            for field, value in updates.items():
+                assert getattr(runtime.agent.settings, field) == value
+        finally:
+            announcement.cancel()
+            control.cancel()
+            await asyncio.gather(announcement, control, return_exceptions=True)
+            runtime.agent._announcement_task = runtime.agent._voice_control_task = None
+            await runtime.agent.stop()
+    asyncio.run(run())

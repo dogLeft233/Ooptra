@@ -11,6 +11,7 @@ import re
 import struct
 import time
 import wave
+from collections.abc import Awaitable, Callable
 from io import BytesIO
 
 from behavior.models import VoiceControlDecision, parse_control_decision
@@ -275,6 +276,18 @@ class MimoCascadeBackend(VoiceBackend):
         self._audio_sink = None
         self._tools: ContextToolPort | None = None
         self._generation_id = ""
+        self._timing_sink: Callable[[str, float], Awaitable[None]] | None = None
+        self._trace: tuple[str, str, str] | None = None
+
+    async def _stage_timing(self, stage: str, started: float) -> None:
+        if self._trace is None:
+            return
+        elapsed = round((time.monotonic()-started)*1000, 1)
+        if self._timing_sink is not None:
+            await self._timing_sink(stage, elapsed)
+        session_id, action_id, input_ref = self._trace
+        logger.info("event=voice.generation.stage stage=%s duration_ms=%.1f session_id=%s action_id=%s input_ref=%s generation_id=%s",
+                    stage, elapsed, session_id, action_id, input_ref, self._generation_id)
 
     def _proxy_url(self) -> str | None:
         from dialogue._internal.proxy import resolve_agent_proxy_url
@@ -650,7 +663,11 @@ class MimoCascadeBackend(VoiceBackend):
         child._screen_frame = screen
         child._prepared_context = context
         child._tools = tools
+        child._trace = (intent.session.session_id, intent.action_id, intent.trigger_id)
         async def produce(emit):
+            async def timing(stage, elapsed):
+                await emit("timing", timings_ms=((stage, elapsed),))
+            child._timing_sink = timing
             try:
                 async def on_audio(pcm, rate):
                     await emit("audio", pcm16=pcm, sample_rate=rate)
@@ -680,7 +697,7 @@ class MimoCascadeBackend(VoiceBackend):
                     await on_audio(pcm, rate)
             finally:
                 await child.aclose()
-        job = ExpressionJob(intent.action_id, intent.session, produce, deadline=intent.deadline)
+        job = ExpressionJob(intent.action_id, intent.session, produce, deadline=intent.deadline, input_ref=intent.trigger_id)
         child._generation_id = job.generation_id
         self._jobs.add(job)
         job._task.add_done_callback(lambda _: self._jobs.discard(job))

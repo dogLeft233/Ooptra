@@ -477,6 +477,16 @@ FIELD_SPECS: dict[str, dict[str, dict[str, Any]]] = {
             "allow_custom": True,
             "hint": "下拉预设音色，或选「自定义」填入任意音色名",
         },
+        "first_audio_timeout_seconds": {
+            "type": "int", "label": "级联首段音频等待 / 秒", "tier": "adv", "section": "音频等待",
+            "min": 1, "max": 120, "default": 45,
+            "hint": "默认45秒，给看图、思考、首句和TTS启动留时间；仍受整轮剩余期限限制。保存后从下一轮生效。",
+        },
+        "audio_gap_timeout_seconds": {
+            "type": "int", "label": "级联播出后断流等待 / 秒", "tier": "adv", "section": "音频等待",
+            "min": 1, "max": 60, "default": 10,
+            "hint": "默认10秒；输出首段音频后，等待后续音频的最长间隔。Live使用渠道默认值。",
+        },
         "reply_probability_percent": {
             "type": "int",
             "label": "语音回复频率（概率 %）",

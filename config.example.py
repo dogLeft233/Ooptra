@@ -154,6 +154,10 @@ VOICE_AGENT_CONFIG = {
     # 不设的话它一直在出声，你说下一句时它还没说完，越说越迟。
     # 被抢话打断的回合不计冷却。0 = 不冷却。
     "reply_cooldown_ms": 2500,
+    # 级联首段音频等待1到120秒；看图、思考、首句及TTS启动都包含在内。
+    # 播出后的相邻音频段等待1到60秒；两项均不能延长整轮原截止时间。
+    "first_audio_timeout_seconds": 45,
+    "audio_gap_timeout_seconds": 10,
     # 自动语音回复概率：默认30%；0=仅命中强制关键词时接话，100=每次均允许回复。
     # 快捷开口与进退房台词、语音退房控制不受限制；Gemini 仍会产生模型用量。
     "reply_probability_percent": 30,

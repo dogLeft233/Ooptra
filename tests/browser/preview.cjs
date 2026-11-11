@@ -65,6 +65,24 @@ const {chromium} = require(process.env.OOPTRA_PLAYWRIGHT_MODULE || 'playwright')
       await page.waitForFunction(value => document.querySelector('[data-field="aliyun_deepseek.reasoning_effort"] select').value === value, value);
       if (process.env.OOPTRA_BROWSER_ARTIFACTS) await page.screenshot({path: path.join(process.env.OOPTRA_BROWSER_ARTIFACTS, `thinking-${value}.png`), fullPage: true});
     }
+    await page.locator('#tool-adv').click();
+    const firstAudio = page.locator('[data-group="voice"][data-field="first_audio_timeout_seconds"] input');
+    const audioGap = page.locator('[data-group="voice"][data-field="audio_gap_timeout_seconds"] input');
+    assert(await firstAudio.isVisible() && await audioGap.isVisible());
+    assert.equal(await firstAudio.inputValue(), '45');
+    assert.equal(await audioGap.inputValue(), '10');
+    await firstAudio.fill('50');
+    await audioGap.fill('7');
+    await page.locator('#config-save').click();
+    await page.waitForFunction(() => !document.querySelector('#config-save').disabled);
+    const previousFirstAudio = await firstAudio.elementHandle();
+    await page.locator('#tool-reload').click();
+    await page.waitForFunction(previous => !previous.isConnected, previousFirstAudio);
+    assert.equal(await firstAudio.inputValue(), '50');
+    assert.equal(await audioGap.inputValue(), '7');
+    await firstAudio.scrollIntoViewIfNeeded();
+    if (process.env.OOPTRA_BROWSER_ARTIFACTS) await page.screenshot({path: path.join(process.env.OOPTRA_BROWSER_ARTIFACTS, 'audio-wait-settings.png'), fullPage: true});
+    await page.locator('#tool-adv').click();
     const voiceVolume = page.locator('[data-group="voice"][data-field="output_volume"] input');
     assert.equal(await voiceVolume.inputValue(), '40');
     await voiceVolume.fill('25');

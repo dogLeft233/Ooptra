@@ -62,6 +62,8 @@ class Channel(Protocol):
     async def play(self, request: PlaybackRequest, frames: AsyncIterator[OutputFrame]) -> PlaybackResult:
         """接管源及关闭；同动作重等，同一源的重复等待不关闭活跃源。
 
+        源首帧与后续帧分别使用request的首段/断流预算；传输确认10秒、排空30秒，
+        所有等待不越过request.deadline；超时结果保留具体阶段与已提交证据。
         单会话只接受一个播放；未开始即取消也关闭源并保留终态。已接受终态至少
         保留十分钟、最多1024；最近128个拒绝/过期请求可查并绑定原ID，不可重用。
         每次等待返回后复查会话/截止；不合作源/关闭/停止未确认时拒绝复用，

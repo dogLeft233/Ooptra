@@ -3,11 +3,11 @@ import asyncio
 import base64
 import json
 import time
-from types import SimpleNamespace
 
 import pytest
 from aiohttp import web
 
+from behavior.models import SpeechIntent
 from channels.models import OutputSourceError, RoomTarget, SessionRef
 from context import create_memory
 from context.models import ContextRef, ContextRevision, HistoryMessage, PreparedContext
@@ -47,8 +47,8 @@ def test_generation_reads_fixed_context_without_duplicating_question_or_recordin
         session = SessionRef('run','bind','room',RoomTarget('a','c'))
         prepared = PreparedContext(ContextRef(session,0,'local'),ContextRevision(4),
             '固定人格',(HistoryMessage('user','previous question'), HistoryMessage('assistant',history)))
-        intent = SimpleNamespace(action_id='action',session=session,context_version=prepared.version,
-            text='current question',user_key='member',kind='reply',deadline=time.monotonic()+5)
+        intent = SpeechIntent('intent', 'action', session, 'input', prepared.version,
+            time.monotonic()+5, 'current question', 'member')
         audio = audio_output(backend.generate(intent,prepared))
         try:
             if expected:

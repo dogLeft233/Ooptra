@@ -165,3 +165,5 @@ Ooptra/
 语音上下文使用 SQLite 同一事务保存本地历史和待投递记忆。旧历史 JSONL 与 AstrBot outbox JSON 在首次启动导入，保留原文件和导入记录；坏文件明确报告，不覆盖现有数据。重启重复提交不新增相同输入/动作，外部记忆按目标分别确认和重试。备份包含 SQLite 一致快照及上下文 schema；降级前按维护归档的兼容性检查/导出清单处理，不能只回切代码后继续写旧数据格式。
 
 凭据更新与普通配置共用部署变更屏障和原子文件写锁。私钥先解析成 RSA 结构并重新序列化，任意尾随文本不会写入可执行密钥模块；调用者取消已受理写入后仍等待实际完成。
+
+语音延迟排查按同一action_id关联 `voice.screen.captured`（截图耗时）、`voice.generation.stage`（模型/TTS阶段）、`voice.playback.waiting/first_audio/finished`（首段等待、实际收到帧及终态）。`first_audio_timeout` 表示输出源未及时提供首帧，`audio_gap_timeout` 表示已输出后断流；`transport_timeout/drain_timeout` 属渠道提交/排空，`deadline` 属整轮绝对期限。模型正式首字包含网络、图像理解、思考等等待，日志不能进一步区分供应商未提供的内部耗时。详情与配置见 [语音指南](voice-guide.md#音频等待与阶段耗时)。

@@ -69,3 +69,48 @@ def test_live_logs_lengths_without_transcript_reply_or_session_handle(caplog, tm
             await backend.aclose()
 
     asyncio.run(run())
+
+
+
+def test_generation_finished_log_matches_job_after_supplier_close_failure(caplog, monkeypatch):
+    import time
+
+    import pytest
+
+    from behavior.models import SpeechIntent
+    from channels.models import OutputSourceError
+    from dialogue import audio_output, create_mimo_backend
+
+    async def run():
+        backend = create_mimo_backend(VoiceAgentSettings())
+        cls = type(backend)
+        close = cls.aclose
+        async def chat(self, *args, **kwargs):
+            return "private assistant draft"
+        async def tts(self, text):
+            return b"\x01\x00", 24000
+        async def failed_close(self):
+            await close(self)
+            raise RuntimeError("private provider cleanup detail")
+        with monkeypatch.context() as patch:
+            patch.setattr(cls, "chat", chat)
+            patch.setattr(cls, "tts", tts)
+            patch.setattr(cls, "aclose", failed_close)
+            ref = SessionRef("run", "binding", "room", RoomTarget("area", "channel"))
+            prepared = PreparedContext(ContextRef(ref, 0, "local"), ContextRevision(4), "", ())
+            intent = SpeechIntent("intent", "action", ref, "input", prepared.version,
+                                  time.monotonic() + 5, "private user text", "member")
+            with caplog.at_level("INFO"):
+                job = backend.generate(intent, prepared)
+                output = audio_output(job)
+                with pytest.raises(OutputSourceError):
+                    _ = [frame async for frame in output.frames()]
+            assert job.snapshot().status == "failed"
+            assert job.snapshot().reason == "provider_failed"
+            logs = [record.getMessage() for record in caplog.records if "event=voice.generation.finished" in record.getMessage()]
+            assert len(logs) == 1
+            assert "status=failed" in logs[0] and "reason=provider_failed" in logs[0]
+            assert "input_ref=input" in logs[0] and "action_id=action" in logs[0]
+            assert "private" not in caplog.text
+        await backend.aclose()
+    asyncio.run(run())

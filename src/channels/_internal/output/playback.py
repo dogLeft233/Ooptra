@@ -1,6 +1,7 @@
 """单会话播放台账；真实 drain 后才发布 completed，源由执行器接管关闭。"""
 
 import asyncio
+import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
@@ -15,6 +16,8 @@ from channels.models import (
     SessionRef,
     UnknownAction,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class PlaybackExecutor:
@@ -217,8 +220,14 @@ class PlaybackExecutor:
         count = samples = confirmed = rate = 0
         status: Any = "failed"
         reason = "source_failed"
-        async def bounded(work):
-            return await self._bounded(work, min(10, max(0, request.deadline - time.monotonic())))
+        started = time.monotonic()
+        waiting_stage = "first_audio"
+        logger.info("event=voice.playback.waiting stage=first_audio timeout_seconds=%.1f session_id=%s action_id=%s output_id=%s",
+                    request.first_audio_timeout_seconds, request.session.session_id, request.action_id, request.output_id)
+        async def bounded(work, timeout: float=10, stage="transport"):
+            nonlocal waiting_stage
+            waiting_stage = stage
+            return await self._bounded(work, min(timeout, max(0, request.deadline - time.monotonic())))
         try:
             iterator = frames.__aiter__()
             while True:
@@ -227,7 +236,9 @@ class PlaybackExecutor:
                 if self._current() != request.session:
                     raise ValueError("stale_session")
                 try:
-                    frame = await bounded(iterator.__anext__())
+                    frame = await bounded(iterator.__anext__(),
+                        request.first_audio_timeout_seconds if not count else request.audio_gap_timeout_seconds,
+                        "first_audio" if not count else "audio_gap")
                 except StopAsyncIteration:
                     break
                 if (not isinstance(frame, OutputFrame) or frame.action_id != request.action_id
@@ -238,6 +249,9 @@ class PlaybackExecutor:
                     raise TimeoutError
                 if self._current() != request.session:
                     raise ValueError("stale_session")
+                if not count:
+                    logger.info("event=voice.playback.first_audio duration_ms=%.1f session_id=%s action_id=%s output_id=%s",
+                                (time.monotonic()-started)*1000, request.session.session_id, request.action_id, request.output_id)
                 rate = frame.sample_rate
                 # Submission can have external effects even if its acknowledgement is cancelled.
                 count += 1
@@ -253,7 +267,7 @@ class PlaybackExecutor:
             finished = await bounded(self._push(request.session, b"", rate, finish=True))
             if not finished.ok:
                 raise ValueError(finished.reason or "finish_failed")
-            drained = await bounded(self._drain(min(30, max(0, request.deadline - time.monotonic()))))
+            drained = await bounded(self._drain(min(30, max(0, request.deadline - time.monotonic()))), 30, "drain")
             if not drained.ok or self._current() != request.session:
                 raise ValueError(drained.reason or "drain_failed")
             if request.deadline <= time.monotonic():
@@ -263,7 +277,9 @@ class PlaybackExecutor:
         except asyncio.CancelledError:
             status, reason = "cancelled", "cancelled"
         except (TimeoutError, asyncio.TimeoutError):
-            status, reason = "partial" if samples else "expired", "deadline"
+            status = "partial" if samples else "expired"
+            reason = ("deadline" if time.monotonic() >= request.deadline
+                      else waiting_stage + "_timeout")
         except Exception as exc:
             status = "partial" if samples else "failed"
             # 只保留本地错误码，源异常可能包含模型正文或凭据。
@@ -283,4 +299,7 @@ class PlaybackExecutor:
             self._results[request.action_id] = result
             self._finished[request.action_id] = time.monotonic()
             self._sources.pop(request.action_id, None)
+            logger.info("event=voice.playback.finished status=%s reason=%s stage=%s duration_ms=%.1f submitted_frames=%d session_id=%s action_id=%s output_id=%s",
+                        status, reason or "completed", waiting_stage, (time.monotonic()-started)*1000,
+                        count, request.session.session_id, request.action_id, request.output_id)
         return result

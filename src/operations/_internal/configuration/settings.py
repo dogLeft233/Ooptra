@@ -24,6 +24,12 @@ def _output_volume(value: Any) -> int:
         return 50
 
 
+def _audio_timeout(value: object, maximum: int) -> int:
+    if type(value) is not int or not 1 <= value <= maximum:
+        raise ValueError(f"音频等待秒数必须为1到{maximum}的整数")
+    return value
+
+
 def load_voice_agent_settings(*, runtime_config=None, environ=None, local_environment=None, local_environment_path=None) -> tuple[VoiceAgentSettings, VoiceApiSettings]:
     """显式加载配置；默认读取部署模块/环境，本函数导入时不读取凭据。"""
     if runtime_config is None:
@@ -74,6 +80,8 @@ def load_voice_agent_settings(*, runtime_config=None, environ=None, local_enviro
         max_utterance_ms=int(_get(agent_raw, "max_utterance_ms", 15000)),
         min_utterance_ms=int(_get(agent_raw, "min_utterance_ms", 500)),
         reply_cooldown_ms=int(_get(agent_raw, "reply_cooldown_ms", 2500)),
+        first_audio_timeout_seconds=_audio_timeout(_get(agent_raw, "first_audio_timeout_seconds", 45), 120),
+        audio_gap_timeout_seconds=_audio_timeout(_get(agent_raw, "audio_gap_timeout_seconds", 10), 60),
         cascade_turn_limit=max(0, int(_get(agent_raw, "cascade_turn_limit", 0))),
         proxy=str(_get(agent_raw, "proxy", "") or ""),
         mimo_api_key=read_environment("MIMO_API_KEY", str(mimo.get("api_key", "") or "")),
