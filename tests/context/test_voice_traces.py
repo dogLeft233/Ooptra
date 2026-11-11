@@ -1,5 +1,6 @@
 """公开台账保存所有句子和故障；诊断不进入模型记忆。"""
 import asyncio
+import sqlite3
 from dataclasses import replace
 
 import pytest
@@ -69,3 +70,40 @@ def test_trace_identity_scope_and_late_final_transcription(tmp_path):
 def test_trace_query_rejects_invalid_pagination(kwargs):
     with pytest.raises(ValueError):
         VoiceTraceQuery(**kwargs)
+
+
+def test_bounded_trace_queue_drains_before_cancelled_close_and_reopen(tmp_path, caplog):
+    async def run():
+        path = str(tmp_path / 'memory.jsonl')
+        service = create_context_service(path)
+        session = SessionRef('run', 'binding', 'session', RoomTarget('a', 'b'))
+        blocker = sqlite3.connect(service.history.path)
+        blocker.execute('BEGIN IMMEDIATE')
+        try:
+            for number in range(128):
+                assert service.enqueue_voice_trace(VoiceTrace(session, str(number), 'alice', 'finished',
+                    text='synthetic-private-text', reason='silent', outcome='not_executed'))
+            assert not service.enqueue_voice_trace(VoiceTrace(session, 'overflow', 'alice', 'finished'))
+            assert not service.enqueue_voice_trace(VoiceTrace(session, 'overflow-again', 'alice', 'finished'))
+            closing = asyncio.create_task(service.close())
+            await asyncio.sleep(0)
+            closing.cancel()
+            await asyncio.sleep(0)
+            closing.cancel()
+            assert not closing.done(), 'close dropped owned diagnostic writes after cancellation'
+            with pytest.raises(RuntimeError, match='关闭'):
+                service.enqueue_voice_trace(VoiceTrace(session, 'late', 'alice', 'finished'))
+            blocker.rollback()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(closing, 10)
+            assert caplog.text.count('event=voice.trace.queue_full') == 1
+            assert 'synthetic-private-text' not in caplog.text
+            reopened = create_context_service(path)
+            try:
+                assert reopened.voice_traces(VoiceTraceQuery()).total == 128
+            finally:
+                await reopened.close()
+        finally:
+            blocker.close()
+            await service.close()
+    asyncio.run(run())

@@ -103,6 +103,16 @@ class ContextService(Protocol):
         同步有限事务，关闭后拒绝；失败由调用边界安全记录，不伪造成功。
         """
         ...
+    def enqueue_voice_trace(self, trace: VoiceTrace) -> bool:
+        """所属事件循环非阻塞受理不可变诊断；True仅表示入队，False表示容量满。
+
+        最多128项待写及一项在途，串行线程写入，失败由上下文安全记录。
+        关闭后拒绝；close收完已受理项再关闭台账，调用者不管理线程或取消。
+        """
+        ...
+    async def flush_voice_traces(self) -> None:
+        """等候本次已受理诊断收尾；取消只撤回等待，不取消拥有的写入。"""
+        ...
     def voice_traces(self, query: VoiceTraceQuery) -> VoiceTracePage:
         """倒序稳定游标分页，最多100条；刷新/重启保留，从功能启用后开始记录。"""
         ...

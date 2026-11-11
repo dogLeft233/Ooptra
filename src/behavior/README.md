@@ -39,4 +39,6 @@
 
 阿里/DeepSeek 的 `RecognitionObserved.reply_assessment` 携带绑定原会话/输入的语义候选。行为以叫名优先、addressed/contribute允许、silent/invalid/unavailable沉默决定，不再抽样或用固定窗口强制接话；已命名短语可绕过普通最短时长。无语义候选的后端保留原策略。验证见 `tests/behavior/test_semantic_replies.py`。
 
+级联控制先通过携带原 `AttemptPermit` 的 `ControlProposal` 交 `decide_control`，登记、期限、开关与行动身份都由本模块核对。允许的控制不依赖普通接话判断；仅 `control_disabled` 可继续普通语义候选，过期、冲突或满载保持拒绝。授权结果与同一尝试后续 `decide` 共用唯一决定，Live控制不携级联许可的语义不变。
+
 `Speak.reason` 提供已授权意图的具名原因供控制台关联：语义路径区分keyword、semantic_addressed、semantic_contribute；它不改变许可与执行语义，也不包含模型推理。

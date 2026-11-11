@@ -13,6 +13,7 @@ from behavior.models import (
     AttemptRejected,
     AudioReady,
     ControlAction,
+    ControlProposal,
     NoAction,
     NotExecuted,
     RecognitionObserved,
@@ -185,6 +186,14 @@ async def run_cascade(*, backend, context, behavior, channel,
                 trace_reason = end_reason
                 return FlowResult(user_text=recognized.text, reason=end_reason)
             control = interpreted.candidate
+        if control is not None and (control.leave or control.volume is not None):
+            priority = behavior.decide_control(ControlProposal(trigger_id, session, control, permit), settings)
+            if isinstance(priority, ControlAction):
+                trace_reason = end_reason = "control"
+                return FlowResult(user_text=recognized.text, control=priority)
+            if priority.reason != "control_disabled":
+                trace_reason = end_reason = priority.reason
+                return FlowResult(user_text=recognized.text, reason=priority.reason)
         # 控制解释期间其他成员的识别仍会提交房间事实；准备与决策使用
         # 最新版本，但保留本次已核对的原会话、说话者和 input_ref。
         revision = context.snapshot(session.room_target).revision
@@ -257,9 +266,12 @@ async def run_cascade(*, backend, context, behavior, channel,
         return FlowResult(recognized.text, evidence.text, outcome,
                           text_outcome=text_outcome, text_reason=text_reason)
     except asyncio.CancelledError:
+        end_reason = 'interrupted'
         if intent is not None and execution_started:
             result = channel.playback(intent.action_id)
             if isinstance(result, PlaybackResult):
+                # 历史提交等待被取消不改变已完成的渠道播放事实。
+                end_reason = result.status
                 if not feedback_sent:
                     behavior.feedback(result)
                     feedback_sent = True
@@ -273,7 +285,6 @@ async def run_cascade(*, backend, context, behavior, channel,
                     commit_started = True
                     await commit_output(context, OutputRecord(intent.action_id, session,
                         turn, result, prepared.context_ref, trigger_id))
-        end_reason = 'interrupted'
         raise
     finally:
         try:

@@ -22,7 +22,9 @@ from operations.models import VoiceAgentSettings
     ('   ', "stop", 200, "invalid"),
     ('{}', "stop", 503, "unavailable"),
 ])
-def test_public_assessment_parses_formal_json_and_keeps_reasoning_out(raw, finish, status, expected):
+@pytest.mark.parametrize("persona,aliases", [("你是小欧，语音频道的伙伴。", ()),
+    ("你是小明，语音频道的伙伴。", ()), ("你是大肥鱼。", ("大肥鱼",))])
+def test_public_assessment_parses_formal_json_and_keeps_reasoning_out(raw, finish, status, expected, persona, aliases):
     async def run():
         async def handle(request):
             body = await request.json()
@@ -32,7 +34,8 @@ def test_public_assessment_parses_formal_json_and_keeps_reasoning_out(raw, finis
             assert body['max_tokens'] == 128 and body['stream'] is False
             payload = json.loads(body['messages'][-1]['content'])
             assert payload['current_utterance'] == '大飞鱼，在吗？'
-            assert payload['aliases'] == ['大肥鱼']
+            assert payload['bot_persona'] == persona
+            assert payload['aliases'] == list(aliases)
             assert payload['history'][-1]['content'] == '我在，刚才讲到曲率。'
             return web.json_response({'choices': [{'finish_reason': finish, 'message': {
                 'content': raw, 'reasoning_content': '不可播出的内部思考'}}]}, status=status)
@@ -46,12 +49,12 @@ def test_public_assessment_parses_formal_json_and_keeps_reasoning_out(raw, finis
         backend = create_aliyun_backend(VoiceAgentSettings(backend='aliyun_deepseek',
             deepseek_api_key='fake', deepseek_base_url=f'http://127.0.0.1:{port}'))
         session = SessionRef('run', 'bind', 'session', RoomTarget('a', 'b'))
-        prepared = PreparedContext(ContextRef(session, 0, 'local'), ContextRevision(), '',
+        prepared = PreparedContext(ContextRef(session, 0, 'local'), ContextRevision(), persona,
             (HistoryMessage('assistant', '我在，刚才讲到曲率。'),))
         try:
             assert backend.capabilities().semantic_reply
             result = await backend.assess_reply(ControlInput('大飞鱼，在吗？', 'input', session, 'u'),
-                prepared, aliases=('大肥鱼',))
+                prepared, aliases=aliases)
             assert result.decision == expected
             assert result.session == session and result.input_ref == 'input'
         finally:

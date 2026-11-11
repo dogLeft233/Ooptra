@@ -27,7 +27,7 @@ class FlowObservations:
         if self._journal is None:
             return
         try:
-            self._journal.record_voice_trace(VoiceTrace(session, input_ref, user_key, stage,
+            self._journal.enqueue_voice_trace(VoiceTrace(session, input_ref, user_key, stage,
                 text[:65536], text_final, decision, reason, outcome, max(0, elapsed_ms),
                 recognition_status=recognition_status or ("pending" if stage == "recognizing" else "")))
         except Exception:

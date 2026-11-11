@@ -38,6 +38,6 @@
 
 公开行为测试：`python -m pytest -q tests/context tests/test_astrbot_context_bridge.py tests/test_astrbot_live_context.py tests/test_memory_recent.py`。覆盖真实 SQLite 回滚、重启、同键冲突、满载补受理、原来源、逐目标重试、增量输入、授权伪造/撤销和旧文件导出。原协议测试继续验证切房、取消、peer 与持久化故障。模块只允许引用 `channels.models` 和公共技术机制。
 
-控制台诊断使用 `record_voice_trace(VoiceTrace)` / `voice_traces(VoiceTraceQuery)`，SQLite独立表保存从识别到实际结果的输入投影，按完整会话及input_ref幂等更新、阶段单调前进，未知说话者只允许补全一次，已知身份不能更换。游标倒序分页每页最多100条，重启保留；不进入history/outbox，不增加情境版本。验证：`tests/context/test_voice_traces.py`。
+控制台运行期诊断使用 `enqueue_voice_trace(VoiceTrace)`，返回值仅表示受理：最多128条待写和1条在写，队满返回False并记录安全告警。上下文独占串行写入任务，磁盘事务在线程中执行；`flush_voice_traces()` 等待已受理写入，`close()` 停止受理并排空，等待者取消不能丢弃写入或提前关库。写入失败记录原会话/输入ID，不影响发言；同步 `record_voice_trace(VoiceTrace)` 仅供离线调用。`voice_traces(VoiceTraceQuery)` 查询当前已落盘记录，SQLite独立表保存从识别到实际结果的输入投影，按完整会话及input_ref幂等更新、阶段单调前进，未知说话者只允许补全一次，已知身份不能更换。游标倒序分页每页最多100条，重启保留；不进入history/outbox，不增加情境版本。验证：`tests/context/test_voice_traces.py`。
 
 多人房间验证：`tests/context/test_room_conversation.py` 覆盖跨成员、跨房间/来源、近期容量、重启、乱序与个人授权；`tests/test_aliyun_deepseek.py` 验证忙碌期间识别、接话判断和正式模型请求。历史不会回填诊断表中旧的未选中输入。

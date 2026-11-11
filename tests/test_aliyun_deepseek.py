@@ -514,6 +514,7 @@ def test_room_capture_streams_before_cut_and_releases_original_attempt(tmp_path,
                     assert state.text == ['你好。', '再见。']
                     assert agent.status()['cascade_attempts'] == 1
                     from context.models import VoiceTraceQuery
+                    await agent.context_service.flush_voice_traces()
                     rows = agent.context_service.voice_traces(VoiceTraceQuery()).rows
                     assert len(rows) == 1
                     assert rows[0].trace.text == spoken and rows[0].trace.user_key == 'oopz:member'
@@ -522,6 +523,7 @@ def test_room_capture_streams_before_cut_and_releases_original_attempt(tmp_path,
                     for _ in range(10):
                         await agent._on_remote_pcm('member', b'\x00\x20' * 960, 16000)
                     await agent._on_remote_pcm('member', bytes(1920), 16000)
+                    await agent.context_service.flush_voice_traces()
                     rows = agent.context_service.voice_traces(VoiceTraceQuery()).rows
                     assert len(rows) == 2 and rows[0].trace.reason == 'limit_reached'
                     await agent.leave()
@@ -530,6 +532,7 @@ def test_room_capture_streams_before_cut_and_releases_original_attempt(tmp_path,
                 if end not in {'reply', 'short_name'}:
                     assert not state.chat_requests and not agent.memory.as_messages()
                     from context.models import VoiceTraceQuery
+                    await agent.context_service.flush_voice_traces()
                     rows = agent.context_service.voice_traces(VoiceTraceQuery()).rows
                     assert len(rows) == 1 and rows[0].trace.stage == 'finished'
                     assert rows[0].trace.outcome == 'not_executed'
@@ -682,6 +685,7 @@ def test_real_cascade_uses_semantic_decision_and_name_fallback(tmp_path, text, a
                 assert bool(result.outcome and result.outcome.status == "completed") is expected
                 assert state.audio_seen.is_set() is expected
                 from context.models import VoiceTraceQuery
+                await context.flush_voice_traces()
                 rows = context.voice_traces(VoiceTraceQuery()).rows
                 assert len(rows) == 1 and rows[0].trace.text == text
                 assert rows[0].trace.outcome == ('completed' if expected else 'semantic_silent')
@@ -720,6 +724,7 @@ def test_unselected_recognized_sentences_remain_visible_when_bot_is_busy(tmp_pat
                 await utterance('carol')
                 async def unselected():
                     while True:
+                        await agent.context_service.flush_voice_traces()
                         rows = agent.context_service.voice_traces(VoiceTraceQuery()).rows
                         if len(rows) == 3 and sum(row.trace.outcome == 'not_executed' for row in rows) == 2:
                             return rows
@@ -762,6 +767,7 @@ def test_asr_failure_is_visible_and_is_not_reported_as_model_silence(tmp_path):
                 await agent._on_remote_pcm('member', bytes(1920), 16000)
                 async def failed():
                     while True:
+                        await agent.context_service.flush_voice_traces()
                         rows = agent.context_service.voice_traces(VoiceTraceQuery()).rows
                         if rows and rows[0].trace.stage == 'finished':
                             return rows[0].trace

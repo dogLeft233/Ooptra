@@ -179,12 +179,23 @@ class BehaviorService:
 
 
     def decide_control(self, proposal, settings):
+        permit = proposal.permit
+        if permit is not None:
+            registered = self._triggers.get((proposal.session, proposal.trigger_id))
+            if registered is None or registered[1] != permit or proposal.session != self.snapshot().session:
+                return NoAction("stale_attempt")
         previous = self._controls.get(proposal.trigger_id)
         if previous is not None:
             return previous[1] if previous[0] == proposal else NoAction("control_conflict")
+        if permit is not None:
+            decided = self._decisions.get(permit.attempt_id)
+            if decided is not None:
+                return decided if isinstance(decided, (ControlAction, NoAction)) else NoAction("already_decided")
         candidate = proposal.candidate
         if proposal.session != self.snapshot().session:
             return NoAction("stale_session")
+        if permit is not None and self._clock() >= permit.expires_at:
+            return NoAction("expired_attempt")
         if len(self._controls) >= 1024:
             return NoAction("capacity")
         allowed = ((candidate.leave and settings.voice_leave_enabled)
@@ -196,4 +207,6 @@ class BehaviorService:
         else:
             result = NoAction("control_disabled")
         self._controls[proposal.trigger_id] = proposal, result
+        if permit is not None and isinstance(result, ControlAction):
+            self._decisions[permit.attempt_id] = result
         return result

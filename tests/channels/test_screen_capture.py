@@ -1,6 +1,7 @@
 """共享画面只能交付给捕获时仍有效的原房间会话。"""
 import asyncio
 
+import pytest
 from test_room_contract import Transport
 
 from channels import create_channel
@@ -32,7 +33,10 @@ def test_frame_from_a_room_left_during_capture_is_rejected():
     asyncio.run(run())
 
 
-def test_oopz_screen_viewer_normalizes_publisher_pid_and_captures_only_selected_share():
+@pytest.mark.parametrize("age, status", [(0, "captured"), (1500, "captured"),
+    (3001, "unavailable"), (True, "unavailable"), (float("nan"), "unavailable"),
+    (None, "unavailable")])
+def test_oopz_screen_viewer_normalizes_publisher_pid_and_captures_only_selected_share(age, status):
     import base64
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
@@ -45,7 +49,8 @@ def test_oopz_screen_viewer_normalizes_publisher_pid_and_captures_only_selected_
             if watch['publisher'] != '84626071':
                 return {'status': 'no_video'}
             return {'status': 'captured', 'publisher_id': '84626071',
-                    'width': 2, 'height': 2, 'jpeg_base64': base64.b64encode(b'\xff\xd8\xff\xd9').decode()}
+                    'width': 2, 'height': 2, 'frame_age_ms': age,
+                    'jpeg_base64': base64.b64encode(b'\xff\xd8\xff\xd9').decode()}
         sdk = SimpleNamespace(config=SimpleNamespace(agora_app_id='app'),
             capture_screen=frame, close_screen=AsyncMock())
         bot = SimpleNamespace(
@@ -61,7 +66,10 @@ def test_oopz_screen_viewer_normalizes_publisher_pid_and_captures_only_selected_
         channel = binding.channel
         joined = await channel.execute(JoinRoom('join', RoomTarget('a', 'c'), 0))
         result = await channel.capture_screen(joined.session)
-        assert result.status == 'captured'
-        assert result.frame.session == joined.session
-        assert result.frame.publisher_id == '84626071'
+        assert result.status == status
+        if status == 'captured':
+            assert result.frame.session == joined.session
+            assert result.frame.publisher_id == '84626071'
+        else:
+            assert result.frame is None
     asyncio.run(run())

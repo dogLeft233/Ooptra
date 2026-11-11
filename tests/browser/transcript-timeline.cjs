@@ -20,6 +20,7 @@ const server = http.createServer((req, res) => {
     page.on('pageerror', error => errors.push(error.message));
     page.on('console', message => {if (message.type() === 'error') errors.push(message.text());});
     let completed = false, fail = false, hold = false, releaseOld, oldStarted;
+    const transcriptRequests = [];
     let oldPending = new Promise(resolve => {oldStarted = resolve;});
     const rows = Array.from({length: 52}, (_, i) => {
       const sequence = 52 - i;
@@ -28,7 +29,7 @@ const server = http.createServer((req, res) => {
         speaker_name: sequence === 52 ? '小陈' : sequence === 51 ? '小林' : '频道成员',
         recognition_status: sequence === 48 ? 'failed' : 'recognized',
         text: sequence === 48 ? '' : sequence === 52 ? '大肥鱼，你在吗？' : sequence === 51 ? '我先自己算一下。' : sequence === 50 ? '' : sequence === 49 ? '<img src=x onerror="window.injected=1">' : '第 ' + sequence + ' 句：关于反常积分收敛性的推导。',
-        text_final: true, stage: 'finished', decision: sequence === 52 ? 'speak' : 'silent',
+        text_final: true, stage: sequence === 1 ? 'deciding' : 'finished', decision: sequence === 52 ? 'speak' : 'silent',
         reason: sequence === 48 ? 'recognition_failed' : sequence === 52 ? 'keyword' : sequence === 50 ? 'unselected_or_expired' : 'semantic_silent',
         outcome: sequence === 52 ? 'completed' : sequence === 50 ? 'not_executed' : 'semantic_silent', elapsed_ms: 800};
     });
@@ -39,6 +40,7 @@ const server = http.createServer((req, res) => {
       if (url.pathname === '/api/credentials') result = {credentials: {has_password: true}};
       if (url.pathname === '/api/voice/status') result = {status: {joined: true, enabled: true, backend: 'aliyun_deepseek', area: 'a', channel: 'b', voice_observation: {recent_decisions: []}}};
       if (url.pathname === '/api/voice/transcripts') {
+        transcriptRequests.push(url);
         if (fail) { await route.fulfill({status: 503, json: {ok: false, error: '暂时读取失败'}}); return; }
         if (hold && url.searchParams.get('area') === 'a') {
           hold = false; oldStarted();
@@ -47,8 +49,8 @@ const server = http.createServer((req, res) => {
         const before = Number(url.searchParams.get('before') || 10000);
         let filtered = rows.filter(row => row.sequence < before).map(row => ({...row}));
         if (!completed && before > 52) filtered[0] = {...filtered[0], stage: 'deciding', outcome: 'pending'};
-        if (!url.searchParams.has('area')) filtered.unshift({...rows[0], sequence: 99, speaker_name: '另一频道成员', area: 'elsewhere', channel: 'other', text: '其他频道记录'});
-        result = {rows: filtered.slice(0, 50), next_before: filtered.length > 50 ? filtered[49].sequence : null, total: url.searchParams.has('area') ? 52 : 53};
+        if (!url.searchParams.has('area')) filtered.unshift({...rows[0], sequence: 9999, speaker_name: '另一频道成员', area: 'elsewhere', channel: 'other', text: '其他频道记录'});
+        result = {rows: filtered.slice(0, 50), next_before: filtered.length > 50 ? filtered[49].sequence : null, total: rows.length + (url.searchParams.has('area') ? 0 : 1)};
       }
       await route.fulfill({json: {ok: true, ...result}});
     });
@@ -73,10 +75,33 @@ const server = http.createServer((req, res) => {
     await page.locator('#voice-trace-more').click();
     await page.waitForFunction(() => document.querySelectorAll('#voice-trace-list > li').length === 52);
     assert(await page.locator('#voice-trace-more').isHidden());
+    rows.unshift(...Array.from({length: 60}, (_, i) => ({...rows[0], sequence: 112 - i,
+      input_ref: 'new-' + (112 - i), text: '新到达的第 ' + (112 - i) + ' 句'})));
+    await page.locator('#voice-trace-refresh').click();
+    await page.waitForFunction(() => document.querySelector('#voice-trace-status').textContent.includes('/ 112'));
+    assert.equal(await list.locator('li').count(), 102);
+    assert(await page.locator('#voice-trace-more').isVisible(), 'newest page must retain a cursor for the ten missing sentences');
+    await page.locator('.voice-trace-card').screenshot({path: path.join(artifacts, '03-gap.png')});
+    await page.locator('#voice-trace-more').click();
+    await page.waitForFunction(() => document.querySelectorAll('#voice-trace-list > li').length === 112);
+    assert(await page.locator('#voice-trace-more').isHidden());
+    await page.locator('.voice-trace-card').screenshot({path: path.join(artifacts, '04-gap-filled.png')});
+    const oldest = list.locator('li').last();
+    assert.match(await oldest.textContent(), /处理中/);
+    rows.find(row => row.sequence === 1).stage = 'finished';
+    const requestsBeforeFinal = transcriptRequests.length;
+    await page.locator('#voice-trace-refresh').click();
+    await page.waitForFunction(() => document.querySelector('#voice-trace-list li:last-child').textContent.includes('保持沉默'));
+    assert.equal(await list.locator('li').count(), 112);
+    const finalRequests = transcriptRequests.slice(requestsBeforeFinal);
+    assert.equal(finalRequests.length, 2, 'refresh must issue only newest plus one pending page');
+    assert.equal(finalRequests[1].searchParams.get('before'), '2');
+    await oldest.scrollIntoViewIfNeeded();
+    await page.locator('.voice-trace-card').screenshot({path: path.join(artifacts, '05-old-final.png')});
     fail = true;
     await page.locator('#voice-trace-refresh').click();
     await page.waitForFunction(() => document.querySelector('#voice-trace-status').textContent.includes('读取失败'));
-    assert.equal(await list.locator('li').count(), 52);
+    assert.equal(await list.locator('li').count(), 112);
     fail = false;
     // 切换范围后，迟到的当前频道请求不能覆盖全部频道。
     hold = true;
