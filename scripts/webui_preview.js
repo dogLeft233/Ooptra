@@ -131,6 +131,10 @@
       if (body.action === 'source-options') return {groups: [{name: '演示开黑群', umo: 'Demo:GroupMessage:123456789', kind: 'qq'}, {name: '演示私聊', umo: 'Demo:FriendMessage:456', kind: 'session'}]};
       return {ok: true, source_management: true, bindings, context_sources: {rules: sourceRules}, platforms: [{id: 'Demo', name: '演示实例'}], context_sync: {personas: [{id: '语音伙伴', name: '语音伙伴'}]}};
     }
+    if (endpoint === '/api/voice/transcripts') return {rows: [
+      {sequence: 2, recorded_at: Date.now()/1000-5, updated_at: Date.now()/1000-3, speaker_name: '小林', user_key: 'oopz:demo-lin', text: '我先自己算一下。', text_final: true, stage: 'finished', decision: 'silent', reason: 'semantic_silent', outcome: 'semantic_silent', area: 'demo-area-1', channel: 'demo-channel-1', session_id: 'demo-session', input_ref: 'demo-input-2', elapsed_ms: 650},
+      {sequence: 1, recorded_at: Date.now()/1000-15, updated_at: Date.now()/1000-10, speaker_name: '小陈', user_key: 'oopz:demo-chen', text: '大肥鱼，你在吗？', text_final: true, stage: 'finished', decision: 'speak', reason: 'keyword', outcome: 'completed', area: 'demo-area-1', channel: 'demo-channel-1', session_id: 'demo-session', input_ref: 'demo-input-1', elapsed_ms: 1800},
+    ], total: 2, next_before: null};
     if (endpoint === '/api/voice/status') return {status: voice, auto_visit: visitStatus};
     if (endpoint === '/api/voice/output') {
       if (body.volume !== undefined) {

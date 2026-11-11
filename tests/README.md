@@ -52,3 +52,5 @@ python -m pytest -v -o faulthandler_timeout=60
 共享画面：`tests/channels/test_screen_capture.py` 覆盖原会话、退房取消、帧年龄与 Oopz 数字发布者身份；`tests/browser/screen-frame.cjs` 执行真实 MediaStream 抽帧，`tests/browser/screen-viewer-lifecycle.cjs` 覆盖观看凭据刷新、清理代次与解码帧停滞；`tests/test_aliyun_deepseek.py` 验证当轮图像请求与 TTS 隔离。
 
 语义接话：`tests/behavior/test_semantic_replies.py` 验证无抽样、叫名兜底和输入绑定；`tests/dialogue/test_reply_assessment.py` 验证真实HTTP与严格JSON边界；`tests/test_aliyun_deepseek.py` 贯通识别、语义候选、真实行为/上下文、生成与播放。外部ASR/TTS/LLM服务在本地协议服务器替代，真实叫名声学效果另行验证。
+
+逐句排障：`tests/context/test_voice_traces.py` 验证真实SQLite分页、重启、输入身份、记忆隔离、有界受理及取消关闭排空；`tests/app/test_trace_write_isolation.py` 验证真实SQLite写锁不阻塞事件循环；`tests/app/test_live_unplayed_trace.py` 验证真实Live过期且未播放轮次诊断终态；`tests/app/test_voice_transcript_api.py` 验证认证HTTP与参数边界；`tests/test_aliyun_deepseek.py` 验证真实协议/应用采集、未选中输入的最终转写及结束原因；`tests/browser/transcript-timeline.cjs` 验证正式资源中的昵称、文字、原因、播放终态、分页、新页缺口、旧页未完记录刷新、失败保留、迟到请求、XSS和窄屏。`tests/app/test_output_commit_lifecycle.py` 验证播放完成后取消SQLite提交等待仍保留真实播放终态。

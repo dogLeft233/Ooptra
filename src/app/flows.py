@@ -137,6 +137,8 @@ async def run_cascade(*, backend, context, behavior, channel,
         return FlowResult(reason="stale_recognition")
     permit = recognition.permit if recognition else behavior.admit(trigger, limit)
     if isinstance(permit, AttemptRejected):
+        if observations is not None:
+            observations.trace(session, trigger_id, user_key, "finished", reason=permit.reason, outcome="not_executed")
         return FlowResult(reason=permit.reason)
     started = time.monotonic()
     timings = {}
@@ -147,9 +149,15 @@ async def run_cascade(*, backend, context, behavior, channel,
     feedback_sent = False
     commit_started = False
     prepared = recognized = audio = None
+    if observations is not None:
+        observations.trace(session, trigger_id, user_key, "recognizing", text_final=False, reason="recognizing")
     try:
         recognized = (await recognition.stream.result() if recognition else await backend.recognize(
             AudioInput(trigger_id, session, pcm, sample_rate, user_key, permit.attempt_id), permit))
+        if observations is not None:
+            observations.trace(session, trigger_id, user_key, "recognized", text=recognized.text,
+                               reason="awaiting_decision" if recognized.text else recognized.status,
+                recognition_status="recognized" if recognized.status in {"recognized", "completed"} else "no_speech" if recognized.status == "no_speech" else "failed")
         timings["asr"] = recognized.elapsed_ms
         if recognition:
             timings["asr_finalize"] = recognized.finalize_ms
@@ -159,7 +167,9 @@ async def run_cascade(*, backend, context, behavior, channel,
             end_reason = "superseded"
             return FlowResult(reason=end_reason)
         if recognized.status not in {"recognized", "completed", "no_speech"}:
-            return FlowResult(reason=recognized.reason or "recognition_failed")
+            trace_reason = "recognition_failed"
+            end_reason = recognized.reason or "recognition_failed"
+            return FlowResult(reason=end_reason)
         revision = context.observe(Observation(
             trigger_id, session, session.session_id, permit.attempt_number,
             "recognized", text=recognized.text, user_key=user_key, input_ref=trigger_id))
@@ -173,6 +183,7 @@ async def run_cascade(*, backend, context, behavior, channel,
             timings["intent"] = interpreted.elapsed_ms
             if interpreted.status not in {"candidate", "no_control"}:
                 end_reason = "classification_" + interpreted.status
+                trace_reason = end_reason
                 return FlowResult(user_text=recognized.text, reason=end_reason)
             control = interpreted.candidate
         if control is not None and (control.leave or control.volume is not None):
@@ -210,7 +221,9 @@ async def run_cascade(*, backend, context, behavior, channel,
             end_reason = "control"
             return FlowResult(user_text=recognized.text, control=decision)
         intent = decision.intent
-        trace_reason = "reply"
+        trace_reason = decision.reason or "reply"
+        if observations is not None:
+            observations.trace(session, trigger_id, user_key, "deciding", decision="speak", reason=trace_reason, outcome="pending")
         if prepared is None:
             prepared = await context.prepare_context(ContextRequest(
                 session, user_key, trigger_id, known_revision=intent.context_version))
@@ -250,9 +263,12 @@ async def run_cascade(*, backend, context, behavior, channel,
         return FlowResult(recognized.text, evidence.text, outcome,
                           text_outcome=text_outcome, text_reason=text_reason)
     except asyncio.CancelledError:
+        end_reason = 'interrupted'
         if intent is not None and execution_started:
             result = channel.playback(intent.action_id)
             if isinstance(result, PlaybackResult):
+                # 历史提交等待被取消不改变已完成的渠道播放事实。
+                end_reason = result.status
                 if not feedback_sent:
                     behavior.feedback(result)
                     feedback_sent = True
@@ -266,7 +282,6 @@ async def run_cascade(*, backend, context, behavior, channel,
                     commit_started = True
                     await commit_output(context, OutputRecord(intent.action_id, session,
                         turn, result, prepared.context_ref, trigger_id))
-        end_reason = 'interrupted'
         raise
     finally:
         try:
@@ -284,6 +299,10 @@ async def run_cascade(*, backend, context, behavior, channel,
                 if recognition:
                     recognition.finished = True
                 if observations is not None:
+                    observations.trace(session, trigger_id, user_key, "finished",
+                        text=recognized.text if recognized is not None else "",
+                        decision="speak" if intent is not None else "control" if trace_reason == "control" else "silent",
+                        reason=trace_reason, outcome=end_reason, elapsed_ms=(time.monotonic()-started)*1000)
                     observations.record(trigger_id=trigger_id, session_id=session.session_id,
                         backend=backend.name, reason=trace_reason, outcome=end_reason,
                         elapsed_ms=(time.monotonic()-started)*1000, timings_ms=timings,

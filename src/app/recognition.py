@@ -23,6 +23,7 @@ class PreparedRecognition:
     rate: int
     finished: bool = False
     expiry: asyncio.Task | None = None
+    observer: asyncio.Task | None = None
 
 
 class RecognitionInputs:
@@ -33,6 +34,19 @@ class RecognitionInputs:
         self._ready: dict[str, PreparedRecognition] = {}
         self._prefix: dict[str, tuple[int, bytearray]] = {}
         self._closing: set[asyncio.Task] = set()
+        self._rejected: set[str] = set()
+
+    async def _watch(self, item: PreparedRecognition):
+        try:
+            result = await item.stream.result()
+            self.host.observations.trace(item.trigger.session, item.trigger.trigger_id, item.trigger.user_key,
+                "recognized", text=result.text, reason="awaiting_decision" if result.text else result.status,
+                recognition_status=result.status)
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            self.host.observations.trace(item.trigger.session, item.trigger.trigger_id, item.trigger.user_key,
+                "recognized", reason="recognition_failed", recognition_status="failed")
 
     async def _close(self, item: PreparedRecognition, reason: str):
         if item.expiry is not None and item.expiry is not asyncio.current_task():
@@ -41,7 +55,12 @@ class RecognitionInputs:
         try:
             await item.stream.aclose()
         finally:
+            if item.observer is not None:
+                item.observer.cancel()
+                await asyncio.gather(item.observer, return_exceptions=True)
             if not item.finished:
+                self.host.observations.trace(item.trigger.session, item.trigger.trigger_id, item.trigger.user_key,
+                    "finished", reason=reason, outcome="not_executed", recognition_status="interrupted")
                 item.finished = True
                 self.host.behavior.finish_attempt(AttemptFinished(item.permit, reason, time.monotonic()))
 
@@ -51,6 +70,7 @@ class RecognitionInputs:
         self._active.clear()
         self._ready.clear()
         self._prefix.clear()
+        self._rejected.clear()
         for item in items:
             task = asyncio.create_task(self._close(item, "input_gap"), name="app-asr-gap-cleanup")
             self._closing.add(task)
@@ -74,10 +94,15 @@ class RecognitionInputs:
             item = None
             self._prefix.pop(uid, None)
         if cut.status in {"noise", "too_short"}:
+            self._rejected.discard(uid)
             self._prefix.pop(uid, None)
             if item:
                 self._active.pop(uid)
                 await self._close(item, cut.status)
+            return ""
+        if uid in self._rejected:
+            if cut.status == "ready":
+                self._rejected.discard(uid)
             return ""
         if cut.stream_pcm16:
             if item is None:
@@ -94,15 +119,24 @@ class RecognitionInputs:
                 trigger = AudioReady(uuid4().hex, session, "oopz:"+uid, revision)
                 permit = self.host.behavior.admit(trigger, self.host.settings.cascade_turn_limit)
                 self._prefix.pop(uid, None)
+                self.host.observations.trace(session, trigger.trigger_id, trigger.user_key,
+                    "recognizing", text_final=False, reason="recognizing")
                 if isinstance(permit, AttemptRejected):
+                    if cut.status != "ready":
+                        self._rejected.add(uid)
+                    self.host.observations.trace(session, trigger.trigger_id, trigger.user_key,
+                        "finished", reason=permit.reason, outcome="not_executed")
                     return ""
                 try:
                     stream = self.host.backend.open_recognition(AudioInput(
                         trigger.trigger_id, session, b"", audio.sample_rate, trigger.user_key, permit.attempt_id), permit)
                 except Exception:
+                    self.host.observations.trace(session, trigger.trigger_id, trigger.user_key,
+                        "finished", reason="asr_start_failed", outcome="failed")
                     self.host.behavior.finish_attempt(AttemptFinished(permit, "asr_start_failed", time.monotonic()))
                     return ""
                 item = PreparedRecognition(trigger, permit, stream, audio.sample_rate)
+                item.observer = asyncio.create_task(self._watch(item), name="app-asr-trace")
                 self._active[uid] = item
                 logger.info("event=voice.asr.started session_id=%s input_ref=%s streaming=true",
                             session.session_id, trigger.trigger_id)

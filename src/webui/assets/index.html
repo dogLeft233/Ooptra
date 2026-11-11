@@ -354,6 +354,13 @@
             <ul class="feed" id="voice-transcript"></ul>
           </section>
         </div>
+        <section class="card voice-trace-card" aria-labelledby="voice-trace-title">
+          <header class="card-head"><h3 id="voice-trace-title">逐句识别与接话记录</h3><button class="btn ghost sm" id="voice-trace-refresh" type="button">刷新记录</button></header>
+          <div class="voice-trace-toolbar"><label class="field"><span>查看范围</span><select class="control" id="voice-trace-scope"><option value="current">当前频道</option><option value="all">全部频道</option></select></label><p class="hint" id="voice-trace-status" role="status">等待读取记录</p></div>
+          <p class="hint">逐句保存识别到的文字及处理结果，刷新与重启后保留；功能启用前的记录不回填。没有记录时，可能尚未收到有效音频；被替换或中断的输入可能没有最终转写。</p>
+          <ol class="voice-trace-list" id="voice-trace-list" aria-label="逐句语音识别列表"><li class="empty">暂无逐句记录</li></ol>
+          <button class="btn ghost" id="voice-trace-more" type="button" hidden>加载更早记录</button>
+        </section>
         <details class="tool-details voice-observation"><summary>回复决策与耗时</summary><p class="hint">只显示原因和耗时，不保存原始音频。实时语音的阶段可能重叠。</p><ul class="check-list" id="voice-decision-list"><li class="empty">暂无决策记录</li></ul></details>
       </div>
 

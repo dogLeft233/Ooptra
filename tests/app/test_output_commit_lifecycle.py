@@ -146,3 +146,56 @@ def test_live_close_does_not_hide_a_failed_transaction_commit(tmp_path):
             await flow.close()
         await context.close()
     asyncio.run(scenario())
+
+
+def test_cascade_cancelled_commit_preserves_completed_playback_diagnostic(tmp_path):
+    from app.flows import run_cascade
+    from app.observation import FlowObservations
+    from context.models import VoiceTraceQuery
+    from dialogue.models import DialogueCapabilities, Recognition
+
+    class CascadeModel(Model):
+        name = 'synthetic'
+        def capabilities(self): return DialogueCapabilities()
+        async def recognize(self, audio, permit):
+            return Recognition(audio.input_ref, audio.session, permit.attempt_id, audio.user_key,
+                               'recognized', '人的输入')
+        def generate(self, intent, prepared, *, tools):
+            self.action_id = intent.action_id
+            return super().generate(intent, prepared, tools=tools)
+
+    async def scenario():
+        context = create_context_service(str(tmp_path / 'history.jsonl'))
+        channel = create_channel(Transport())
+        session = (await channel.execute(JoinRoom('join', RoomTarget('a', 'b'), 0))).session
+        behavior, model = create_behavior(), CascadeModel()
+        behavior.start_session(session)
+        entered, release = threading.Event(), threading.Event()
+        original = context.record_output
+        def write(record):
+            entered.set()
+            assert release.wait(3)
+            return original(record)
+        context.record_output = write
+        flow = asyncio.create_task(run_cascade(backend=model, context=context, channel=channel,
+            behavior=behavior, session=session, trigger_id='input', user_key='alice',
+            pcm=b'\0\x40' * 16000, sample_rate=16000, limit=3, settings=ReplySettings(),
+            interpret_controls=False, current=lambda: True, on_playing=lambda _: None,
+            observations=FlowObservations(journal=context)))
+        try:
+            assert await asyncio.to_thread(entered.wait, 1)
+            assert channel.playback(model.action_id).status == 'completed'
+            flow.cancel()
+            await asyncio.sleep(0)
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await flow
+            await context.flush_voice_traces()
+            trace = context.voice_traces(VoiceTraceQuery()).rows[0].trace
+            assert trace.stage == 'finished' and trace.outcome == 'completed'
+            assert context.history.as_messages() == [
+                {'role': 'user', 'content': '人的输入'}, {'role': 'assistant', 'content': '已播放的回复'}]
+        finally:
+            release.set()
+            await context.close()
+    asyncio.run(scenario())

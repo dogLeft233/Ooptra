@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import logging
 import time
 import uuid
+from collections import deque
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
@@ -23,9 +25,28 @@ from context.models import (
     RecallRequest,
     RememberRequest,
     SituationSnapshot,
+    VoiceTrace,
+    VoiceTracePage,
+    VoiceTraceQuery,
     WriteAuthorization,
 )
 from core.paths import project_path
+
+logger = logging.getLogger(__name__)
+
+
+async def _wait_owned(task: asyncio.Task[None]) -> None:
+    cancelled = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+        except Exception:
+            break
+    task.result()
+    if cancelled is not None:
+        raise cancelled
 
 
 class ContextService:
@@ -39,6 +60,12 @@ class ContextService:
         self.bridge = ContextBridge(timeout=timeout, ledger=self._ledger)
         self._loop = None
         self._closed = False
+        self._trace_pending: deque[VoiceTrace] = deque()
+        self._trace_writer: asyncio.Task[None] | None = None
+        self._trace_loop: asyncio.AbstractEventLoop | None = None
+        self._trace_stopping = False
+        self._trace_overflow = False
+        self._close_task: asyncio.Task[None] | None = None
         self._observations: dict[str, tuple[Observation, int]] = {}
         self._seen: dict[str, str] = {}
         self._sequences: dict[tuple[str, str], int] = {}
@@ -52,6 +79,64 @@ class ContextService:
 
     def _revision(self):
         return ContextRevision(self._version, len(self._source_generations), self._ledger.revision())
+
+    def record_voice_trace(self, trace: VoiceTrace) -> None:
+        if self._closed:
+            raise RuntimeError("上下文已关闭")
+        self._ledger.record_voice_trace(trace)
+
+    def enqueue_voice_trace(self, trace: VoiceTrace) -> bool:
+        if self._closed or self._trace_stopping:
+            raise RuntimeError("上下文已关闭")
+        if type(trace) is not VoiceTrace:
+            raise ValueError("诊断记录须为已解析的VoiceTrace")
+        loop = asyncio.get_running_loop()
+        if self._trace_loop is not None and self._trace_loop is not loop:
+            raise RuntimeError("诊断写入必须属于同一事件循环")
+        self._trace_loop = loop
+        if len(self._trace_pending) >= 128:
+            if not self._trace_overflow:
+                logger.warning("event=voice.trace.queue_full session_id=%s input_ref=%s",
+                               trace.session.session_id, trace.input_ref)
+                self._trace_overflow = True
+            return False
+        self._trace_pending.append(trace)
+        if self._trace_writer is None or self._trace_writer.done():
+            self._trace_writer = asyncio.create_task(self._drain_voice_traces(), name="context-voice-traces")
+            self._trace_writer.add_done_callback(self._observe_trace_writer)
+        return True
+
+    def _observe_trace_writer(self, task: asyncio.Task[None]) -> None:
+        if not task.cancelled() and task.exception() is not None:
+            self._trace_stopping = True
+            logger.error("event=voice.trace.worker_failed", exc_info=task.exception())
+
+    async def _drain_voice_traces(self) -> None:
+        cancelled = None
+        while self._trace_pending:
+            trace = self._trace_pending.popleft()
+            write = asyncio.create_task(asyncio.to_thread(self._ledger.record_voice_trace, trace),
+                                        name="context-voice-trace-write")
+            try:
+                await _wait_owned(write)
+            except asyncio.CancelledError as exc:
+                # 已受理磁盘工作不能被取消。停止受理，仍收完本队列后传播取消。
+                self._trace_stopping = True
+                cancelled = exc
+            except Exception:
+                logger.exception("event=voice.trace.failed session_id=%s input_ref=%s",
+                                 trace.session.session_id, trace.input_ref)
+        self._trace_overflow = False
+        if cancelled is not None:
+            raise cancelled
+
+    async def flush_voice_traces(self) -> None:
+        writer = self._trace_writer
+        if writer is not None:
+            await asyncio.shield(writer)
+
+    def voice_traces(self, query: VoiceTraceQuery) -> VoiceTracePage:
+        return self._ledger.voice_traces(query)
 
     def observe(self, observation: Observation) -> ContextRevision:
         if self._closed:
@@ -206,12 +291,19 @@ class ContextService:
         return await asyncio.to_thread(self._ledger.export_legacy, directory)
 
     async def close(self):
-        if self._closed:
-            return
-        self._closed = True
-        await self.bridge.close()
-        # Transactions hold a finite local lock; closing cannot drop a committed record.
-        await asyncio.to_thread(self._ledger.close)
+        if self._close_task is None:
+            self._closed = True
+            self._close_task = asyncio.create_task(self._close_resources(), name="context-close")
+        await _wait_owned(self._close_task)
+
+    async def _close_resources(self) -> None:
+        try:
+            if self._trace_writer is not None:
+                await _wait_owned(self._trace_writer)
+        finally:
+            await self.bridge.close()
+            # 先收完已受理诊断，再关闭共用台账；重复关闭观察同一任务。
+            await asyncio.to_thread(self._ledger.close)
 
 
 class BoundTools:

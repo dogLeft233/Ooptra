@@ -43,7 +43,8 @@ from typing import Any
 
 from aiohttp import web
 
-from context.models import BindingRequest, PollRequest, RpcReceipt
+from channels.models import RoomTarget
+from context.models import BindingRequest, PollRequest, RpcReceipt, VoiceTraceQuery
 
 logger = logging.getLogger(__name__)
 
@@ -367,6 +368,41 @@ def build_voice_routes(
         except Exception as exc:
             return err(str(exc), 409)
         return ok({"status": voice_runtime.auto_visit.status()})
+
+    async def voice_transcripts(request: web.Request) -> web.Response:
+        agent = current_agent()
+        try:
+            before_raw, limit_raw = request.query.get("before"), request.query.get("limit", "50")
+            if not limit_raw.isascii() or not limit_raw.isdecimal() or (before_raw is not None and (
+                    not before_raw.isascii() or not before_raw.isdecimal())):
+                raise ValueError("游标和页长须为正整数")
+            area, channel = request.query.get("area", ""), request.query.get("channel", "")
+            if bool(area) != bool(channel):
+                raise ValueError("按频道查询需同时提供 area 和 channel")
+            query = VoiceTraceQuery(RoomTarget(area, channel) if area else None,
+                int(before_raw) if before_raw is not None else None, int(limit_raw))
+        except ValueError as exc:
+            return err(str(exc))
+        page = await asyncio.to_thread(agent.context_service.voice_traces, query)
+        keys = [entry.trace.user_key.removeprefix("oopz:") for entry in page.rows
+                if entry.trace.user_key.startswith("oopz:")]
+        names = await _member_names(keys)
+        rows = []
+        for entry in page.rows:
+            trace = entry.trace
+            uid = trace.user_key.removeprefix("oopz:")
+            rows.append({"sequence": entry.sequence, "recorded_at": entry.recorded_at,
+                "updated_at": entry.updated_at, "session_id": trace.session.session_id,
+                "area": trace.session.room_target.area, "channel": trace.session.room_target.channel,
+                "input_ref": trace.input_ref, "user_key": trace.user_key,
+                "speaker_name": names.get(uid) or trace.user_key or "说话者未知",
+                "text": trace.text, "text_final": trace.text_final, "stage": trace.stage,
+                "recognition_status": trace.recognition_status,
+                "decision": trace.decision, "reason": trace.reason,
+                "outcome": trace.outcome, "elapsed_ms": trace.elapsed_ms})
+        response = ok({"rows": rows, "next_before": page.next_before, "total": page.total})
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     async def voice_screen(_request: web.Request) -> web.Response:
         import base64
@@ -704,6 +740,7 @@ def build_voice_routes(
         ("POST", "/voice/astrbot/bindings", context_bindings),
         ("GET", "/health", health),
         ("GET", "/voice/status", voice_status),
+        ("GET", "/voice/transcripts", voice_transcripts),
         ("GET", "/voice/screen", voice_screen),
         ("POST", "/voice/diagnostics", voice_diagnostics),
         ("POST", "/voice/preview", voice_preview),

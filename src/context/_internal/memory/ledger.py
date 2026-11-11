@@ -21,6 +21,10 @@ from context.models import (
     LegacyExport,
     MemoryTurn,
     RecordReceipt,
+    VoiceTrace,
+    VoiceTraceEntry,
+    VoiceTracePage,
+    VoiceTraceQuery,
 )
 
 
@@ -54,6 +58,8 @@ class ContextLedger:
             db.execute("CREATE TABLE IF NOT EXISTS deliveries (id TEXT PRIMARY KEY, event TEXT NOT NULL, state TEXT NOT NULL, receipts TEXT NOT NULL DEFAULT '{}')")
             db.execute("CREATE TABLE IF NOT EXISTS migration_state (source TEXT PRIMARY KEY, count INTEGER NOT NULL)")
             db.execute("CREATE INDEX IF NOT EXISTS history_scope ON history(room,source,seq)")
+            db.execute("CREATE TABLE IF NOT EXISTS voice_traces (seq INTEGER PRIMARY KEY AUTOINCREMENT, trace_key TEXT UNIQUE NOT NULL, area TEXT NOT NULL, channel TEXT NOT NULL, payload TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL)")
+            db.execute("CREATE INDEX IF NOT EXISTS voice_trace_scope ON voice_traces(area,channel,seq)")
             for source, kind in ((legacy_history, "history"), (legacy_outbox, "outbox")):
                 if source is not None:
                     self._import(db, source, kind)
@@ -75,6 +81,57 @@ class ContextLedger:
             finally:
                 if self._memory_db is None:
                     db.close()
+
+    def record_voice_trace(self, trace: VoiceTrace) -> None:
+        key = encoded([asdict(trace.session), trace.input_ref])
+        payload = asdict(trace)
+        ranks = {"recognizing": 0, "recognized": 1, "deciding": 2, "finished": 3}
+        now = time.time()
+        with self.transaction() as db:
+            prior = db.execute("SELECT payload FROM voice_traces WHERE trace_key=?", (key,)).fetchone()
+            if prior:
+                old = json.loads(prior[0])
+                if old["user_key"] and trace.user_key and old["user_key"] != trace.user_key:
+                    raise ValueError("语音诊断不能更换原说话者")
+                payload["user_key"] = old["user_key"] or trace.user_key
+                for name in ("text", "decision", "reason", "outcome", "recognition_status"):
+                    if not payload[name]:
+                        payload[name] = old.get(name, "")
+                if old.get("recognition_status", "") not in {"", "pending"} and trace.recognition_status in {"", "pending", "interrupted"}:
+                    payload["recognition_status"] = old["recognition_status"]
+                if (old["text_final"] and old["text"]) or not trace.text:
+                    payload["text"], payload["text_final"] = old["text"], old["text_final"]
+                if ranks[trace.stage] < ranks[old["stage"]]:
+                    for name in ("stage", "decision", "reason", "outcome", "elapsed_ms"):
+                        payload[name] = old[name]
+                db.execute("UPDATE voice_traces SET payload=?,updated_at=? WHERE trace_key=?", (encoded(payload), now, key))
+            else:
+                db.execute("INSERT INTO voice_traces(trace_key,area,channel,payload,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                           (key, trace.session.room_target.area, trace.session.room_target.channel, encoded(payload), now, now))
+
+    def voice_traces(self, query: VoiceTraceQuery) -> VoiceTracePage:
+        from channels.models import RoomTarget, SessionRef
+
+        clauses, args = [], []
+        if query.scope is not None:
+            clauses.append("area=? AND channel=?")
+            args.extend((query.scope.area, query.scope.channel))
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self.transaction() as db:
+            total = db.execute("SELECT COUNT(*) FROM voice_traces" + where, args).fetchone()[0]
+            if query.before is not None:
+                clauses.append("seq<?")
+                args.append(query.before)
+            where = " WHERE " + " AND ".join(clauses) if clauses else ""
+            records = db.execute("SELECT seq,payload,created_at,updated_at FROM voice_traces" + where + " ORDER BY seq DESC LIMIT ?", [*args, query.limit+1]).fetchall()
+        result = []
+        for seq, raw, created, updated in records[:query.limit]:
+            fields = json.loads(raw)
+            session = fields.pop("session")
+            target = RoomTarget(**session.pop("room_target"))
+            trace = VoiceTrace(session=SessionRef(room_target=target, **session), **fields)
+            result.append(VoiceTraceEntry(seq, created, updated, trace))
+        return VoiceTracePage(tuple(result), result[-1].sequence if len(records) > query.limit else None, total)
 
     def _import(self, db, path: Path, kind: str):
         source = kind + ":" + str(path.resolve())

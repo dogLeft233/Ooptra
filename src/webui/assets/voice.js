@@ -14,8 +14,150 @@ let voiceVolumeDraft = null;
 let voiceOutputBusy = false;
 let voiceOutputRevision = 0;
 let voiceOutputOperation = 0;
+let voiceTraceRows = new Map();
+let voiceTraceNext = null;
+let voiceTraceGeneration = 0;
+let voiceTraceBusy = false;
+let voiceTraceGap = null;
+let voiceTracePendingCursor = 0;
+let voiceTraceTarget = '';
+let voiceTraceStatus = null;
+
+function resetVoiceTraces() {
+  voiceTraceGeneration++;
+  voiceTraceRows.clear(); voiceTraceNext = null;
+  voiceTraceBusy = false; voiceTraceGap = null; voiceTracePendingCursor = 0;
+  const list = $('voice-trace-list');
+  if (list) list.replaceChildren();
+}
+
+function voiceTraceReason(row) {
+  const reasons = {
+    keyword: '转写命中呼叫关键词，优先回应', semantic_addressed: '模型判断你正在呼叫或追问 Bot',
+    semantic_contribute: '模型判断适合提供帮助或接话', semantic_silent: '模型判断应继续倾听',
+    semantic_invalid: '模型判定格式无效，普通聊天保持沉默',
+    semantic_unavailable: '模型判定超时或不可用，普通聊天保持沉默',
+    policy_silence: '未命中关键词或窗口，概率未选中', reply: '接话策略允许回复',
+    too_short: '语音过短，未进入普通接话', noise: '音量过低或噪声，未取得转写',
+    no_speech: '没有识别到有效文字', failed: '语音识别失败，未取得最终文字',
+    recognition_failed: '语音识别失败', recognizing: '正在接收语音或等待识别',
+    awaiting_decision: '识别完成，等待接话判断或调度',
+    unselected_or_expired: '冷却或忙碌期间未被选中，输入已被后续发言替换或等待超时',
+    unexecuted: '输入已选中，但本轮未执行（可能正在播报或会话已变化）',
+    input_gap: '音频不连续或房间重置，识别已中断', input_changed: '音频来源或采样率变化，识别已中断',
+    asr_start_failed: '无法启动语音识别', asr_input_failed: '识别音频输入失败',
+    limit_reached: '本次会话自动接话尝试已达上限', stale_attempt: '输入许可已失效',
+    expired_attempt: '等待过久，输入许可已过期', superseded: '房间或会话已变化，拒绝旧结果',
+    interrupted: '本轮被打断', error: '处理失败，请结合耗时和日志排查', control: '识别为语音控制指令',
+    classification_invalid: '控制指令解析无效，未执行', classification_unavailable: '控制指令判断不可用，未执行',
+  };
+  return reasons[row.reason] || row.reason || '尚无最终决定';
+}
+
+function renderVoiceTraces() {
+  const host = $('voice-trace-list');
+  if (!host) return;
+  host.replaceChildren();
+  const rows = [...voiceTraceRows.values()].sort((a, b) => b.sequence - a.sequence);
+  if (!rows.length) {
+    const empty = document.createElement('li'); empty.className = 'empty';
+    empty.textContent = '暂无逐句记录'; host.append(empty);
+  }
+  for (const row of rows) {
+    const item = document.createElement('li'); item.className = 'voice-trace-item';
+    const heading = document.createElement('div'); heading.className = 'voice-trace-heading';
+    const who = document.createElement('b'); who.textContent = row.speaker_name || row.user_key || '说话者未知';
+    const timestamp = document.createElement('time');
+    timestamp.textContent = new Date(row.recorded_at * 1000).toLocaleString('zh-CN', {hour12: false});
+    const badge = document.createElement('span'); badge.className = 'chip';
+    badge.textContent = row.stage !== 'finished' ? (row.stage === 'recognizing' ? '识别中' : '处理中')
+      : row.decision === 'speak' ? (row.outcome === 'completed' ? '已回复' : row.outcome === 'pending' ? '准备回复' : '回复未完成')
+      : row.decision === 'control' ? '控制指令' : row.decision === 'silent' && ['semantic_silent', 'policy_silence', 'too_short'].includes(row.reason) ? '保持沉默' : '未回复';
+    heading.append(who, timestamp, badge);
+    const transcript = document.createElement('p'); transcript.className = 'voice-trace-text';
+    transcript.textContent = row.text || (row.recognition_status === 'failed' ? '语音识别失败，未取得最终转写' : row.recognition_status === 'no_speech' ? '识别结束，没有有效语音文字' : row.stage === 'recognizing' ? '等待语音识别结果…' : '未取得最终转写');
+    if (row.text && !row.text_final) transcript.textContent += '（临时转写，尚未最终确认）';
+    const reason = document.createElement('p'); reason.className = 'hint'; reason.textContent = voiceTraceReason(row);
+    if (row.decision === 'speak' && row.outcome && row.outcome !== 'completed') reason.textContent += '；' + ({pending: '等待播放完成', interrupted: '播放已中断', cancelled: '播放已取消', failed: '生成或播放失败', rejected: '播放请求被拒绝'}[row.outcome] || ('执行结果：' + row.outcome));
+    if (row.stage !== 'finished' && Date.now() / 1000 - row.updated_at > 90) reason.textContent += '；长时间未更新，可能已因进程中断而停止';
+    const details = document.createElement('details');
+    const summary = document.createElement('summary'); summary.textContent = '查看关联信息';
+    const meta = document.createElement('p'); meta.className = 'hint';
+    meta.textContent = '成员：' + (row.user_key || '未知') + ' · 输入：' + row.input_ref + ' · 会话：' + row.session_id + ' · 频道：' + row.area + '/' + row.channel + (row.elapsed_ms ? ' · 处理 ' + Math.round(row.elapsed_ms) + ' ms' : '');
+    details.append(summary, meta); item.append(heading, transcript, reason, details); host.append(item);
+  }
+  const more = $('voice-trace-more');
+  if (more) { more.hidden = (voiceTraceGap?.before ?? voiceTraceNext) == null; more.disabled = voiceTraceBusy; }
+}
+
+async function refreshVoiceTraces(st, {older = false} = {}) {
+  if (!$('voice-trace-list')) return;
+  if (st) voiceTraceStatus = st;
+  const scope = $('voice-trace-scope')?.value || 'current';
+  const state = voiceTraceStatus || {};
+  const target = scope === 'all' ? 'all' : (state.area && state.channel ? state.area + '/' + state.channel : 'none');
+  if (target !== voiceTraceTarget) { resetVoiceTraces(); voiceTraceTarget = target; }
+  if (target === 'none') { text('voice-trace-status', '当前没有频道，请选择全部频道查看历史'); renderVoiceTraces(); return; }
+  if (voiceTraceBusy || (older && (voiceTraceGap?.before ?? voiceTraceNext) == null)) return;
+  const generation = voiceTraceGeneration;
+  voiceTraceBusy = true;
+  const refresh = $('voice-trace-refresh'), more = $('voice-trace-more');
+  if (refresh) refresh.disabled = true;
+  if (more) more.disabled = true;
+  const query = new URLSearchParams({limit: '50'});
+  if (target !== 'all') { query.set('area', state.area); query.set('channel', state.channel); }
+  const fillingGap = older ? voiceTraceGap : null;
+  if (older) query.set('before', String(fillingGap?.before ?? voiceTraceNext));
+  let newestKnown = 0;
+  for (const sequence of voiceTraceRows.keys()) newestKnown = Math.max(newestKnown, sequence);
+  try {
+    const data = await api('/api/voice/transcripts?' + query);
+    if (generation !== voiceTraceGeneration) return;
+    const rows = data.rows || [];
+    for (const row of rows) voiceTraceRows.set(row.sequence, row);
+    if (fillingGap) {
+      if (rows.some(row => row.sequence <= fillingGap.until) || data.next_before == null) voiceTraceGap = null;
+      else fillingGap.before = data.next_before;
+    } else if (older || !newestKnown) voiceTraceNext = data.next_before ?? null;
+    else if (rows.length && rows.every(row => row.sequence > newestKnown) && data.next_before != null) {
+      // Keep the earlier gap's lower boundary when multiple suspended refreshes
+      // create disjoint loaded pages; the ordinary older-history cursor is separate.
+      voiceTraceGap = {before: data.next_before, until: voiceTraceGap?.until ?? newestKnown};
+    }
+    if (!older) {
+      // At most one extra bounded page per refresh. Rotate through loaded unfinished
+      // rows outside the newest page; do not change history/gap cursors or add rows.
+      const refreshed = new Set(rows.map(row => row.sequence));
+      const pending = [...voiceTraceRows.values()]
+        .filter(row => (row.stage !== 'finished' || !row.text_final) && !refreshed.has(row.sequence))
+        .sort((a, b) => a.sequence - b.sequence);
+      const anchor = pending.find(row => row.sequence > voiceTracePendingCursor) || pending[0];
+      if (anchor) {
+        const pendingQuery = new URLSearchParams(query);
+        pendingQuery.set('before', String(anchor.sequence + 1));
+        const updates = await api('/api/voice/transcripts?' + pendingQuery);
+        if (generation !== voiceTraceGeneration) return;
+        for (const row of updates.rows || []) {
+          if (voiceTraceRows.has(row.sequence)) voiceTraceRows.set(row.sequence, row);
+        }
+        voiceTracePendingCursor = anchor.sequence;
+      }
+    }
+    text('voice-trace-status', '已载入 ' + voiceTraceRows.size + ' / ' + (data.total || 0) + ' 句 · 自动更新');
+    renderVoiceTraces();
+  } catch (error) {
+    if (generation === voiceTraceGeneration) text('voice-trace-status', '读取失败：' + error.message + '；可点击刷新重试，已有记录保留');
+  } finally {
+    if (generation === voiceTraceGeneration) {
+      voiceTraceBusy = false;
+      if (refresh) refresh.disabled = false;
+      if (more) more.disabled = false;
+    }
+  }
+}
 
 function resetVoiceOutput() {
+  resetVoiceTraces(); voiceTraceTarget = ''; voiceTraceStatus = null;
   voiceOutputOperation++;
   voiceOutputRevision++;
   voiceOutputState = null;
@@ -295,6 +437,10 @@ function setupVoice() {
     finally { button.disabled = false; }
   };
   if (memberRefresh) memberRefresh.onclick = refreshMembers;
+  const traceRefresh = $('voice-trace-refresh'), traceMore = $('voice-trace-more'), traceScope = $('voice-trace-scope');
+  if (traceRefresh) traceRefresh.onclick = () => refreshVoiceTraces();
+  if (traceMore) traceMore.onclick = () => refreshVoiceTraces(null, {older: true});
+  if (traceScope) traceScope.onchange = () => { resetVoiceTraces(); voiceTraceTarget = ''; refreshVoiceTraces(); };
 }
 
 async function voiceAction(kind) {
@@ -390,6 +536,7 @@ async function refreshVoiceStatus() {
         : (joined ? '可对语音房说话，或使用「快捷开口」' : '点「进房」开始语音对话');
     }
     renderTranscript(st);
+    void refreshVoiceTraces(st);
     renderVoiceDecisions(st.voice_observation || data.voice_observation);
   } catch (err) {
     if (outputRevision === voiceOutputRevision && !voiceOutputBusy) {
