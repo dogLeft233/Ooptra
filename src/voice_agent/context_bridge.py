@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import logging
 import os
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 MEMORY_RULES = (
@@ -32,6 +33,10 @@ def memory_tools() -> list[dict[str, Any]]:
          "parameters": {"type": "OBJECT", "properties": {"content": {"type": "STRING"}},
                         "required": ["content"]}},
     ]
+
+
+class TurnRecorder(Protocol):
+    def __call__(self, user_text: str, reply_text: str, *, interrupted: bool = False) -> None: ...
 
 
 class ContextBridge:
@@ -172,27 +177,44 @@ class ContextBridge:
         return await self.request("recall" if field == "query" else "remember",
                                   {field: text, "speaker": speaker})
 
+    def bind_turn(self, *, speaker: str) -> TurnRecorder:
+        """固定本轮来源与写授权，至多提交一次；迟到提交不更新新会话历史。
+
+        已受理原目标的投递沿用既有 outbox 语义，返回不代表外部确认。
+        队列满或落盘失败沿用现有诊断；绑定不开放内部可变状态。
+        """
+        allowed = self.context.get("ok") is True and (
+            "memory_scopes" not in self.context
+            or bool(self.context["memory_scopes"] and self.context.get("provider")))
+        event = copy.deepcopy(self._event("commit", {}))
+        recorded = False
+
+        def record(user_text: str, reply_text: str, *, interrupted: bool = False) -> None:
+            nonlocal recorded
+            if recorded or not allowed or not user_text.strip():
+                return
+            if self._write_count() >= 128:
+                self._error = "语音记忆待写队列已满，本轮未保存"
+                logger.error(self._error)
+                return
+            event["payload"] = {"user_text": user_text[:4000],
+                                "reply_text": "" if interrupted else reply_text[:4000],
+                                "speaker": speaker, "interrupted": interrupted}
+            self.outbox[event["request_id"]] = event
+            recorded = True
+            if event["session_id"] == self.session_id:
+                self.history.append({"role": "user", "content": user_text[:2000]})
+                if event["payload"]["reply_text"]:
+                    self.history.append({"role": "assistant", "content": reply_text[:2000]})
+                self.history = self.history[-12:]
+            self._persist()
+            self._wake.set()
+
+        return record
+
     def record_turn(self, user_text: str, reply_text: str, *, speaker: str,
                     interrupted: bool = False) -> None:
-        # Keep already prepared scope when the worker is temporarily disconnected.
-        if self.context.get("ok") is not True or not user_text.strip():
-            return
-        if "memory_scopes" in self.context and (not self.context["memory_scopes"] or not self.context.get("provider")):
-            return
-        if self._write_count() >= 128:
-            self._error = "语音记忆待写队列已满，本轮未保存"
-            logger.error(self._error)
-            return
-        event = self._event("commit", {"user_text": user_text[:4000],
-                            "reply_text": "" if interrupted else reply_text[:4000],
-                            "speaker": speaker, "interrupted": interrupted})
-        self.outbox[event["request_id"]] = event
-        self.history.append({"role": "user", "content": user_text[:2000]})
-        if event["payload"]["reply_text"]:
-            self.history.append({"role": "assistant", "content": reply_text[:2000]})
-        self.history = self.history[-12:]
-        self._persist()
-        self._wake.set()
+        self.bind_turn(speaker=speaker)(user_text, reply_text, interrupted=interrupted)
 
     def _persist(self) -> None:
         if self.path is None:

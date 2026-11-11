@@ -688,6 +688,9 @@ class VoiceAgent:
                     raise RuntimeError("voice operation superseded by manual control")
                 if source == "auto" and self._joined:
                     raise RuntimeError("voice room occupied; automatic join cannot replace it")
+                area, channel = self._resolve_target(area, channel)
+                if not area or not channel:
+                    raise RuntimeError("缺少 area/channel，请在配置或调用参数中指定")
                 if self._joined:
                     old = VoiceOperation("leave", "system", self._area, self._channel, self._visit_id)
                     result = await self._leave_locked()
@@ -785,7 +788,22 @@ class VoiceAgent:
     async def _push_room_pcm(self, session: SessionRef | None, pcm: bytes, rate: int, *, finish: bool = False) -> dict[str, Any]:
         if session is None:
             return {"ok": False, "error": "stale_session"}
-        result = await self.channels.push_audio(session, pcm, rate, finish=finish)
+        # 已受理的传输有渠道自身的三秒期限。取消生成/停止回复只能取消
+        # 等待者，必须观察当前分片终态后再让停止逻辑清队列。
+        push = asyncio.create_task(self.channels.push_audio(session, pcm, rate, finish=finish))
+        try:
+            result = await asyncio.shield(push)
+        except asyncio.CancelledError:
+            while not push.done():
+                try:
+                    await asyncio.shield(push)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not push.cancelled():
+                push.exception()
+            raise
         return {"ok": result.ok, "error": result.reason}
 
     async def _wire_live(self) -> None:
@@ -960,8 +978,10 @@ class VoiceAgent:
         aclose = getattr(self.backend, "aclose", None)
         if aclose is not None:
             try:
-                # The session reader may own the output lock while a browser
-                # push is pending. Cancel that reader before taking its lock.
+                # 已禁用旧回合输出。先让渠道三秒推送预算独立完成，
+                # 再关闭 reader；不能让 backend 的关闭期限与推送期限竞赛。
+                async with self._live_output_lock:
+                    pass
                 await asyncio.wait_for(aclose(), 3.0)
             except Exception as exc:
                 return {"ok": False, "error": f"voice session close failed: {exc}"}
@@ -1037,6 +1057,8 @@ class VoiceAgent:
         await self._stop_round_worker()
         await self._cancel_reply_tasks()
         if self.live_mode:
+            async with self._live_output_lock:
+                pass
             await asyncio.wait_for(self.backend.aclose(), 3.0)
         async with self._live_output_lock:
             if self.duplex is not None:
@@ -1123,8 +1145,6 @@ class VoiceAgent:
                 or getattr(self, "_announcement_active", False) or getattr(self, "_retiring_visit_id", "")
                 or not getattr(self, "_connection_ready", True) or getattr(self, "_voice_suspended", False)):
             return
-        if self._cascade_limit_reached():
-            return
         if not self.settings.enabled or not pcm:
             return
         uid = str(uid or "unknown")
@@ -1187,6 +1207,8 @@ class VoiceAgent:
                 and (not isinstance(self.backend, StreamingUtterance)
                      or self._barge_in_reached(uid, pcm, sample_rate))):
             await self._interrupt_speaking()
+        if self._cascade_limit_reached():
+            return
         vad = self._vad_for(uid)
         utterance = vad.feed(pcm)
         if utterance:
@@ -1316,13 +1338,22 @@ class VoiceAgent:
         # 记下来：本回合是被抢话打断的，结束时不计冷却（见 _throttled_round）。
         self._barged_in = True
         stream_task = getattr(self, "_stream_reply_task", None)
-        if stream_task is not None and not stream_task.done():
-            stream_task.cancel()
-        if self.duplex is not None:
-            try:
-                await self.duplex.stop_tts()
-            except Exception:
-                logger.debug("stop tts on barge-in failed", exc_info=True)
+        # 渠道推送有自己的三秒期限。先等待已受理分片确认，再取消生成，
+        # 避免正常抢话把传输取消为未知状态；停止后不能再入队旧音频。
+        if not hasattr(self, "_live_output_lock"):
+            self._live_output_lock = asyncio.Lock()
+        async with self._live_output_lock:
+            if stream_task is not None and not stream_task.done():
+                stream_task.cancel()
+            if self.duplex is not None:
+                try:
+                    await self.duplex.stop_tts()
+                except Exception:
+                    logger.debug("stop tts on barge-in failed", exc_info=True)
+        # 不持输出锁等待供应商清理：清理可能需要完成音频回调。
+        # 原回合拥有并观察此任务，超过等待预算也不丢弃其引用。
+        if stream_task is not None:
+            await asyncio.wait({stream_task}, timeout=3)
 
     async def _handle_utterance(self, uid: str, pcm: bytes, sample_rate: int) -> None:
         self._ensure_operations()
@@ -1438,7 +1469,14 @@ class VoiceAgent:
         assert isinstance(backend, StreamingUtterance)
         sent = False
         failed = False
+        record_turn = self.context_bridge.bind_turn(speaker=uid)
+        recognized_text = ""
+        recorded = False
         self._barged_in = False
+
+        def on_recognition(text: str) -> None:
+            nonlocal recognized_text
+            recognized_text = text
 
         async def on_audio(data: bytes, rate: int) -> None:
             nonlocal sent
@@ -1455,6 +1493,8 @@ class VoiceAgent:
                 if self._barged_in or epoch != self._operation_epoch:
                     raise VoiceStreamInterrupted()
                 async with self._live_output_lock:
+                    if self._barged_in or epoch != self._operation_epoch:
+                        raise VoiceStreamInterrupted()
                     result = await self._push_room_pcm(session, data[offset:offset + frame], rate)
                 if not result.get("ok"):
                     raise RuntimeError("语音音频推送失败")
@@ -1463,7 +1503,7 @@ class VoiceAgent:
         try:
             stream_task = asyncio.create_task(backend.handle_utterance_stream(
                 pcm, sample_rate=sample_rate, user_key=f"oopz:{uid}",
-                channel_key=f"{self._area}/{self._channel}", on_audio=on_audio,
+                channel_key=f"{self._area}/{self._channel}", on_audio=on_audio, on_recognition=on_recognition,
             ))
             self._stream_reply_task = stream_task
             try:
@@ -1494,10 +1534,11 @@ class VoiceAgent:
                 result = await duplex.wait_tts_complete(30)
                 if not result.get("ok"):
                     raise RuntimeError("语音播放未正常完成")
-            self.context_bridge.record_turn(
-                reply.user_text, reply.text if sent else "", speaker=uid,
+            record_turn(
+                reply.user_text, reply.text if sent else "",
                 interrupted=self._barged_in,
             )
+            recorded = True
             logger.info("流式语音回合完成：已输出音频=%s", sent)
         except VoiceStreamInterrupted:
             failed = True
@@ -1510,6 +1551,8 @@ class VoiceAgent:
             self.last_reply = f"[error] {exc}"
             logger.exception("流式语音回合失败")
         finally:
+            if not recorded and recognized_text:
+                record_turn(recognized_text, "", interrupted=True)
             if epoch == self._operation_epoch:
                 self._speaking = False
                 if failed and duplex is not None and duplex is self.duplex:

@@ -50,3 +50,10 @@
 ## 实现与阅读顺序
 
 迁入后依次阅读 `api.py` → `models.py` → 所需 `_internal/` 实现。内部能力是职责划分，不要求立即创建同名目录、类或文档；具有独立状态和维护需求时再增加子模块说明。跨模块只使用公开契约，工厂由应用装配，禁止返回内部可变对象。迁移批次与验收见 [重构准备计划](../../docs/superpowers/plans/2026-11-08-module-refactor-readiness.md)。
+
+
+## 当前兼容路径的回合绑定
+
+迁移前的实现入口为 [`ContextBridge.bind_turn`](../voice_agent/context_bridge.py)，返回具名 `TurnRecorder` 端口，隐藏原会话、房间、来源作用域、写授权与幂等记录状态。`VoiceAgent._handle_streamed_reply` 在启动本轮前绑定，正常结果与取消后的最终识别共用同一记录端口。原目标 outbox 可继续按既有规则交付，旧会话结果不更新新会话 history；入队不代表外部确认。没有扩大原来源的写权限。
+
+本地 `MemoryStore` 仍由旧后端流程调用：取消时幂等保留已识别用户输入，合成未完成时不追加完整助手内容。这是当前迁移差距，不代表目标事务接口已实现。验证见 `tests/test_astrbot_context_bridge.py` 与 `tests/test_aliyun_deepseek.py`。

@@ -84,3 +84,8 @@ Live实现 → 私有供应商窄端口、本地轮次/闸门
 先按 [准备计划](../../docs/superpowers/plans/2026-11-08-module-refactor-readiness.md) 让房间/播放拥有者收敛，再迁移级联 job；Live 在有界许可/关闭隔离试验通过后替换。共同生成行为测试复用到多个后端，Live/控制解释等特有能力单独测。现有证据入口为 `tests/test_aliyun_deepseek.py`、`tests/test_backend_audit_regressions.py`、`tests/test_live_turn_lifecycle.py`、`tests/test_gemini_session_lifecycle.py` 和各子模块列出的回归测试。
 
 目标检查包括：两任务不串状态、分类失败不当 NoControl、未授权音频零泄漏、慢消费者/超时有界、切房迟到帧失效、重复许可不重放、断连清掉 ready、工具关闭不写新连接、流取消触达供应商清理、部分生成不写完整历史。新测试落 `tests/dialogue/`；本次仅完成源码核对和设计演练，尚无新接口实现测试或真实模型/房间验收。
+
+
+## 当前流式级联的识别交付
+
+当前兼容入口 [`StreamingUtterance`](../voice_agent/backends/base.py) 的 `on_recognition` 是本次调用的可选同步回调，在最终 ASR 文本可用后通知一次，早于生成；取消不撤回已经通知的识别事实。Aliyun 后端传递该端口，编排保存本轮结果并通过绑定的上下文回合记录端口处理正常或打断终态。生成不会据此取得新的共享历史写入口；现有后端直接调用本地 MemoryStore 的迁移差距仍保留。
