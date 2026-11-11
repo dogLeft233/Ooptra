@@ -166,7 +166,7 @@ class StreamingUtterance(Protocol):
 class LiveDialogue(SessionStarter, ConnectionReporter, Protocol):
     """持续模型会话；输出回调只交付生成证据，实际播放/历史提交由应用负责。
 
-    回调应及时返回；耗时的播放确认由应用拥有的有界任务处理。aclose 撤销供应商
+    回调应及时返回；GeneratedTurn 包含普通回复与内部公告的文字及生成终态，回调返回前不得清除该证据。耗时的播放确认由应用拥有的有界任务调用渠道 Playback 处理。aclose 撤销供应商
     连接和工具任务，不替应用关闭渠道或提交历史。完整提议/许可协议仍在后续迁移。
     """
 

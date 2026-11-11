@@ -12,6 +12,7 @@ from .models import (
     ChannelCommand,
     ChannelSnapshot,
     JoinedAreas,
+    PlaybackResult,
     RoomTarget,
     SessionRef,
 )
@@ -110,6 +111,21 @@ class Duplex(Protocol):
     async def set_output_volume(self, volume: int) -> dict[str, Any]: ...
     async def stop_tts(self) -> dict[str, Any]: ...
     async def wait_tts_complete(self, timeout: float = 30) -> dict[str, Any]: ...
+
+
+class Playback(Protocol):
+    """绑定原渠道会话的单次输出；拥有提交、静音、中断及排空确认。
+
+    finish 最多等待排空三十秒，仍复查原会话；completed 仅证明实际播放。
+    push 取消会先观察已受理渠道推送的有界终态再传播，避免丢失传输结果。
+    interrupt 撤销确认；stop 等待在途提交后清除播放，不操作新会话。
+    不提供跨实例去重、生成策略或持久动作台账。
+    """
+
+    async def push(self, pcm: bytes, rate: int) -> AudioPushResult: ...
+    async def finish(self, rate: int) -> PlaybackResult: ...
+    def interrupt(self) -> None: ...
+    async def stop(self) -> None: ...
 
 
 class OutputControls(Protocol):

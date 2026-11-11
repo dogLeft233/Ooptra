@@ -35,9 +35,16 @@ from behavior.models import (
     resolve_volume_command,
 )
 from channels import create_duplex as VoiceDuplex
-from channels import create_oopz_channel, create_oopz_directory, create_vad
+from channels import create_oopz_channel, create_oopz_directory, create_playback, create_vad
 from channels import create_output_controls as VoiceOutputControls
-from channels.api import Channel, Duplex, OutputControls, PlatformDirectory, VoiceActivityDetector
+from channels.api import (
+    Channel,
+    Duplex,
+    OutputControls,
+    PlatformDirectory,
+    Playback,
+    VoiceActivityDetector,
+)
 from channels.models import JoinRoom, LeaveRoom, RoomTarget, SessionRef, VadvConfig
 from channels.models import RoomOperation as VoiceOperation
 from context import create_context_bridge, create_memory
@@ -50,7 +57,7 @@ from dialogue.api import (
     SessionStarter,
     StreamingUtterance,
 )
-from dialogue.models import GeneratedTurn, VoiceStreamInterrupted
+from dialogue.models import GeneratedTurn, RecognizedGenerationFailed, VoiceStreamInterrupted
 from operations.models import VoiceAgentSettings, VoiceApiSettings
 
 logger = logging.getLogger(__name__)
@@ -229,6 +236,7 @@ class VoiceAgent:
         self._reply_generating = False
         self._reply_tasks: set[asyncio.Task] = set()
         self._completion_tasks: set[asyncio.Task] = set()
+        self._playbacks: set[Playback] = set()
         self._playback_epoch = 0
         self._announcement_task: asyncio.Task | None = None
         self._announcement_cancel_requests: set[asyncio.Task] = set()
@@ -791,6 +799,11 @@ class VoiceAgent:
         result = await self.channels.push_audio(session, pcm, rate, finish=finish)
         return {"ok": result.ok, "error": result.reason}
 
+    def _start_playback(self, session: SessionRef | None, output: Duplex) -> Playback:
+        playback = create_playback(self.channels, session, output)
+        self._playbacks.add(playback)
+        return playback
+
     async def _wire_live(self) -> None:
         self._ensure_operations()
         duplex = self.duplex
@@ -813,6 +826,7 @@ class VoiceAgent:
         turn_interrupted = False
         audio_bytes = 0
         audio_rate = self.settings.sample_rate_out
+        playback = create_playback(channels, session, duplex)
 
         async def on_audio(pcm: bytes, rate: int) -> None:
             if not current():
@@ -824,11 +838,13 @@ class VoiceAgent:
             # 而 _speaking 置 True 后没有任何地方回落，导致下面 _on_remote_pcm
             # 的抢话分支被每个分片各触发一次。回合边界一律由 on_turn_end 负责。
             nonlocal push_failed, turn_failed, audio_bytes, audio_rate
+            self._playbacks.add(playback)
             async with self._live_output_lock:
                 if not current() or self._discard_live_audio:
                     return
                 self._speaking = True
-                result = await self._push_room_pcm(session, pcm, rate, finish=False)
+                pushed = await playback.push(pcm, rate)
+                result = {"ok": pushed.ok, "error": pushed.reason}
             # 推流失败必须留痕。这里曾经整条链路静默失败（页面已不是当前会话，
             # 返回值 {ok: False, error: "not joined"} 被丢弃），日志里只有
             # 「模型出了回合」，排查时完全看不出音频根本没进房间。
@@ -863,12 +879,6 @@ class VoiceAgent:
                 return
             turn_interrupted = turn_interrupted or interrupted or self._discard_live_audio
             self._reply_generating = False
-            if self._announcement_active and self._announcement_collecting:
-                from voice_agent.announcements import clean_announcement
-                self._announcement_text = clean_announcement(getattr(self.backend, "_last_reply", "") or self._announcement_text)
-                if interrupted:
-                    self._announcement_error = "announcement interrupted"
-                self._announcement_done.set()
             self._speaking = False
             self.turns += 1
             # 下一回合允许再打断一次（顺带清掉本回合累计的连续说话时长）
@@ -884,41 +894,39 @@ class VoiceAgent:
                     await self.duplex.stop_tts()
 
         async def on_generated(result: GeneratedTurn) -> None:
-            nonlocal turn_failed, turn_interrupted, audio_bytes
+            nonlocal turn_failed, turn_interrupted, audio_bytes, playback
             if not current():
                 return
             failed, emitted, discarded = turn_failed, audio_bytes, turn_interrupted
             turn_failed, audio_bytes, turn_interrupted = False, 0, False
-            if result.internal and self._announcement_active:
-                return
-            playback_epoch, finished_rate = self._playback_epoch, audio_rate
+            completed_playback = playback
+            playback = create_playback(channels, session, duplex)
+            finished_rate = audio_rate
+            if result.interrupted or discarded or self._discard_live_audio:
+                completed_playback.interrupt()
 
             async def complete() -> None:
-                confirmation: Literal["completed", "silent", "interrupted", "failed", "unknown"] = "silent"
-                output = ""
-                if result.interrupted or discarded or self._discard_live_audio:
-                    confirmation = "interrupted"
-                elif result.selected and emitted and not failed and not self.output_muted:
-                    finish = await self._push_room_pcm(session, b"", finished_rate, finish=True)
-                    if finish.get("ok"):
-                        drained = await duplex.wait_tts_complete(30)
-                        if playback_epoch != self._playback_epoch:
-                            confirmation = "interrupted"
-                        elif drained.get("ok") and current() and not self.output_muted:
-                            confirmation = "completed" if result.text else "unknown"
-                            output = result.text
-                        else:
-                            confirmation = "failed"
-                    else:
-                        confirmation = "failed"
-                elif failed:
-                    confirmation = "failed"
-                if current():
-                    await self._record_output(
-                        "" if result.internal else result.user_text, output,
-                        "api" if result.internal else result.user_key,
-                        session, confirmation,
-                    )
+                try:
+                    evidence = await completed_playback.finish(finished_rate)
+                    confirmation: Literal["completed", "silent", "interrupted", "failed", "unknown"] = evidence.status
+                    if confirmation == "completed" and not result.text:
+                        confirmation = "unknown"
+                    if result.internal and self._announcement_active:
+                        from dialogue import clean_announcement
+                        self._announcement_text = clean_announcement(result.text)
+                        if evidence.status != "completed":
+                            self._announcement_error = "announcement playback " + confirmation
+                        self._announcement_done.set()
+                        return
+                    if current():
+                        await self._record_output(
+                            "" if result.internal else result.user_text,
+                            result.text if confirmation == "completed" else "",
+                            "api" if result.internal else result.user_key,
+                            session, confirmation,
+                        )
+                finally:
+                    self._playbacks.discard(completed_playback)
 
             if not emitted or result.interrupted or discarded or failed:
                 await complete()
@@ -926,6 +934,7 @@ class VoiceAgent:
             # 播放确认由应用任务拥有，不占用模型接收循环。满载时明确降级，
             # 不把缺少确认的草稿写成回复；停止/切房通过 _reply_tasks 统一取消回收。
             if len(self._completion_tasks) >= 8:
+                self._playbacks.discard(completed_playback)
                 logger.warning("event=voice.history.capacity_rejected session_id=%s", session.session_id if session else "")
                 return
             task = asyncio.create_task(complete(), name="voice-output-confirmation")
@@ -1238,7 +1247,9 @@ class VoiceAgent:
                 and self._barge_in_reached(uid, pcm, sample_rate)
             ):
                 # 服务端 NO_INTERRUPTION 会继续生成旧回合；直到回合边界都丢弃。
-                self._discard_live_audio = True
+                self._discard_live_audio = self._speaking or self._reply_generating
+                for playback in tuple(self._playbacks):
+                    playback.interrupt()
                 self._playback_epoch += 1
                 interrupt = getattr(self.backend, "interrupt", None)
                 if interrupt is not None:
@@ -1345,14 +1356,20 @@ class VoiceAgent:
         self._speaking = False
         # 记下来：本回合是被抢话打断的，结束时不计冷却（见行为调度器）。
         self._barged_in = True
+        playbacks = tuple(self._playbacks)
+        for playback in playbacks:
+            playback.interrupt()
         stream_task = getattr(self, "_stream_reply_task", None)
         if stream_task is not None and not stream_task.done():
             stream_task.cancel()
-        if self.duplex is not None:
-            try:
+        try:
+            if playbacks:
+                for playback in playbacks:
+                    await playback.stop()
+            elif self.duplex is not None:
                 await self.duplex.stop_tts()
-            except Exception:
-                logger.debug("stop tts on barge-in failed", exc_info=True)
+        except Exception:
+            logger.debug("stop tts on barge-in failed", exc_info=True)
 
     async def _handle_utterance(self, uid: str, pcm: bytes, sample_rate: int) -> None:
         self._ensure_operations()
@@ -1410,6 +1427,12 @@ class VoiceAgent:
                     user_key=f"oopz:{uid}",
                     channel_key=f"{self._area}/{self._channel}",
                 )
+            except RecognizedGenerationFailed as exc:
+                self.last_reply = f"[error] {exc}"
+                if epoch == self._operation_epoch and bridge.session_id == source_session:
+                    await self._record_output(exc.user_text, "", uid, session, "failed")
+                logger.exception("event=voice.generation.failed stage=after_recognition")
+                return
             except Exception as exc:
                 logger.exception("voice backend failed")
                 self.last_reply = f"[error] {exc}"
@@ -1446,50 +1469,28 @@ class VoiceAgent:
             if reply.text:
                 self.last_reply = reply.text
 
-            interrupted = False
-            delivery_failed = False
+            confirmation: Literal["completed", "silent", "interrupted", "failed", "unknown"] = "silent"
             if reply.pcm16 and self.duplex is not None:
                 self._speaking = True
                 self.turns += 1
-                push_failed = False
+                playback = self._start_playback(session, self.duplex)
                 try:
-                    chunk = int(self.settings.sample_rate_out * 0.04) * 2
-                    data = reply.pcm16
-                    for i in range(0, len(data), chunk):
+                    chunk = max(2, int(reply.sample_rate * 0.04) * 2)
+                    for offset in range(0, len(reply.pcm16), chunk):
                         if not self._speaking:
-                            interrupted = True
+                            playback.interrupt()
                             break
-                        result = await self._push_room_pcm(
-                            session, data[i : i + chunk],
-                            reply.sample_rate,
-                            finish=False,
-                        )
-                        # 与 Live 那条路（_wire_live.on_audio）同款：失败必须留痕，
-                        # 且整回合只报一次。这里以前**直接丢弃返回值** —— 正是 B5
-                        # 那个「页面已经不是当前会话、音频根本没进房间，日志却一切
-                        # 正常」的坑，级联模式下一直没补上。
-                        if isinstance(result, dict) and result.get("ok") is False:
-                            delivery_failed = True
-                            if not push_failed:
-                                push_failed = True
-                                logger.warning(
-                                    "模型音频推流失败，房间听不到：%s",
-                                    result.get("error") or result,
-                                )
-                        else:
-                            push_failed = False
+                        pushed = await playback.push(reply.pcm16[offset:offset + chunk], reply.sample_rate)
+                        if not pushed.ok:
+                            logger.warning("模型音频推流失败，房间听不到：%s", pushed.reason)
+                            break
                         await asyncio.sleep(0.02)
-                    if self._speaking:
-                        result = await self._push_room_pcm(session, b"", reply.sample_rate, finish=True)
-                        delivery_failed = delivery_failed or not result.get("ok")
-                        if not delivery_failed:
-                            drained = await self.duplex.wait_tts_complete(30)
-                            delivery_failed = not drained.get("ok")
+                    confirmation = (await playback.finish(reply.sample_rate)).status
                 finally:
+                    self._playbacks.discard(playback)
                     self._speaking = False
-            confirmation = ("interrupted" if interrupted else "failed" if delivery_failed
-                            else "completed" if reply.pcm16 and self.duplex is not None
-                            and reply.text and not self.output_muted else "silent")
+            if confirmation == "completed" and not reply.text:
+                confirmation = "unknown"
             if epoch == self._operation_epoch and bridge.session_id == source_session:
                 await self._record_output(reply.user_text or "", reply.text, uid, session, confirmation)
 
@@ -1500,6 +1501,7 @@ class VoiceAgent:
         assert isinstance(backend, StreamingUtterance)
         sent = False
         failed = False
+        playback = self._start_playback(session, duplex) if duplex is not None else None
         self._barged_in = False
 
         async def on_audio(data: bytes, rate: int) -> None:
@@ -1517,7 +1519,9 @@ class VoiceAgent:
                 if self._barged_in or epoch != self._operation_epoch:
                     raise VoiceStreamInterrupted()
                 async with self._live_output_lock:
-                    result = await self._push_room_pcm(session, data[offset:offset + frame], rate)
+                    assert playback is not None
+                    pushed = await playback.push(data[offset:offset + frame], rate)
+                    result = {"ok": pushed.ok, "error": pushed.reason}
                 if not result.get("ok"):
                     raise RuntimeError("语音音频推送失败")
                 await asyncio.sleep(0.02)
@@ -1551,16 +1555,13 @@ class VoiceAgent:
                     await self.speak_text(result.get("message") or "语音输出调整失败")
                 return
             self.last_reply = reply.text or self.last_reply
-            if sent and duplex is not None:
-                if self._barged_in or epoch != self._operation_epoch:
-                    raise VoiceStreamInterrupted()
-                result = await self._push_room_pcm(session, b"", reply.sample_rate, finish=True)
-                if not result.get("ok"):
-                    raise RuntimeError("语音音频收尾失败")
-                result = await duplex.wait_tts_complete(30)
-                if not result.get("ok"):
-                    raise RuntimeError("语音播放未正常完成")
-            confirmation = ("completed" if sent and reply.text and not self.output_muted else "silent")
+            confirmation: Literal["completed", "silent", "interrupted", "failed", "unknown"] = "silent"
+            if playback is not None:
+                if self._barged_in:
+                    playback.interrupt()
+                confirmation = (await playback.finish(reply.sample_rate)).status
+            if confirmation == "completed" and not reply.text:
+                confirmation = "unknown"
             if epoch == self._operation_epoch and self.context_bridge.session_id == source_session:
                 await self._record_output(reply.user_text, reply.text, uid, session, confirmation)
             logger.info("流式语音回合完成：已输出音频=%s", sent)
@@ -1570,11 +1571,19 @@ class VoiceAgent:
         except asyncio.CancelledError:
             failed = True
             raise
+        except RecognizedGenerationFailed as exc:
+            failed = True
+            self.last_reply = f"[error] {exc}"
+            if epoch == self._operation_epoch and self.context_bridge.session_id == source_session:
+                await self._record_output(exc.user_text, "", uid, session, "failed")
+            logger.exception("event=voice.generation.failed stage=after_recognition")
         except Exception as exc:
             failed = True
             self.last_reply = f"[error] {exc}"
             logger.exception("流式语音回合失败")
         finally:
+            if playback is not None:
+                self._playbacks.discard(playback)
             if epoch == self._operation_epoch:
                 self._speaking = False
                 if failed and duplex is not None and duplex is self.duplex:
@@ -1629,25 +1638,24 @@ class VoiceAgent:
         if not pcm or duplex is None or self.output_muted:
             return {"ok": False, "error": "没有可播放的音频输出"}
         self._speaking = True
+        playback = self._start_playback(session, duplex)
         try:
             chunk = max(2, int(rate * 0.04) * 2)
             for offset in range(0, len(pcm), chunk):
                 if (not self._speaking or epoch != self._operation_epoch
                         or duplex is not self.duplex):
                     return {"ok": False, "error": "语音输出已取消"}
-                pushed = await self._push_room_pcm(session, pcm[offset:offset + chunk], rate)
-                if not pushed.get("ok"):
+                pushed = await playback.push(pcm[offset:offset + chunk], rate)
+                if not pushed.ok:
                     return {"ok": False, "error": "语音音频推送失败"}
                 await asyncio.sleep(0.02)
-            finished = await self._push_room_pcm(session, b"", rate, finish=True)
-            if not finished.get("ok"):
-                return {"ok": False, "error": "语音音频收尾失败"}
-            drained = await duplex.wait_tts_complete(30)
-            if (not drained.get("ok") or epoch != self._operation_epoch
+            evidence = await playback.finish(rate)
+            if (evidence.status != "completed" or epoch != self._operation_epoch
                     or duplex is not self.duplex):
                 return {"ok": False, "error": "语音播放未正常完成"}
             await self._record_output("", text, "api", session, "completed")
         finally:
+            self._playbacks.discard(playback)
             if epoch == self._operation_epoch:
                 self._speaking = False
         self.last_reply = text

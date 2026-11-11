@@ -52,3 +52,10 @@ Playing / Draining → Stopping → Cancelled / Failed / Partial
 最小切片先迁 session-bound push/stop 屏障，再迁完整音频 pump、播放完成、音量与静音。旧生成回调只能接渠道公开执行入口；临时 legacy 适配不能返回 duplex/transport 给调用者。
 
 现有基线：`tests/test_tts_completion.py`、`tests/test_voice_duplex_rebind.py`、`tests/test_voice_output_controls.py`、`tests/test_voice_output_volume.py`、`tests/test_vad.py`。落地时增加源正常/失败 EOS 区分、最后尾音未完不得 completed、部分播放未知范围、重复/缺口帧、超大 PCM、慢源、取消自身再取消、输入跨线程关闭、输出阻塞中切房、满队列断点的公开行为测试。保持真实内部协作，只替换外部 transport 和可控音频源；本页不是新测试通过报告。
+
+
+## 已实现的迁移期播放确认
+
+`RoomPlayback` 通过公开 `Channel` 与 `Duplex` 组合单次输出，唯一拥有提交字节、失败、静音和打断证据。`push` 被取消时仍观察已受理渠道推送的终态；`finish` 在提交收尾后释放提交锁，再有界等待排空，使 `stop` 可在等待期间打断。排空后复查原会话及打断，不把清空队列当完整播出；旧会话的 stop 不触碰新会话输出。
+
+应用持有流程与有界完成任务，使用公开端口标记打断并消费不可变结果；渠道不决定生成是否选中，也不提交历史。验证见 `tests/test_voice_history_outcomes.py`、`tests/app/test_output_history.py` 和 `tests/channels/test_playback_confirmation.py`。

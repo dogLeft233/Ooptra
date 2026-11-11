@@ -390,7 +390,7 @@ def test_gemini_live_tool_intent_really_says_farewell_and_leaves(tmp_path, monke
             if duplex.audio:
                 break
             await asyncio.sleep(.005)
-        assert duplex.audio == [b"bye"]
+        assert [pcm for pcm in duplex.audio if pcm] == [b"bye"]
         assert agent._bot.voice.leaves == 0
         task = agent._voice_control_task
         duplex.drained.set()

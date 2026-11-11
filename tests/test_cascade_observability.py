@@ -33,6 +33,9 @@ PCM = b"\x00\x01" * 16000  # 32000 字节 = 16000 样本 = 1.0s @16k
 
 
 class FakeTransport:
+    output_muted = False
+    output_volume = 50
+
     """假 duplex：只记推了什么，不做 IO。"""
 
     def __init__(self) -> None:

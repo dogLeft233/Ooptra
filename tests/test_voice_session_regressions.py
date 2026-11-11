@@ -17,6 +17,9 @@ from webui.voice_routes import mount_voice_routes
 
 
 class RecordingDuplex:
+    output_muted = False
+    output_volume = 50
+
     def __init__(self, transport=None):
         self.transport = transport
         self.audio = []

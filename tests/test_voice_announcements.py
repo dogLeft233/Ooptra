@@ -8,6 +8,9 @@ from test_voice_operations import make_agent
 
 
 class AnnouncementDuplex:
+    output_muted = False
+    output_volume = 50
+
     def __init__(self):
         self.audio = []
         self.drained = asyncio.Event()
@@ -392,4 +395,36 @@ def test_caller_cancel_during_operation_cleanup_waits_then_resets_all_flags(tmp_
         await agent._on_remote_pcm("human", b"pcm", 16000)
         assert input_received == [b"pcm"]
         await agent.leave()
+    asyncio.run(run())
+
+
+def test_live_announcement_uses_public_generated_evidence_without_private_text(tmp_path, monkeypatch):
+    from support import dialogue_fixtures
+
+    from dialogue.models import GeneratedTurn
+
+    async def run():
+        from support.dialogue_fixtures import gemini_backend
+        ws = FakeLiveWs()
+        async def connect(*args, **kwargs):
+            return ws
+        monkeypatch.setattr(dialogue_fixtures, "live_connector", connect)
+        agent = make_agent(tmp_path)
+        agent.settings.gemini_api_key = "synthetic"
+        agent.backend = gemini_backend(agent.settings, agent.memory)
+        agent.live_mode = True
+        agent.duplex = AnnouncementDuplex()
+        agent.duplex.drained.set()
+        await agent.join("area", "room")
+        await agent._wire_live()
+
+        async def announce(kind, text):
+            await agent.backend._audio_out(b"\x01\x00", 24000)
+            await agent.backend._turn_out(False)
+            await agent.backend._generated_out(GeneratedTurn(text="公开公告", selected=True, internal=True))
+        agent.backend.speak_announcement = announce
+        result = await agent.speak_announcement("enter", "template", timeout=1)
+        assert result["ok"] and result["text"] == "公开公告"
+        await agent.leave()
+        await agent.backend.aclose()
     asyncio.run(run())

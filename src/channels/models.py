@@ -93,6 +93,14 @@ class AudioPushResult:
     reason: str = ""
 
 
+@dataclass(frozen=True)
+class PlaybackResult:
+    """原会话单次输出的实际证据；不表达生成或历史已提交。"""
+
+    status: Literal["completed", "silent", "interrupted", "failed"]
+    submitted_bytes: int = 0
+
+
 def _require_command(action_id: str, source: str) -> None:
     if (
         not isinstance(action_id, str)

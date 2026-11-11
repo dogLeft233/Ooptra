@@ -160,3 +160,115 @@ def test_same_room_context_refresh_rejects_late_cascade_result(tmp_path, monkeyp
             with contextlib.suppress(Exception):
                 await agent.leave()
     asyncio.run(run())
+
+
+def test_tail_playback_interruption_does_not_suppress_the_next_live_reply(tmp_path):
+    async def run():
+        agent = make_voice_agent(tmp_path)
+        playback, socket = Playback(), LiveSocket()
+        waiting, released = asyncio.Event(), asyncio.Event()
+        agent.settings.backend = "gemini_live"
+        agent.settings.gemini_api_key = "synthetic-key"
+        agent.settings.barge_in = True
+        agent.settings.barge_in_hold_ms = 0
+        agent.settings.listen_only_uids = []
+
+        async def connect(*args, **kwargs):
+            return socket
+
+        async def drain(timeout=30):
+            waiting.set()
+            await released.wait()
+            return {"ok": True}
+
+        from behavior import create_reply_policy
+        agent.backend = create_gemini_backend(agent.settings, agent.memory,
+                                              reply_policy=create_reply_policy(), connector=connect)
+        agent.live_mode = True
+        agent.bind_duplex(playback)
+        playback.wait_tts_complete = drain
+        try:
+            await agent.join("area", "room")
+            def message(text):
+                return {"serverContent": {"outputTranscription": {"text": text},
+                    "inputTranscription": {"text": "question " + text},
+                    "modelTurn": {"parts": [{"inlineData": {
+                        "data": base64.b64encode(b"\x00\x40" * 480).decode(),
+                        "mimeType": "audio/pcm;rate=24000"}}]}, "turnComplete": True}}
+            await socket.deliver(message("first"))
+            await asyncio.wait_for(waiting.wait(), 1)
+            first_bytes = playback.pushed
+            await playback.capture("u", b"\x00\x40" * 320)
+            released.set()
+            assert await agent.wait_for_reply_end(1)
+            await socket.deliver(message("second"))
+            assert await agent.wait_for_reply_end(1)
+            assert playback.pushed > first_bytes
+            assert {"role": "assistant", "content": "second"} in agent.memory.as_messages()
+            assert {"role": "assistant", "content": "first"} not in agent.memory.as_messages()
+        finally:
+            released.set()
+            await agent.leave()
+            await agent.backend.aclose()
+    asyncio.run(run())
+
+
+def test_cascade_drain_interruption_records_input_without_full_assistant_reply(tmp_path):
+    async def run():
+        agent = make_voice_agent(tmp_path)
+        playback = Playback()
+        waiting, released = asyncio.Event(), asyncio.Event()
+
+        class Model:
+            async def handle_utterance(self, *args, **kwargs):
+                return VoiceReply(user_text="original question", text="unplayed tail", pcm16=b"\x00\x40" * 480)
+            async def aclose(self):
+                pass
+
+        async def drain(timeout=30):
+            waiting.set()
+            await released.wait()
+            return {"ok": True}
+
+        agent.backend = Model()
+        agent.bind_duplex(playback)
+        playback.wait_tts_complete = drain
+        await agent.join("area", "room")
+        task = asyncio.create_task(agent._handle_utterance("original-member", b"\x01\x00", 16000))
+        try:
+            await asyncio.wait_for(waiting.wait(), 1)
+            await agent._interrupt_speaking()
+            released.set()
+            await asyncio.wait_for(task, 1)
+            assert agent.memory.as_messages() == [{"role": "user", "content": "original question"}]
+            assert agent.memory.recent()[0]["user_key"] == "oopz:original-member"
+        finally:
+            released.set()
+            await agent.leave()
+    asyncio.run(run())
+
+
+def test_tts_failure_preserves_recognized_input_in_real_history(tmp_path):
+    async def run():
+        from support.dialogue_fixtures import mimo_backend
+        agent = make_voice_agent(tmp_path)
+        agent.bind_duplex(Playback())
+        backend = mimo_backend(agent.settings, agent.memory)
+        agent.backend = backend
+
+        async def asr(*args):
+            return "recognized input"
+        async def chat(*args, **kwargs):
+            return "assistant draft"
+        async def fail_tts(*args):
+            raise OSError("synthetic provider unavailable")
+        backend.asr, backend.chat, backend.tts = asr, chat, fail_tts
+        await agent.join("area", "room")
+        try:
+            await agent._handle_utterance("speaker", b"\x00\x40" * 16000, 16000)
+            assert agent.memory.as_messages() == [{"role": "user", "content": "recognized input"}]
+            assert agent.memory.recent()[0]["user_key"] == "oopz:speaker"
+        finally:
+            await agent.leave()
+            await backend.aclose()
+    asyncio.run(run())

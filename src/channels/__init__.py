@@ -6,6 +6,7 @@ from typing import Any
 from ._internal.legacy import LegacyPlatformDirectory, LegacyRoomTransport
 from ._internal.output.controls import VoiceOutputControls
 from ._internal.output.duplex import VoiceDuplex
+from ._internal.output.playback import RoomPlayback
 from ._internal.output.vad import EnergyVad
 from ._internal.session.service import RoomChannel
 from .api import (
@@ -15,12 +16,17 @@ from .api import (
     OutputControls,
     OutputSettings,
     PlatformDirectory,
+    Playback,
     RoomTransport,
     VoiceActivityDetector,
 )
-from .models import VadvConfig
+from .models import SessionRef, VadvConfig
 
-__all__ = ["create_channel", "create_duplex", "create_oopz_channel", "create_oopz_directory", "create_output_controls", "create_vad"]
+__all__ = ["create_channel", "create_duplex", "create_oopz_channel", "create_oopz_directory", "create_output_controls", "create_playback", "create_vad"]
+
+
+def create_playback(channel: Channel, session: SessionRef | None, output: Duplex) -> Playback:
+    return RoomPlayback(channel, session, output)
 
 
 def create_channel(transport: RoomTransport) -> Channel:

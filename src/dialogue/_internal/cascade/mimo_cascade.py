@@ -21,6 +21,7 @@ from dialogue._internal.memory_tools import MEMORY_RULES, memory_tools
 from dialogue._internal.observation import DecisionTrace, VoiceObservation
 from dialogue.api import HistoryReader, VoiceBackend
 from dialogue.models import (
+    RecognizedGenerationFailed,
     VoiceReply,
     VoiceStreamError,
     VoiceStreamInterrupted,
@@ -621,6 +622,16 @@ class MimoCascadeBackend(VoiceBackend):
             text = await self.asr(pcm16, sample_rate)
         if not text.strip():
             return VoiceReply(user_text=text)
+        try:
+            return await self._respond_to_recognized(text, pcm16, sample_rate, user_key, trace,
+                                                      keywords, control_enabled, window, preselected, percent)
+        except (asyncio.CancelledError, VoiceStreamInterrupted):
+            raise
+        except Exception as exc:
+            raise RecognizedGenerationFailed(text, str(exc)) from exc
+
+    async def _respond_to_recognized(self, text, pcm16, sample_rate, user_key, trace,
+                                      keywords, control_enabled, window, preselected, percent):
         audio_ms = len(pcm16) / 2 / max(1, sample_rate) * 1000.0
         short = control_enabled and audio_ms < max(0, self.settings.min_utterance_ms)
         addressed = False if short else self._conversation.observe(

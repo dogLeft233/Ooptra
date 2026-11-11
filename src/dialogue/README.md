@@ -92,3 +92,8 @@ Live实现 → 私有供应商窄端口、本地轮次/闸门
 先按 [准备计划](../../docs/superpowers/plans/2026-11-08-module-refactor-readiness.md) 让房间/播放拥有者收敛，再迁移级联 job；Live 在有界许可/关闭隔离试验通过后替换。共同生成行为测试复用到多个后端，Live/控制解释等特有能力单独测。现有证据入口为 `tests/test_aliyun_deepseek.py`、`tests/test_backend_audit_regressions.py`、`tests/test_live_turn_lifecycle.py`、`tests/test_gemini_session_lifecycle.py` 和各子模块列出的回归测试。
 
 目标检查包括：两任务不串状态、分类失败不当 NoControl、未授权音频零泄漏、慢消费者/超时有界、切房迟到帧失效、重复许可不重放、断连清掉 ready、工具关闭不写新连接、流取消触达供应商清理、部分生成不写完整历史。新测试落 `tests/dialogue/`；工厂迁移由供应商回归及应用集成测试验证；[来源/历史绑定测试](../../tests/dialogue/test_context_binding.py) 使用真实来源桥、历史文件及本地模型服务验证迟到工具不能写入新来源、刷新后读取新历史，[流式协议测试](../../tests/test_aliyun_deepseek.py) 验证同实例并发请求不会把输出送入另一请求的 sink。[生成日志测试](../../tests/dialogue/test_generation_logging.py) 经供应商连接边界验证正文/会话句柄不进入日志。生成请求捕获来源代次，在网络和工具等待后复查；旧供应商回归仍有私有方法/属性断言，属于后续测试维护项，不代表完整目标契约已覆盖。真实模型/房间验收由应用级双机器人验收另行记录。
+
+
+## 当前失败与公告证据
+
+`RecognizedGenerationFailed` 保留已完成的用户识别事实，排除助手草稿；应用将该输入交上下文记录失败回合，生成模块不恢复直接写历史。Live 公告通过公开 `GeneratedTurn(internal=True)` 的文字及生成终态交付，应用不读取供应商的私有转写缓存；实际播放结果仍由渠道 `Playback` 确认。相关入口以 `dialogue.models`、`LiveDialogue.set_generated_out` 为准。

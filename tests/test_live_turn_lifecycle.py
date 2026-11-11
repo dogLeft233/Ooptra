@@ -42,6 +42,9 @@ CHUNKS = 13
 
 
 class FakeDuplex:
+    output_muted = False
+    output_volume = 50
+
     def __init__(self) -> None:
         self.tts_chunks = 0
         self.stop_calls = 0

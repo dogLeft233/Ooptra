@@ -39,6 +39,9 @@ FRAMES_TO_HOLD = HOLD_MS // FRAME_MS  # 15
 
 
 class FakeDuplex:
+    output_muted = False
+    output_volume = 50
+
     def __init__(self) -> None:
         self.stop_calls = 0
 

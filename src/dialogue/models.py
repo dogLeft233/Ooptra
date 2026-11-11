@@ -23,6 +23,14 @@ class VoiceStreamError(RuntimeError):
     """An audible generation failed; do not retry it as an ordinary chat turn."""
 
 
+class RecognizedGenerationFailed(VoiceStreamError):
+    """生成未完成，但本轮识别已完成；不携带可提交的助手草稿。"""
+
+    def __init__(self, user_text: str, reason: str = "Voice generation failed after recognition") -> None:
+        super().__init__(reason)
+        self.user_text = user_text
+
+
 AudioSink = Callable[[bytes, int], Awaitable[None]]
 
 
