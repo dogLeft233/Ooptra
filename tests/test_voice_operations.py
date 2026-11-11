@@ -351,3 +351,28 @@ def test_retirement_blocks_new_remote_input_without_stopping_current_reply(tmp_p
         await agent.leave()
         assert not agent._retiring_visit_id
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("default_area", ["", "configured-other-area"])
+def test_join_with_omitted_area_keeps_current_domain_before_leaving(tmp_path, monkeypatch, default_area):
+    import config
+
+    async def run():
+        monkeypatch.setitem(config.OOPZ_CONFIG, "default_area", default_area)
+        agent = make_agent(tmp_path)
+        targets = []
+
+        async def join(**kwargs):
+            targets.append(kwargs)
+            return SimpleNamespace(rtc_channel_name="rtc")
+
+        monkeypatch.setattr(agent.test_platform.voice, "join", join)
+        await agent.join("current-area", "old-room")
+        result = await agent.join(channel="new-room")
+        assert result["ok"]
+        assert agent.channels.snapshot().session.room_target.area == "current-area"
+        assert agent.channels.snapshot().session.room_target.channel == "new-room"
+        assert len(targets) == 2
+        await agent.leave()
+
+    asyncio.run(run())

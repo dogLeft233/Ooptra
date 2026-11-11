@@ -32,6 +32,8 @@ async def establish_room(agent) -> None:
 
 class Duplex:
     transport = None
+    output_muted = False
+    output_volume = 50
 
     async def enable_listen(self, enabled=True):
         return {"ok": True}

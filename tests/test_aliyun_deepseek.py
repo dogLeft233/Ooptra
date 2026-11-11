@@ -139,6 +139,9 @@ async def model_servers(*, fail_asr=False, truncate=False, control=False):
         if body.get('response_format'):
             value = {'leave': control, 'volume': None}
             return web.json_response({'choices': [{'message': {'content': json.dumps(value)}}]})
+        if body.get("tools"):
+            assert body["stream"] is False
+            return web.json_response({"choices": [{"message": {"content": "共享记忆回复。"}}]})
         response = web.StreamResponse(headers={'Content-Type': 'text/event-stream'})
         await response.prepare(request)
 
@@ -394,4 +397,96 @@ def test_concurrent_generation_keeps_each_output_sink_separate():
             assert [reply.pcm16 for reply in replies] == list(map(bytes, outputs))
             assert [reply.user_key for reply in replies] == ['member-0', 'member-1']
 
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("operation", ["_interrupt_speaking", "stop_current_reply", "manual_stop"])
+def test_interrupt_retires_inflight_playback_and_room_remains_usable(tmp_path, operation):
+    async def run():
+        async with model_servers() as (backend, state):
+            agent = make_agent(tmp_path)
+            await establish_room(agent)
+            agent.backend = backend
+            started, released = asyncio.Event(), asyncio.Event()
+            events = []
+            async def push(pcm, rate, **kwargs):
+                started.set()
+                try:
+                    await released.wait()
+                except asyncio.CancelledError:
+                    await released.wait()
+                events.append("push")
+                return {"ok": True}
+            async def stop():
+                events.append("stop")
+                return {"ok": True}
+            agent.duplex.push_tts_pcm, agent.duplex.stop_tts = push, stop
+            worker = asyncio.create_task(agent.speak_text("manual") if operation == "manual_stop"
+                else agent._handle_utterance("member", b"\x01\x00" * 16000, 16000))
+            await asyncio.wait_for(started.wait(), 3)
+            interrupt = asyncio.create_task(getattr(agent,
+                "stop_current_reply" if operation == "manual_stop" else operation)())
+            await asyncio.sleep(0)
+            released.set()
+            await asyncio.wait_for(interrupt, 3)
+            state.audio_seen.set()
+            await asyncio.wait_for(asyncio.gather(worker, return_exceptions=True), 3)
+            assert events[0] == "push" and "stop" in events[1:]
+            assert agent.channels.snapshot().confirmed
+            assert (await agent.speak_text("next manual"))["ok"]
+            await agent.stop()
+    asyncio.run(run())
+
+
+def test_manual_speech_uses_own_text_and_never_enters_automatic_audio_sink(tmp_path):
+    async def run():
+        async with model_servers() as (backend, state):
+            agent = make_agent(tmp_path)
+            await establish_room(agent)
+            agent.backend = backend
+            agent.duplex.push_tts_pcm = AsyncMock(return_value={"ok": True})
+            first_audio, release = asyncio.Event(), asyncio.Event()
+            automatic_audio = []
+            async def sink(pcm, rate):
+                automatic_audio.append(pcm)
+                first_audio.set()
+                state.audio_seen.set()
+                await release.wait()
+            automatic = asyncio.create_task(run_expression_protocol(backend,
+                b"\x01\x00" * 16000, sample_rate=16000,
+                user_key="member", channel_key="area/channel", on_audio=sink))
+            await first_audio.wait()
+            manual = asyncio.create_task(agent.speak_text("手动播报"))
+            await asyncio.sleep(0)
+            release.set()
+            reply, result = await asyncio.wait_for(asyncio.gather(automatic, manual), 5)
+            assert result["ok"] and "手动播报" in state.text
+            assert len(automatic_audio) == 4 and len(reply.pcm16) == 12
+            assert result["pcm_bytes"] == 6
+            await agent.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("operation", ["barge", "stop"])
+def test_interrupted_stream_keeps_recognized_input_under_original_identity(tmp_path, operation):
+    async def run():
+        async with model_servers() as (backend, state):
+            agent = make_agent(tmp_path)
+            await agent.join("original-area", "original-room")
+            agent.backend = backend
+            audible = asyncio.Event()
+            async def push(*args, **kwargs):
+                audible.set()
+                return {"ok": True}
+            agent.duplex.push_tts_pcm = push
+            worker = asyncio.create_task(agent._handle_utterance("original-member", b"\x01\x00" * 16000, 16000))
+            await asyncio.wait_for(audible.wait(), 3)
+            assert not state.llm_finished
+            await (agent._interrupt_speaking() if operation == "barge" else agent.stop_current_reply())
+            await asyncio.gather(worker, return_exceptions=True)
+            state.audio_seen.set()
+            rows = agent.memory.recent(user_key="oopz:original-member")
+            assert [(row["role"], row["content"]) for row in rows] == [("user", "你好")]
+            assert rows[0]["channel_key"] == "original-area/original-room"
+            await agent.stop()
     asyncio.run(run())

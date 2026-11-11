@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
@@ -112,7 +113,24 @@ class FileConfiguration:
             raise RuntimeError('配置保存缺少回执')
         return result
 
-    def save_output_volume(self, volume: OutputVolume) -> VolumeSaveReceipt:
+    async def save_output_volume(self, volume: OutputVolume) -> VolumeSaveReceipt:
+        if not isinstance(volume, OutputVolume):
+            raise TypeError("volume 必须是已解析的 OutputVolume")
+        work = asyncio.create_task(asyncio.to_thread(self._save_output_volume, volume))
+        cancelled = False
+        while True:
+            try:
+                result = await asyncio.shield(work)
+                break
+            except asyncio.CancelledError:
+                if work.cancelled():
+                    raise
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
+    def _save_output_volume(self, volume: OutputVolume) -> VolumeSaveReceipt:
         if not isinstance(volume, OutputVolume):
             raise TypeError("volume 必须是已解析的 OutputVolume")
         change = ConfigurationChange.from_normalized(
@@ -173,7 +191,7 @@ class FileConfiguration:
             exec(compile(patched, str(self._path), "exec"), namespace)
             runtime = self._runtime_config()
             for group in required_runtime:
-                if not isinstance(getattr(runtime, sources[group], None), dict):
+                if hasattr(runtime, sources[group]) and not isinstance(getattr(runtime, sources[group]), dict):
                     raise RuntimeError("运行语音配置不是字典，已取消保存")
             if request is not None:
                 raw = dict(request_id=request.request_id, fingerprint=fingerprint,

@@ -99,7 +99,7 @@ def test_voice_save_rejects_busy_config_gate_instead_of_deadlocking_hot_reload(t
         async def save(volume):
             voice_locked.set()
             await allow_voice_save.wait()
-            await asyncio.to_thread(store.save_output_volume, OutputVolume(volume))
+            await store.save_output_volume(OutputVolume(volume))
         runtime.agent.set_output_volume_saver(save)
         spoken = asyncio.create_task(runtime.agent.set_output_controls(volume=40))
         await voice_locked.wait()

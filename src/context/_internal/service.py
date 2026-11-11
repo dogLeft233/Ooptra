@@ -72,7 +72,7 @@ class ContextService:
                   (current is None or current[0].session == observation.session or observation.kind == "session"))
         if observation.kind == "recognized" and observation.complete:
             self._ledger.commit_input(observation.input_ref, ConfirmedTurn(observation.text, "", "silent", observation.user_key,
-                                       observation.session.room_target.channel), room=room, session=observation.session.session_id)
+                                       f"{observation.session.room_target.area}/{observation.session.room_target.channel}"), room=room, session=observation.session.session_id)
             self._inputs[observation.input_ref] = observation
             if len(self._inputs) > 4096:
                 self._inputs.pop(next(iter(self._inputs)))

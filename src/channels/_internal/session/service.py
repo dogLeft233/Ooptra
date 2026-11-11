@@ -53,6 +53,9 @@ class RoomChannel:
     async def cancel_playback(self, action_id):
         return await self._playback.cancel(action_id)
 
+    async def cancel_current_playback(self, session):
+        return await self._playback.cancel_current(session)
+
     async def _stop_playback(self) -> None:
         # A browser may accept its in-flight push while cancellation is being observed.
         # Drain that exact work before clearing the queue, otherwise late PCM follows stop.

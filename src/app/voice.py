@@ -594,6 +594,9 @@ class VoiceCoordinator:
                     raise RuntimeError("voice operation superseded by manual control")
                 if source == "auto" and self._joined:
                     raise RuntimeError("voice room occupied; automatic join cannot replace it")
+                area, channel = self._resolve_target(area, channel)
+                if not area or not channel:
+                    raise RuntimeError("缺少 area/channel，请在配置或调用参数中指定")
                 if self._joined:
                     old = VoiceOperation("leave", "system", self._area, self._channel, self._visit_id)
                     result = await self._leave_locked()
@@ -924,7 +927,7 @@ class VoiceCoordinator:
                 or getattr(self, "_announcement_active", False) or getattr(self, "_retiring_visit_id", "")
                 or not getattr(self, "_connection_ready", True) or getattr(self, "_voice_suspended", False)):
             return
-        if self._cascade_limit_reached():
+        if self._cascade_limit_reached() and not self._speaking:
             return
         if not self.settings.enabled or not pcm:
             return
@@ -950,6 +953,8 @@ class VoiceCoordinator:
                 and (not self.backend.capabilities().streaming_utterance
                      or self._barge_in_reached(uid, pcm, sample_rate))):
             await self._interrupt_speaking()
+        if self._cascade_limit_reached():
+            return
         result = self.ingress.cut(audio)
         if result.status == "ready":
             self._offer_utterance(uid, result.pcm16, sample_rate)
@@ -993,6 +998,11 @@ class VoiceCoordinator:
         stream_task = getattr(self, "_stream_reply_task", None)
         if stream_task is not None and not stream_task.done():
             stream_task.cancel()
+        session = self.channels.snapshot().session
+        if session is not None:
+            stopped = await self.channels.cancel_current_playback(session)
+            if stopped is not None:
+                return
         if self.duplex is not None:
             try:
                 await self.duplex.stop_tts()

@@ -59,14 +59,14 @@ class Configuration(Protocol):
         """
         ...
 
-    def save_output_volume(self, volume: OutputVolume) -> VolumeSaveReceipt:
+    async def save_output_volume(self, volume: OutputVolume) -> VolumeSaveReceipt:
         """同进程串行修补磁盘并同步该运行字段，返回不表示播放已应用。
 
-        此方法含阻塞文件 I/O，异步调用者应在线程执行。文件保留注释、其他值、
+        模块内部持有文件线程并观察取消后收尾，调用者直接等待。文件保留注释、其他值、
         权限及符号链接；共用部署变更许可；便利入口不承诺请求幂等或多文件崩溃事务。
         校验/写入失败抛出异常，文件写入成功前不变更运行字典。
         快捷音量写入遇到其他配置/维护任务持有许可时明确拒绝，避免输出锁与部署锁反序。
-        线程启动后，异步拥有者必须观察其完成，不得在取消时假定写入停止。
+        重复取消不遗留磁盘工作；存储失败仍抛出，不能在取消时假定写入停止。
         """
         ...
 

@@ -65,7 +65,7 @@ class VoiceRuntime:
 
     async def _save_output_volume(self, volume: int) -> None:
         parsed = OutputVolume(volume)
-        await asyncio.to_thread(self._configuration.save_output_volume, parsed)
+        await self._configuration.save_output_volume(parsed)
 
     def bind_bot(self, bot: Any) -> None:
         self.agent.bind_bot(bot)

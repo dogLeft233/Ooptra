@@ -169,29 +169,39 @@ class ContextBridge:
         return await self.request("recall" if field == "query" else "remember",
                                   {field: text, "speaker": speaker})
 
+    def bind_turn(self, *, speaker: str):
+        """绑定原来源和房间，至多入账一次；迟到提交不重定向到新来源。"""
+        allowed = self._context.get("ok") is True and (
+            "memory_scopes" not in self._context
+            or bool(self._context["memory_scopes"] and self._context.get("provider")))
+        event = self._event("commit", {})
+        recorded = False
+        def record(user_text: str, reply_text: str, *, interrupted: bool = False):
+            nonlocal recorded
+            if recorded or not allowed or not user_text.strip():
+                return
+            if self._write_count() >= 128:
+                self._error = "语音记忆待写队列已满，本轮未保存"
+                logger.error(self._error)
+                return
+            event["payload"] = {"user_text": user_text[:4000],
+                "reply_text": "" if interrupted else reply_text[:4000],
+                "speaker": speaker, "interrupted": interrupted}
+            from context.models import ConfirmedTurn
+            receipt = self._ledger.commit("bridge:" + event["request_id"], event,
+                ConfirmedTurn(user_text, "" if interrupted else reply_text,
+                    "interrupted" if interrupted else "completed" if reply_text.strip() else "silent",
+                    speaker, event["room"].get("channel", "")),
+                room=json.dumps(event["room"], ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                session=event["session_id"], source=event["session_id"], event=event)
+            recorded = receipt.delivery_admission == "accepted"
+            if recorded:
+                self.publish_committed()
+        return record
+
     def record_turn(self, user_text: str, reply_text: str, *, speaker: str,
                     interrupted: bool = False) -> None:
-        # Keep already prepared scope when the worker is temporarily disconnected.
-        if self._context.get("ok") is not True or not user_text.strip():
-            return
-        if "memory_scopes" in self._context and (not self._context["memory_scopes"] or not self._context.get("provider")):
-            return
-        if self._write_count() >= 128:
-            self._error = "语音记忆待写队列已满，本轮未保存"
-            logger.error(self._error)
-            return
-        event = self._event("commit", {"user_text": user_text[:4000],
-                            "reply_text": "" if interrupted else reply_text[:4000],
-                            "speaker": speaker, "interrupted": interrupted})
-        from context.models import ConfirmedTurn
-        receipt = self._ledger.commit("bridge:" + event["request_id"], event,
-            ConfirmedTurn(user_text, "" if interrupted else reply_text,
-                          "interrupted" if interrupted else "completed" if reply_text.strip() else "silent", speaker,
-                          self._room.get("channel", "")),
-            room=json.dumps(self._room, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-            session=self.session_id, source=self.session_id, event=event)
-        if receipt.delivery_admission == "accepted":
-            self.publish_committed()
+        self.bind_turn(speaker=speaker)(user_text, reply_text, interrupted=interrupted)
 
     def _persist(self, terminal: tuple[str, dict] | None = None) -> None:
         self._ledger.replace_pending(self._outbox, terminal)

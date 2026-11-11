@@ -194,6 +194,14 @@ class PlaybackExecutor:
             await self._finish_unstarted(action_id)
         return self.snapshot(action_id)
 
+    async def cancel_current(self, session: SessionRef) -> PlaybackState | None:
+        task = self._active
+        if self._current() != session or task is None or task.done():
+            return None
+        action_id = next(key for key, (request, active) in self._tasks.items()
+                         if active is task and request.session == session)
+        return await self.cancel(action_id)
+
     async def _bounded(self, work, timeout):
         task = asyncio.ensure_future(work)
         self._pending_work.add(task)

@@ -67,6 +67,9 @@ class Channel(Protocol):
 
     def playback(self, action_id: str) -> PlaybackState: ...
     async def cancel_playback(self, action_id: str) -> PlaybackState: ...
+    async def cancel_current_playback(self, session: SessionRef) -> PlaybackState | None:
+        """撤销原会话当前播放器并等待实际停止；旧会话不影响新房间。"""
+        ...
 
     async def execute(self, command: ChannelCommand) -> ActionOutcome:
         """等待进退房事实及必要收尾。
