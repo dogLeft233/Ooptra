@@ -43,6 +43,8 @@ MiMo、阿里 ASR/DeepSeek/阿里 TTS、Gemini Live 为实际适配。OpenAI Rea
 
 自检 WAV 入口先验证完整PCM、10秒与2MiB预算。级联分别观察 ASR、控制分类和 TTS；Live 输入转写与输出自检使用两个独立连接，原输入轮次的迟到音频不能证明输出自检成功。Live 工具只记录候选，不执行退房等真实动作。取消关闭全部临时资源。
 
+接话判断使用本次 `PreparedContext.persona` 的身份资料、昵称和近期对话辨认是否对本机器人发言；人格内容只作身份资料，不授予修改分类规则的权限。`assess_reply` 只报告语义关联，不根据近期发言次数或冷却决定抑制参与；这类调度由行为模块拥有。
+
 ## 验证与变化范围
 
 - [表达任务测试](../../tests/dialogue/test_expression_jobs.py)：单订阅、64KiB切分、有界取消、源失败，以及首帧之前关闭仍回收供应商。
@@ -57,3 +59,5 @@ MiMo、阿里 ASR/DeepSeek/阿里 TTS、Gemini Live 为实际适配。OpenAI Rea
 ## 当前画面输入
 
 `DialogueCapabilities.image_input` 声明图像能力；当前仅配置为 `deepseek-flash` 的阿里/DeepSeek 后端开启。`generate(..., screen=ScreenFrame)` 接受原会话三秒内捕获的可选画面，独占任务固定该帧；其他后端拒绝图像输入。图像只放在本轮 user 的 image_url 内容块，不加入历史、记忆工具结果或 TTS。无画面时维持文字路径，不能声称已看见屏幕。
+
+`semantic_reply` 能力的后端通过 `assess_reply` 输出绑定原会话/输入的严格语义候选，不能直接授权发言。阿里/DeepSeek 已实现；JSON、4秒期限、取消与连接关闭由生成拥有，模型失败不伪造silent。调用契约见 `api.py`，验证见 `tests/dialogue/test_reply_assessment.py`。

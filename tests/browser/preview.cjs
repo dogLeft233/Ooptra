@@ -53,6 +53,7 @@ const {chromium} = require(process.env.OOPTRA_PLAYWRIGHT_MODULE || 'playwright')
     await page.locator('#config-tabs [data-tab="voice"]').click();
     const backend = page.locator('[data-group="voice"][data-field="backend"] select');
     await backend.selectOption('aliyun_deepseek');
+    assert.match(await page.locator('[data-group="voice"][data-field="reply_probability_percent"]').textContent(), /DeepSeek 使用模型语义判断/);
     const effort = page.locator('[data-group="voice"][data-field="aliyun_deepseek.reasoning_effort"] select');
     assert.equal(await effort.inputValue(), 'low');
     assert.deepEqual(await effort.locator('option').evaluateAll(options => options.map(option => option.value)), ['none', 'low', 'high', 'max']);

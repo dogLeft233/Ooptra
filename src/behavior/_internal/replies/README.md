@@ -37,3 +37,7 @@
 `tests/behavior/test_public_value_guards.py` 验证非法布尔开关、NaN时长/窗口、内部许可标记与动作身份不能进入决策；`test_attempt_budget.py` 直接通过 `Behavior.admit` 验证额度和完整许可。
 
 `tests/behavior/test_decision_contract.py` 对同触发计一次、许可伪造/过期、完整会话 ID、旧反馈、一次抽样和错误执行结果做公开接口反例；`test_reply_scheduler.py/test_speech_interrupt_policy.py` 验证资源与策略。`tests/test_barge_in_gate.py/test_live_turn_lifecycle.py/test_voice_reply_probability.py` 使用真实应用和生成任务、替换外部 socket/音频传输验证集成，不依赖旧供应商回调或手填私有计数。
+
+语义接话通过 `ReplyAssessment` 输入同一个 `decide`，不另建模型客户端或行动台账；绑定错误在构造识别事实时拒绝。明确叫名优先于模型沉默/失败，普通候选不抽样、不开启固定窗口，去重、许可期限和控制授权仍生效。验证见 `tests/behavior/test_semantic_replies.py`。
+
+近期处理后的等待仍仅由 `ReplyScheduler.finish/prepare` 持有；生成不再把“刚回复过”折叠为语义沉默。改变冷却时长、输入替换或处理结束规则只修改此模块，语义候选不复制一份计时状态。叫名及 `addressed` 的语义放行规则仍在 `BehaviorService.decide`，不等于绕过调度等待。
