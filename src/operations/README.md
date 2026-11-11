@@ -1,6 +1,6 @@
 # 系统维护
 
-当前状态：**目标设计，业务代码尚未迁入**。以下签名为待实现契约，不可直接导入；首条真实路径迁入时创建 `api.py`、`models.py` 和工厂，之后以代码契约为准，删除本文重复签名。全局规则见 [系统架构](../../ARCHITECTURE.md)，目录约束见 [代码要求](../../docs/coding-standards.md#模块目录与接口导航)。
+当前状态：**部分实现**。已迁入输出音量保存及共用 AST 文档补丁；版本化配置事务、维护任务、备份与部署仍为目标契约。已实现能力以 [公开接口](api.py)、[公开类型](models.py) 和 [工厂及文档操作](__init__.py) 为准，以下“待实现”签名不可直接调用。全局规则见 [系统架构](../../ARCHITECTURE.md)，目录约束见 [代码要求](../../docs/coding-standards.md#模块目录与接口导航)。
 
 ## 职责与非职责
 
@@ -10,11 +10,19 @@
 
 | 能力 | 隐藏的知识与状态 | 当前迁移入口 |
 | --- | --- | --- |
-| [配置事务](_internal/configuration/README.md) | 解析、文件版本、提交/热应用回执、部分失败与重试 | `webui/config_editor.py`、`core/config_file_store.py`、`VoiceRuntime.reload_settings` |
+| [配置事务](_internal/configuration/README.md) | 已实现音量值解析、同进程保存和共用文档补丁；文件版本/应用回执仍待迁入 | `api.Configuration`、`models.OutputVolume`、`_internal/configuration/` |
 | [备份与数据边界](_internal/backups/README.md) | 归档清单、校验结果、停机恢复、受保护集合与清理计划 | `webui/maintenance_storage.py`、`maintenance_cleanup.py` |
 | [部署任务与受管执行](_internal/deployment/README.md) | 计划、单写者任务状态、父子交接、就绪检查和回滚 | `MaintenanceService`、`launcher.py`、`maintenance_worker.py` |
 
 父进程与应用进程是同一维护模块的不同运行角色，不要求搬进同一运行进程。界面状态由任务查询生成，不另存一份维护状态机。
+
+## 已实现的配置切片
+
+`create_configuration(path=..., runtime_config=...)` 返回 `Configuration` 协议。调用方将原始音量解析为不可变 `OutputVolume`，随后等待异步 `save_output_volume`；磁盘与运行配置字典同步后返回 `VolumeSaveReceipt`，播放增益由语音输出能力继续应用。此切片不把保存称为运行组件已热应用，也尚无版本检查、请求台账或跨进程互斥。
+
+`patch_config_text` 与 `validate_config_text` 是兼容迁移所用的公开文档操作，不授予字段写入权限。前者只转换正文，后者沿用旧编辑器的求值校验，会执行部署方可信的 Python 配置，不能用于不可信上传脚本；字段白名单先由调用方解析。WebUI 编辑器复用此算法与 `OutputVolume` 规则，其展示元数据及其他字段解析暂留原位。改变音量合法范围只需修改 `OutputVolume`；改变 AST 补丁算法只需修改本模块。
+
+维护模块唯一拥有保存线程及取消后的真实完成观察，重复取消也不丢失收尾；保存失败优先返回原异常。`VoiceRuntime` 直接等待注入的配置能力，不再启动线程或导入 WebUI。语音侧仍拥有跨保存与热应用的事务顺序、播放增益及会话代次；其事务取消保护不承担存储线程清理。其他配置保存/热应用和维护流程尚未迁移，不能宣称维护模块整体隔离完成。
 
 ## 待实现公开契约
 
@@ -34,7 +42,9 @@
 
 ## 依赖与验证
 
-静态依赖仅公共技术机制，运行时通过本模块管理端口协调。存储和 OS 适配留在本模块；WebUI 调用其公开 API。旧配置写入迁入后，`VoiceRuntime` 不再反向导入 `webui.config_editor`。
+静态依赖仅公共技术机制，运行时通过本模块管理端口协调。存储和 OS 适配留在本模块；WebUI 调用其公开 API。输出音量保存已消除 `VoiceRuntime` 对 `webui.config_editor` 的反向导入；其余配置/部署入口仍在迁移。
+
+本切片通过 `tests/operations/test_configuration.py` 验证保存保留无关正文/环境覆盖、无效输入、磁盘失败及动态目标拒绝，原 WebUI/音量/配置重载测试继续回归。运行：`.venv/bin/python -m pytest tests/operations tests/test_config_editor.py tests/test_auto_visit_config_editor.py tests/test_voice_output_controls.py -q`。
 
 现有证据：`tests/test_config_editor.py`、`tests/test_maintenance_deadlines.py`、`tests/test_maintenance_rehearsal.py`、`tests/test_maintenance_health.py`、`tests/test_maintenance_payload_boundaries.py`。迁入后 `tests/operations/` 验证版本冲突、保存/应用部分失败、重复执行、进程中断恢复和回滚；用隔离目录/模拟进程，禁止为架构验证对当前仓库执行真实更新或恢复。
 
@@ -46,4 +56,4 @@
 
 ## 实现与阅读顺序
 
-迁入后依次阅读 `api.py` → `models.py` → 所需 `_internal/` 实现。上述子模块已以 README 落实详细设计，Python 文件仍按真实迁移切片创建，暂不创建空 Protocol 或默认实现。跨模块只使用公开契约，工厂由应用装配，禁止返回内部可变对象。迁移批次与验收见 [重构准备计划](../../docs/superpowers/plans/2026-11-08-module-refactor-readiness.md)。
+迁入后依次阅读 `api.py` → `models.py` → 所需 `_internal/` 实现。上述子模块已以 README 落实详细设计，Python 文件按真实迁移切片创建，不为其余目标能力预建空 Protocol 或默认实现。跨模块只使用公开契约，工厂由应用装配，禁止返回内部可变对象。迁移批次与验收见 [重构准备计划](../../docs/superpowers/plans/2026-11-08-module-refactor-readiness.md)。

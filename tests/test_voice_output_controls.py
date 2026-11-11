@@ -176,6 +176,7 @@ def test_cancelled_voice_command_settles_save_before_releasing_lock(tmp_path):
 
 def test_config_reload_cannot_be_overwritten_by_an_older_spoken_save(monkeypatch, tmp_path):
     import config
+    from operations import create_configuration
     from voice_agent.runtime import VoiceRuntime
     from webui import config_editor
 
@@ -186,7 +187,9 @@ def test_config_reload_cannot_be_overwritten_by_an_older_spoken_save(monkeypatch
     monkeypatch.setattr(config_editor, "CONFIG_PATH", str(path))
 
     async def run():
-        runtime = VoiceRuntime(state_path=tmp_path / "visits.json")
+        runtime = VoiceRuntime(
+            state_path=tmp_path / "visits.json", configuration=create_configuration(path=path),
+        )
         saved, release = asyncio.Event(), asyncio.Event()
         async def save(volume):
             await runtime._save_output_volume(volume)
@@ -209,6 +212,7 @@ def test_config_reload_cannot_be_overwritten_by_an_older_spoken_save(monkeypatch
 
 def test_runtime_saves_spoken_volume_to_disk_but_never_temporary_mic(monkeypatch, tmp_path):
     import config
+    from operations import create_configuration
     from voice_agent.runtime import VoiceRuntime
     from webui import config_editor
 
@@ -219,7 +223,9 @@ def test_runtime_saves_spoken_volume_to_disk_but_never_temporary_mic(monkeypatch
     monkeypatch.setattr(config_editor, "CONFIG_PATH", str(path))
 
     async def run():
-        runtime = VoiceRuntime(state_path=tmp_path / "visits.json")
+        runtime = VoiceRuntime(
+            state_path=tmp_path / "visits.json", configuration=create_configuration(path=path),
+        )
         await establish_room(runtime.agent)
         transport = SimpleNamespace(set_tts_volume=AsyncMock(return_value={"ok": True}))
         runtime.agent.bind_duplex(VoiceDuplex(transport))

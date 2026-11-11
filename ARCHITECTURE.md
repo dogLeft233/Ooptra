@@ -2,7 +2,7 @@
 
 Ooptra 的目标是让机器人在 Oopz 中感知环境、理解情境、决定行动并与人交互，同时支持安全的配置和维护。
 
-本文定义本次重构采用的五模块目标架构，是职责、接口和状态归属的依据。当前代码尚未完成此划分；渠道的进退房、只读快照、动作查询和最小音频屏障已有首个实现，其余接口仍是目标契约。各模块说明标明实现范围。现有实现的迁移入口见文末。安装与操作见 [README](README.md)，工程要求见 [代码要求](docs/coding-standards.md)。
+本文定义本次重构采用的五模块目标架构，是职责、接口和状态归属的依据。当前代码尚未完成此划分；渠道的进退房、只读快照、动作查询、最小音频屏障及平台成员目录已有实现；行为的会话尝试额度/接话策略和维护的音量配置保存也已有独立公开入口，其余接口仍是目标契约。各模块说明标明实现范围。现有实现的迁移入口见文末。安装与操作见 [README](README.md)，工程要求见 [代码要求](docs/coding-standards.md)。
 
 ## 最高层：五个模块
 
@@ -130,15 +130,15 @@ WebUI 等管理入口完成认证与输入解析 → 系统维护校验并应用
 
 | 目标模块 | 现有代码入口 | 需要收敛的职责 |
 | --- | --- | --- |
-| 渠道交互 | `src/bridge/`、`src/oopz/`、`src/onebot_v11/`、`VoiceDuplex` 和 `VoiceAgent` 的房间及播放操作 | 统一平台访问、会话与执行状态，提供公开查询，替代调用方读取 `agent._bot` 等内部属性；SDK 保持在适配层 |
+| 渠道交互 | `src/bridge/`、`src/oopz/`、`src/onebot_v11/`、`VoiceDuplex` 和 `VoiceAgent` 的房间及播放操作 | 统一平台访问、会话与执行状态，提供公开查询，自动串门已通过 `PlatformDirectory` 查询域/房间成员，不再读取 `agent._bot`；其他调用方继续迁移，SDK 保持在适配层 |
 | 上下文管理 | `ContextBridge`、`MemoryStore` 及 AstrBot 同步相关实现 | 分离情境、近期历史、长期记忆与投递状态；保留待写事件创建时的来源范围 |
-| 行为决策 | `AutoVisitController`、`reply_policy`、`VoiceAgent` 的接话、冷却和控制逻辑 | 收敛策略、调度和配额，包括 `cascade_turn_limit`；房间执行与真实状态归渠道交互 |
+| 行为决策 | `behavior.api` 已拥有尝试额度、概率/关键词/成员窗口；`AutoVisitController` 与 `VoiceAgent` 仍有调度、冷却和控制逻辑 | 收敛策略、调度和配额，包括 `cascade_turn_limit`；房间执行与真实状态归渠道交互 |
 | 对话生成 | `src/voice_agent/backends/`、预览与生成相关代码 | 收敛发言意图、生成上下文与输出流；保留 Gemini Live 和级联模型能力差异，不强迫实时模型通过文字中转 |
 | 系统维护 | `launcher.py`、`src/webui/maintenance*`、配置编辑与 `src/core/config_file_store.py` | 提取与 HTTP 无关的配置和维护能力，路由只负责管理请求接入 |
 
 当前文字路径仍是 Oopz → OneBot → AstrBot → OneBot → Oopz：AstrBot 负责文字对话决策、生成和相应上下文，本地承担协议适配。当前语音路径由 Ooptra 编排，通过独立的 HTTP 轮询/回执通路同步 AstrBot 上下文。迁移期间逐条路径明确能力拥有者，保留文字接入兼容性，避免本地与 AstrBot 同时为同一消息决策和回复。
 
-`main.py` 和 `VoiceRuntime` 是现有装配入口；当前 `VoiceAgent` 的房间字段已改为读取渠道快照，真实进退房与音频推送进入渠道；但 bot/duplex 绑定、较高层操作锁/控制代次、行为决策和生成协调仍待迁出。WebUI 与独立语音接口也仍访问内部对象。这些是待迁移项，不是目标接口的实现证明。
+`main.py` 和 `VoiceRuntime` 是现有装配入口；当前 `VoiceAgent` 的房间字段已改为读取渠道快照，真实进退房与音频推送进入渠道；但 bot/duplex 绑定、较高层操作锁/控制代次、行为决策和生成协调仍待迁出。接话额度由 `behavior` 按渠道 SessionRef 唯一拥有，旧会话不能消耗新额度；级联和 Live 共用行为的概率/关键词/成员窗口能力。语音运行时保存音量直接等待 `operations.Configuration` 的异步入口，线程与取消后的持久化收尾由维护模块拥有，语音继续拥有保存后的播放应用顺序；WebUI 与其复用同一 AST 补丁和音量解析规则；完整配置事务与其他维护任务仍待迁移。WebUI 与独立语音接口也仍访问部分内部对象。这些是待迁移项，不是目标接口的实现证明。
 
 流式级联现通过每次调用的识别回调将最终文本交回编排；打断后保留用户输入，不补成完整助手记录。`ContextBridge.bind_turn` 在回合开始固定原来源与授权，幂等记录原目标 outbox，迟到结果不更新新会话历史。该兼容路径仍位于 `voice_agent`，未实现目标五模块上下文事务；局部入口见[上下文说明](src/context/README.md)与[生成说明](src/dialogue/README.md)。
 

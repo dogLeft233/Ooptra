@@ -1,6 +1,6 @@
 # 接话策略与回合额度
 
-状态：目标内部子模块，尚无 Python 实现。入口见 [行为决策](../../README.md)。将“是否回应、等待哪句、预留哪次尝试、何时可再次回应”作为一项能力，隐藏概率、关键词、窗口、冷却和未完成意图，避免调用者拼装多步检查。
+状态：部分实现。级联会话尝试额度在 [attempts.py](attempts.py)，概率/关键词及成员窗口在 [policy.py](policy.py)；冷却、幂等反馈与 Live 提议协调仍为目标契约。入口见 [行为决策](../../README.md)。将“是否回应、等待哪句、预留哪次尝试、何时可再次回应”作为一项能力，隐藏概率、关键词、窗口、冷却和未完成意图，避免调用者拼装多步检查。
 
 ## 类型与内部接口
 
@@ -51,6 +51,6 @@ NoAction 映射最终 Reject、超时终结后不能因迟到转录重新复活�
 
 内部只用公共情境/渠道类型和时钟、随机源，不导入 visits/生成/存储。behavior协调器负责将具名结果交另一模块，无SDK回调。对概率/关键词算法保持简单函数，不为其单建目录或service层。
 
-证据：`reply_policy.allow_reply/ConversationWindow`、`VoiceAgent._round_worker/_throttled_round/_handle_utterance_reply/_cascade_limit_reached`；测试 `tests/test_round_throttle.py`、`tests/test_voice_turn_limit.py`、`tests/test_voice_reply_probability.py`、`tests/test_conversation_window.py`。先迁额度与反馈，保留旧入口适配；再迁窗口/冷却/概率，最后迁Live许可策略。
+迁移前定位证据：原 `reply_policy.allow_reply/ConversationWindow`（现已迁至本模块）、`VoiceAgent._round_worker/_throttled_round/_handle_utterance_reply/_cascade_limit_reached`；测试 `tests/test_round_throttle.py`、`tests/test_voice_turn_limit.py`、`tests/test_voice_reply_probability.py`、`tests/test_conversation_window.py`。先迁额度与反馈，保留旧入口适配；再迁窗口/冷却/概率，最后迁Live许可策略。
 
-目标验证：并发不得超额；重复触发/反馈不重复消耗；失败/已admit沉默不退款；首次ASR前计入、识别到表达不重复扣；延期不表达；旧会话终态不延长新会话冷却；最新输入获胜；Hold到期后迟到转录不复活。更改冷却策略只改此子模块和策略配置，不需改渠道/生成。去掉本层会把预留/冷却规则散回多个入口，因此保留；这是设计分析，尚无目标接口行为测试。
+目标验证：并发不得超额；重复触发/反馈不重复消耗；失败/已admit沉默不退款；首次ASR前计入、识别到表达不重复扣；延期不表达；旧会话终态不延长新会话冷却；最新输入获胜；Hold到期后迟到转录不复活。更改冷却策略只改此子模块和策略配置，不需改渠道/生成。去掉本层会把预留/冷却规则散回多个入口，因此保留；完整反馈/冷却协调仍是设计分析；已落地额度的公开行为测试见 `tests/behavior/test_attempt_budget.py`，现有关键词/概率/窗口回归已经改用行为模块。

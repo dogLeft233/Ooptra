@@ -331,6 +331,8 @@ class CreateChannelResult(BaseModel):
 
 class VoiceChannelMemberInfo(BaseModel):
     uid: str = ""
+    # 兼容字段仍按旧规则归一化；安全决策可据此拒绝丢失原始语义的响应。
+    source_validated: bool = Field(default=True, exclude=True, repr=False)
 
     bot_type: str = Field(default="", alias="botType")
     dimensions: str = ""
@@ -360,6 +362,14 @@ class VoiceChannelMemberInfo(BaseModel):
             raise OopzApiError("invalid member payload: expected dict", payload=data)
 
         normalized = dict(data)
+
+        raw_uid = normalized.get("uid")
+        raw_bot = normalized.get("isBot", False)
+        normalized["source_validated"] = (
+            (raw_uid is None or isinstance(raw_uid, str) or type(raw_uid) is int)
+            and ("isBot" in normalized or "is_bot" not in normalized)
+            and coerce_bool(raw_bot, default=False) == coerce_bool(raw_bot, default=True)
+        )
 
         normalized["uid"] = str(normalized.get("uid") or "")
         normalized["botType"] = str(normalized.get("botType") or "")
@@ -392,6 +402,7 @@ VoiceChanelMemberInfo = VoiceChannelMemberInfo
 
 
 class VoiceChannelMembersResult(BaseModel):
+    source_validated: bool = Field(default=True, exclude=True, repr=False)
     channel_members: dict[str, list[VoiceChannelMemberInfo]] = Field(default_factory=dict, alias="channelMembers")
 
     @model_validator(mode="before")
@@ -405,6 +416,14 @@ class VoiceChannelMembersResult(BaseModel):
 
         normalized = dict(data)
         raw_members = normalized.get("channelMembers", {})
+        normalized["source_validated"] = False
+        if "channelMembers" in normalized and isinstance(raw_members, Mapping):
+            normalized["source_validated"] = all(
+                (isinstance(channel_id, str) and bool(channel_id.strip())
+                 or type(channel_id) is int and channel_id != 0)
+                and isinstance(members, list)
+                for channel_id, members in raw_members.items()
+            )
 
         if not isinstance(raw_members, Mapping):
             normalized["channelMembers"] = {}

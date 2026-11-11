@@ -19,8 +19,11 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from channels import create_oopz_channel
-from channels.api import Channel
+from behavior import create_cascade_attempts
+from behavior.api import CascadeAttempts
+from behavior.models import AttemptRejected
+from channels import create_oopz_channel, create_oopz_directory
+from channels.api import Channel, PlatformDirectory
 from channels.models import JoinRoom, LeaveRoom, RoomTarget, SessionRef
 from voice_agent.backends import create_backend
 from voice_agent.backends.base import (
@@ -163,7 +166,7 @@ class VoiceAgent:
         self.last_reply = ""
         self.last_user_text = ""
         self.turns = 0
-        self._cascade_attempts = 0
+        self._attempt_budget = create_cascade_attempts()
 
         self._init_throttle()
 
@@ -174,6 +177,19 @@ class VoiceAgent:
             channel = create_oopz_channel(getattr(self, "_bot", None), lambda: self.duplex)
             self._channels = channel
         return channel
+
+    @property
+    def directory(self) -> PlatformDirectory:
+        directory = getattr(self, "_directory", None)
+        if directory is None:
+            directory = create_oopz_directory(getattr(self, "_bot", None))
+            self._directory = directory
+        return directory
+
+    def _ensure_attempt_budget(self) -> CascadeAttempts:
+        if not hasattr(self, "_attempt_budget"):
+            self._attempt_budget = create_cascade_attempts()
+        return self._attempt_budget
 
     @property
     def _joined(self) -> bool:
@@ -419,6 +435,7 @@ class VoiceAgent:
                 retired.append(old_channel)
                 self._retired_channels = retired
             self._channels = None
+            self._directory = None
         self._bot = bot
         self._drop_stale_duplex()
 
@@ -730,7 +747,8 @@ class VoiceAgent:
             raise RuntimeError("voice operation superseded by bot binding")
         if result.status != "completed":
             raise RuntimeError(f"voice join failed: {result.reason}")
-        self._cascade_attempts = 0
+        assert result.session is not None
+        self._ensure_attempt_budget().start_session(result.session)
         self._ensure_output_controls().reset_mute()
         self._voice_suspended = False
         self._retiring_visit_id = ""
@@ -1002,7 +1020,7 @@ class VoiceAgent:
             "output_volume": self.settings.output_volume,
             "output_muted": self.output_muted,
             "turns": self.turns,
-            "cascade_attempts": self._cascade_attempts,
+            "cascade_attempts": self._ensure_attempt_budget().snapshot().attempts,
             "cascade_turn_limit": self.settings.cascade_turn_limit,
             "last_user_text": self.last_user_text,
             "last_reply": self.last_reply,
@@ -1349,8 +1367,7 @@ class VoiceAgent:
                 self._reply_tasks.discard(task)
 
     def _cascade_limit_reached(self) -> bool:
-        limit = self.settings.cascade_turn_limit
-        return not self.live_mode and limit > 0 and self._cascade_attempts >= limit
+        return not self.live_mode and self._ensure_attempt_budget().exhausted(self.settings.cascade_turn_limit)
 
     async def _handle_utterance_reply(self, uid: str, pcm: bytes, sample_rate: int) -> None:
         session = self.channels.snapshot().session
@@ -1362,7 +1379,11 @@ class VoiceAgent:
                 return
             # Reserve before the first network await, so queued work and failures
             # cannot exceed the per-join budget. Manual speak does not consume it.
-            self._cascade_attempts += 1
+            if session is None:
+                return
+            permit = self._ensure_attempt_budget().admit(session, self.settings.cascade_turn_limit)
+            if isinstance(permit, AttemptRejected):
+                return
             if isinstance(self.backend, StreamingUtterance):
                 await self._handle_streamed_reply(uid, pcm, sample_rate)
                 return

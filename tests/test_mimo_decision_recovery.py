@@ -172,6 +172,7 @@ def test_combined_failure_logs_stage_without_upstream_secrets(tmp_path, monkeypa
 
 
 def test_failed_fresh_reply_keeps_upstream_body_out_of_agent_logs_and_status(tmp_path, monkeypatch, caplog):
+    from support.channel_fixtures import establish_room
     from test_voice_operations import make_agent
 
     async def run():
@@ -182,6 +183,7 @@ def test_failed_fresh_reply_keeps_upstream_body_out_of_agent_logs_and_status(tmp
         ])
         agent = make_agent(tmp_path)
         agent.backend = backend
+        await establish_room(agent)
         with caplog.at_level(logging.WARNING):
             await agent._handle_utterance("u", b"audio", 16000)
         assert len(requests) == 3 and not spoken

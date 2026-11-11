@@ -24,15 +24,10 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 
+from behavior import create_reply_policy
 from voice_agent.backends.base import VoiceBackend, VoiceReply
 from voice_agent.context_bridge import MEMORY_RULES, memory_tools
 from voice_agent.observation import DecisionTrace, VoiceObservation
-from voice_agent.reply_policy import (
-    ConversationWindow,
-    allow_reply,
-    matches_force_keyword,
-    window_seconds,
-)
 from voice_agent.vad import EnergyVad, VadvConfig
 
 logger = logging.getLogger(__name__)
@@ -162,7 +157,7 @@ class GeminiLiveBackend(VoiceBackend):
         self._decision_trace: DecisionTrace | None = None
         self._audio_started: float | None = None
         self._input_started: float | None = None
-        self._conversation = ConversationWindow()
+        self._conversation = create_reply_policy()
         self._input_speakers: set[str] = set()
         self._turn_user_key = ""
         self._connection_state = "idle"
@@ -229,7 +224,9 @@ class GeminiLiveBackend(VoiceBackend):
     def _conversation_allows(self, text: str, keywords: list[str]) -> bool:
         key = next(iter(self._input_speakers)) if len(self._input_speakers) == 1 else ""
         self._turn_user_key = key
-        return self._conversation.observe(text, keywords, key, window_seconds(self.settings))
+        window = (self.settings.conversation_window_seconds
+                  if self.settings.conversation_window_enabled else 0)
+        return self._conversation.observe(text, keywords, key, window)
 
     def _observe_turn(self) -> DecisionTrace:
         if self._decision_trace is None:
@@ -644,11 +641,12 @@ class GeminiLiveBackend(VoiceBackend):
         if pending is None:
             return
         pending.user_text += text
-        if not matches_force_keyword(pending.user_text, pending.keywords):
+        if not self._conversation.matches_keywords(pending.user_text, pending.keywords):
             return
         self.observation.record("keyword", "replied", timing_mode="live_overlap")
-        self._conversation.observe(pending.user_text, pending.keywords,
-                                   pending.user_key, window_seconds(self.settings))
+        window = (self.settings.conversation_window_seconds
+                  if self.settings.conversation_window_enabled else 0)
+        self._conversation.observe(pending.user_text, pending.keywords, pending.user_key, window)
         # Detach before awaiting callbacks. A reset/new command invalidates this generation.
         self._completed_reply = None
         generation = self._policy_generation
@@ -860,8 +858,8 @@ class GeminiLiveBackend(VoiceBackend):
                     and self._conversation_allows(self._last_user_text, self._turn_keywords)):
                 # Transcription can arrive after audio: replay all buffered fragments.
                 self._reply_allowed = True
-                trace.reason = ("keyword" if matches_force_keyword(self._last_user_text, self._turn_keywords)
-                                else "window")
+                named = self._conversation.matches_keywords(self._last_user_text, self._turn_keywords)
+                trace.reason = "keyword" if named else "window"
                 trace.outcome = "replied"
                 buffered = self._deferred_audio
                 self._deferred_audio = []
@@ -880,10 +878,11 @@ class GeminiLiveBackend(VoiceBackend):
                              and self._conversation_allows(self._last_user_text, self._turn_keywords))
                 in_window = (not explicit and not addressed
                              and self._conversation_allows(self._last_user_text, []))
-                self._reply_allowed = bool(explicit or addressed or in_window
-                                           or allow_reply(self.settings.reply_probability_percent))
-                trace.reason = ("explicit" if explicit else "keyword"
-                                if addressed and matches_force_keyword(self._last_user_text, self._turn_keywords)
+                self._reply_allowed = bool(
+                    explicit or addressed or in_window
+                    or self._conversation.select(self.settings.reply_probability_percent))
+                named = self._conversation.matches_keywords(self._last_user_text, self._turn_keywords)
+                trace.reason = ("explicit" if explicit else "keyword" if addressed and named
                                 else "window" if addressed or in_window
                                 else "reply" if self._reply_allowed else "probability")
                 trace.outcome = "replied" if self._reply_allowed else "skipped"

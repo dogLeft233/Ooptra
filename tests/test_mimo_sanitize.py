@@ -22,6 +22,8 @@ import asyncio
 import logging
 import struct
 
+from support.channel_fixtures import establish_room
+
 from voice_agent.agent import _MIN_UTTERANCE_RMS, VoiceAgent
 from voice_agent.backends.base import VoiceReply
 from voice_agent.backends.mimo_cascade import (
@@ -360,7 +362,6 @@ class _FakeBackend:
 
 def _agent(utterance: bytes | None) -> tuple[VoiceAgent, _FakeBackend]:
     agent = VoiceAgent.__new__(VoiceAgent)
-    agent._cascade_attempts = 0
     agent.settings = VoiceAgentSettings(enabled=True, barge_in=False)
     agent.live_mode = False
     agent.duplex = None
@@ -403,6 +404,7 @@ def test_real_speech_still_goes_through(caplog) -> None:
     async def run() -> None:
         loud = _pcm(int(0.15 * 32768), samples=24000)  # 1.5s
         agent, backend = _agent(loud)
+        await establish_room(agent)
         with caplog.at_level(logging.INFO, logger="voice_agent.agent"):
             await agent._on_remote_pcm("u1", loud, 16000)
             assert agent._pending is not None, "真说话被丢了，没进信箱"

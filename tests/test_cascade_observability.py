@@ -66,7 +66,6 @@ class FakeCascade:
 
 async def _make_agent(reply: VoiceReply) -> tuple[VoiceAgent, FakeTransport]:
     agent = VoiceAgent.__new__(VoiceAgent)
-    agent._cascade_attempts = 0
     agent.settings = VoiceAgentSettings(enabled=True, sample_rate_out=24000)
     agent.duplex = FakeTransport()
     agent.backend = FakeCascade(reply)

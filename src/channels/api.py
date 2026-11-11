@@ -5,9 +5,11 @@ from typing import Protocol
 from .models import (
     ActionOutcome,
     ActionState,
+    AreaMembership,
     AudioPushResult,
     ChannelCommand,
     ChannelSnapshot,
+    JoinedAreas,
     RoomTarget,
     SessionRef,
 )
@@ -62,3 +64,14 @@ class Channel(Protocol):
         不提供跨进程/跨重启幂等保证。
         """
         ...
+
+
+class PlatformDirectory(Protocol):
+    """绑定单个账号的只读目录；失败/畸形响应不是空房间事实。
+
+    查询使用十秒超时，SDK 需配合取消；返回不可变数据。快照不保证执行时仍有效，
+    自动进房前须重新查询。它不拥有或更改当前实际房间。
+    """
+
+    async def joined_areas(self) -> JoinedAreas: ...
+    async def voice_members(self, area: str) -> AreaMembership: ...
