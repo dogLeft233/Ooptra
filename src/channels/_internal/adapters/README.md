@@ -16,6 +16,8 @@
 
 账号绑定事实、房间事实和模型任务分开：本能力只管理账号/事件连接；房间会话与播放仍归上层 channels 会话/输出能力。文字接入 Oopz→OneBot→AstrBot→OneBot→Oopz 原路径保持，AstrBot 是该路径的对话拥有者，本地不再次生成同一条消息。
 
+共享画面的观看连接由浏览器适配拥有：复用同时匹配会话键、应用、房间、令牌、观看者及发布者；清理前固定操作代次，退房使等待中的旧观看请求失效。抽帧只使用 `requestVideoFrameCallback` 确认过的解码帧，三秒内没有新帧即不可用；反复捕获不会刷新旧图年龄。内部回执携带 `frame_age_ms`，渠道校验后保守恢复原捕获时间，不把 RPC 返回时间当作新画面。验证入口为 `tests/browser/screen-viewer-lifecycle.cjs` 和 `tests/channels/test_screen_capture.py`。
+
 ## 验证
 
 `tests/test_bridge_restart.py` 经公开工厂、真实 SDK 装配和临时身份库测试重启/失败/启动通知，仅替换外部 SDK 连接循环；`tests/test_astrbot_bridge_routes.py` 验证鉴权与文字频道映射复用；`tests/test_voice_api_routes.py` 和 `tests/test_voice_member_live_state.py` 验证成员及实时广播投影。真实平台连接和双 bot 声音交互另由验收脚本完成，模拟不能代替真实服务验证。
