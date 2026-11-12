@@ -81,6 +81,8 @@ Python 使用四空格缩进，函数和模块使用 `snake_case`，类使用 `P
 
 ## 测试要求
 
+行为修改由开发 agent 按 [开发与独立验证分工](docs/coding-standards.md#开发与独立验证分工) 执行 TDD；跨模块、并发、状态及持久化变更由独立测试 agent 检查遗漏场景。Reviewer 按 [审查分工](docs/code-review.md#审查分工与交付) 重点核对编码规范和架构，三方证据分别记录。
+
 pytest 文件命名为 `test_<behavior>.py`，测试函数使用描述性的 `test_*` 名称。通过 `tmp_path`、`monkeypatch`、合成凭据和模拟服务隔离回归测试。开发时先运行相关测试，提交前运行完整套件。当前未配置数值化覆盖率门槛。
 
 | 规则 | 由什么拦住 |
