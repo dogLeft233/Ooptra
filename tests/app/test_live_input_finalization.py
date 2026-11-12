@@ -328,6 +328,50 @@ def test_closing_held_live_turn_keeps_only_provider_completed_input(tmp_path, co
     asyncio.run(scenario())
 
 
+def test_closing_interrupted_output_does_not_infer_complete_user_input(tmp_path):
+    async def scenario():
+        context, socket, flow = await open_flow(tmp_path, shared=True, probability=0,
+            keywords=("机器人",), late_seconds=2)
+        try:
+            await socket.deliver(audio_message(user_text="尚未结束", interrupted=True))
+            await flow.close()
+            assert context.history.as_messages() == []
+            assert await context.bridge.poll(wait=0) == []
+        finally:
+            await flow.close()
+            await context.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("same_packet", [False, True])
+def test_provider_interruption_waits_for_turn_complete_before_finalizing_input(tmp_path, same_packet):
+    from context.models import ContextRequest
+
+    async def scenario():
+        context, socket, flow = await open_flow(tmp_path, shared=True, probability=0,
+            keywords=("机器人",), late_seconds=.01)
+        try:
+            await socket.deliver(audio_message(user_text="请记住我喜欢茶", interrupted=True,
+                                                done=same_packet))
+            proposal = flow.live.snapshot().current_proposal
+            if not same_packet:
+                await asyncio.sleep(.04)
+                assert context.history.as_messages() == []
+                assert await context.bridge.poll(wait=0) == []
+                prepared = await context.prepare_context(ContextRequest(flow.session,
+                    "original-speaker", f"{flow.live.live_session_id}:{proposal.turn_id}"))
+                assert not prepared.authorized_write_grants
+                await socket.deliver({"serverContent": {"turnComplete": True}})
+            events = await context.bridge.poll(wait=1)
+            assert len(events) == 1
+            assert events[0]["payload"]["user_text"] == "请记住我喜欢茶"
+            assert events[0]["payload"]["reply_text"] == ""
+        finally:
+            await flow.close()
+            await context.close()
+    asyncio.run(scenario())
+
+
 def test_live_close_releases_playback_when_completed_input_cannot_be_saved(tmp_path, monkeypatch):
     import sqlite3
 
@@ -469,4 +513,138 @@ def test_new_single_speaker_recovers_personal_grant_after_mixed_turn(tmp_path, b
         finally:
             await flow.close()
             await context.close()
+    asyncio.run(scenario())
+
+
+def test_server_interruption_waits_past_late_window_for_real_turn_complete(tmp_path):
+    """服务端打断输出不等于人的输入完成，晚转录窗口从真实轮次边界开始。"""
+    async def scenario():
+        context, socket, flow = await open_flow(tmp_path, shared=True, probability=0,
+            keywords=("机器人",), late_seconds=.02)
+        try:
+            await socket.deliver(audio_message(user_text="这是", text="尚未播放的回复"))
+            await socket.deliver({"serverContent": {"interrupted": True}})
+            # 有意越过晚转录窗口，验证interrupted不会冒充turnComplete启动定稿。
+            await asyncio.sleep(.08)
+            assert context.history.recent() == []
+            assert await context.bridge.poll(wait=0) == []
+            await socket.deliver({"serverContent": {
+                "inputTranscription": {"text": "同一个完整问题"}, "turnComplete": True}})
+            events = await context.bridge.poll(wait=1)
+            assert len(events) == 1
+            assert events[0]["payload"]["user_text"] == "这是同一个完整问题"
+            assert events[0]["payload"]["reply_text"] == ""
+            assert context.history.as_messages() == [
+                {"role": "user", "content": "这是同一个完整问题"}]
+        finally:
+            await flow.close()
+            await context.close()
+    asyncio.run(scenario())
+
+
+async def closing_agent(tmp_path, operation, **settings):
+    import json
+
+    from support.live_runtime import make_live_agent
+
+    started = asyncio.Event()
+    stopping = []
+    class CloseOnCompletion(Socket):
+        async def __anext__(self):
+            message = await super().__anext__()
+            if json.loads(message).get("serverContent", {}).get("turnComplete"):
+                stopping.append(asyncio.create_task(agent.stop_current_reply()
+                    if operation == "stop" else agent.leave()))
+                started.set()
+            return message
+    agent, playback, sockets = await make_live_agent(tmp_path, socket_factory=CloseOnCompletion,
+                                                    **settings)
+    await agent._live_flow.send_input("speaker", b"\0\x40" * 320, 16000)
+    return agent, playback, sockets, started, stopping
+
+
+@pytest.mark.parametrize("operation", ["stop", "leave"])
+def test_stop_before_live_confirmation_starts_preserves_completed_input(tmp_path, operation):
+    async def scenario():
+        agent, playback, sockets, started, stopping = await closing_agent(tmp_path, operation)
+        async def unconfirmed(timeout=30):
+            raise AssertionError("关闭必须先于播放确认开始")
+        playback.wait_tts_complete = unconfirmed
+        try:
+            await sockets[0].queue.put((audio_message(user_text="完整用户问题", text="未确认回复", done=True), None))
+            await asyncio.wait_for(started.wait(), 1)
+            await asyncio.wait_for(stopping[0], 1)
+            assert agent.memory.as_messages() == [{"role": "user", "content": "完整用户问题"}]
+            assert agent.memory.recent()[0]["user_key"] == "speaker"
+            assert sockets[0].closed
+        finally:
+            await agent.stop()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("operation", ["stop", "leave"])
+def test_retired_live_input_write_failure_does_not_prevent_resource_stop(tmp_path, monkeypatch, operation):
+    import sqlite3
+
+    from support.live_runtime import make_live_agent
+
+    async def scenario():
+        agent, playback, sockets = await make_live_agent(tmp_path, reply_probability_percent=0,
+            force_reply_keywords=["机器人"])
+        await sockets[0].deliver(audio_message(user_text="已结束用户问题", text="缓存草稿", done=True))
+        connect = sqlite3.connect
+        def failing_history(*args, **kwargs):
+            db = connect(*args, **kwargs)
+            db.set_authorizer(lambda operation, table, *_: sqlite3.SQLITE_DENY
+                if operation == sqlite3.SQLITE_INSERT and table == "history" else sqlite3.SQLITE_OK)
+            return db
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(sqlite3, "connect", failing_history)
+                if operation == "stop":
+                    with pytest.raises(RuntimeError):
+                        await agent.stop_current_reply()
+                else:
+                    assert (await agent.leave())["ok"] is False
+            assert sockets[0].closed
+            assert playback.stops > 0
+            if operation == "leave":
+                assert not agent.channels.snapshot().confirmed
+        finally:
+            await agent.stop()
+    asyncio.run(scenario())
+
+
+def test_cancelled_leave_waits_for_accepted_input_write_and_preserves_cancellation(tmp_path, monkeypatch):
+    import threading
+
+    async def scenario():
+        agent, playback, sockets, started, stopping = await closing_agent(tmp_path, "leave",
+            reply_probability_percent=0, force_reply_keywords=["机器人"])
+        entered, release = threading.Event(), threading.Event()
+        finish = agent.context_service.finish_input
+        def blocked_write(input_ref):
+            entered.set()
+            assert release.wait(3)
+            return finish(input_ref)
+        monkeypatch.setattr(agent.context_service, "finish_input", blocked_write)
+        try:
+            await sockets[0].queue.put((audio_message(user_text="原房间已结束问题", done=True), None))
+            assert await asyncio.to_thread(entered.wait, 1)
+            await asyncio.wait_for(started.wait(), 1)
+            stopping[0].cancel()
+            await asyncio.sleep(0)
+            stopping[0].cancel()
+            await asyncio.sleep(0)
+            assert not stopping[0].done()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await stopping[0]
+            assert agent.memory.as_messages() == [{"role": "user", "content": "原房间已结束问题"}]
+            assert sockets[0].closed and playback.stops > 0
+            assert not agent.channels.snapshot().confirmed
+        finally:
+            release.set()
+            await asyncio.gather(*stopping, return_exceptions=True)
+            await agent.stop()
     asyncio.run(scenario())

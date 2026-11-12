@@ -638,16 +638,18 @@ class LiveSession:
                 turn.audio.put_nowait((chunk, rate))
                 turn.buffered_bytes += len(chunk)
         if server.get("interrupted"):
-            turn.provider_boundary = True
             turn.state = "interrupted"
-            turn.provider_done.set()
+            # interrupted只结束输出；输入继续等待随后真正的turnComplete。
+            if turn.input_timer is not None and not turn.provider_done.is_set():
+                turn.input_timer.cancel()
+                turn.input_timer = None
+            turn.authorization_ready.set()
             if turn.job is not None:
                 self._spawn(turn.job.aclose())
             self._publish(LiveEvent("turn_finished", self.request.session, turn.ref,
                 turn.user_text, turn.speaker, action_id=turn.action_id, reason="interrupted",
                 input_complete=turn.input_complete))
-            self._schedule_input_finalization(turn)
-        elif server.get("turnComplete"):
+        if server.get("turnComplete"):
             turn.provider_boundary = True
             logger.info("event=dialogue.live.generated input_chars=%s output_chars=%s state=%s",
                         len(turn.user_text), len(turn.text), turn.state)

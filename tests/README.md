@@ -60,3 +60,5 @@ PR3 的旧 TurnSubmission/JSONL 回归已映射到当前 SQLite 事务回滚、`
 Live 边界回归覆盖 Hold 跨晚转录窗口继续等待、无真实边界的硬超时/断连不提交半句、Alice/Bob 同轮输入无错误归属，以及旧 PreparedContext 工具授权撤销。使用真实 LiveFlow/ContextService 与本地协议替身；等待输入定稿不以播放结束替代。
 
 同一回归入口还覆盖停止、退房、配置重建与账号重绑时的已完成 Hold 输入，以及事件未消费、来源已切换和真实 SQLite 写入失败后的资源回收与原来源重试。
+
+PR3 最新生命周期回归迁入 `app/test_live_input_finalization.py`：首次播放确认前取消保留原输入，真实 SQLite 拒写仍关闭模型/停止播放/实际退房，以及管理等待者重复取消后等待受理写入并传播取消。退休 `TurnSubmission`/JSONL 入口不恢复；同一契约由当前公开流程和事务台账验证。

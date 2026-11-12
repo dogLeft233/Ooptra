@@ -763,6 +763,20 @@ class VoiceCoordinator:
         return result
 
     async def _leave_locked(self, *, source: str = "system", action_id: str | None = None) -> dict[str, Any]:
+        cleanup = asyncio.create_task(self._leave_resources_locked(source=source, action_id=action_id),
+                                      name="app-voice-leave-resources")
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        result = cleanup.result()
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
+    async def _leave_resources_locked(self, *, source: str, action_id: str | None) -> dict[str, Any]:
         retired_error = await self._drain_retired_channels()
         if retired_error is not None:
             return {"ok": False, "error": retired_error}
@@ -777,13 +791,20 @@ class VoiceCoordinator:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(self.duplex.enable_listen(False), 1.0)
         aclose = getattr(self.backend, "aclose", None)
+        session = self.channels.snapshot().session
+        close_failed = False
         if aclose is not None:
             try:
                 await self._close_live_flow()
+            except Exception:
+                # LiveFlow已观察原输入保存失败，仍须完成模型和渠道资源收尾。
+                close_failed = True
+            try:
                 await asyncio.wait_for(aclose(), 3.0)
-            except Exception as exc:
-                return {"ok": False, "error": f"voice session close failed: {exc}"}
-        session = self.channels.snapshot().session
+            except Exception:
+                close_failed = True
+                logger.exception("event=voice.session.close_failed session_id=%s",
+                                 session.session_id if session is not None else "")
         if session is not None:
             outcome = await self.channels.execute(LeaveRoom(action_id or uuid4().hex, session))
             if outcome.status != "completed":
@@ -797,7 +818,7 @@ class VoiceCoordinator:
         self._speaking = False
         self._rearm_barge_in()
         self.ingress.reset()
-        return {"ok": True}
+        return ({"ok": False, "error": "voice session close failed"} if close_failed else {"ok": True})
 
     def status(self) -> dict[str, Any]:
         from app.flows import subtitle_receipt
@@ -855,13 +876,18 @@ class VoiceCoordinator:
         self._operation_epoch += 1
         await self._stop_round_worker()
         await self._cancel_reply_tasks()
-        if self.live_mode:
-            await self._close_live_flow()
-            await asyncio.wait_for(self.backend.aclose(), 3.0)
-        if self.duplex is not None:
-            await self.duplex.stop_tts()
-        self._speaking = False
-        self._reply_generating = False
+        try:
+            if self.live_mode:
+                await self._close_live_flow()
+        finally:
+            try:
+                if self.live_mode:
+                    await asyncio.wait_for(self.backend.aclose(), 3.0)
+            finally:
+                if self.duplex is not None:
+                    await self.duplex.stop_tts()
+                self._speaking = False
+                self._reply_generating = False
         if self.live_mode:
             # Gemini interrupt is intentionally a no-op. A fresh session is the
             # only safe boundary after a timed-out reply; old audio stays muted.

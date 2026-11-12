@@ -100,7 +100,7 @@ async def settle(rounds=40):
         await asyncio.sleep(0)
 
 
-async def make_live_agent(tmp_path, *, subtitle_target=None, **overrides):
+async def make_live_agent(tmp_path, *, subtitle_target=None, socket_factory=Socket, **overrides):
     defaults = dict(enabled=True, backend="gemini_live", gemini_api_key="synthetic", reply_probability_percent=100,
                     voice_leave_enabled=False, voice_volume_enabled=False, listen_only_uids=[],
                     memory_path=str(tmp_path / "memory.jsonl"))
@@ -122,7 +122,7 @@ async def make_live_agent(tmp_path, *, subtitle_target=None, **overrides):
                              subtitle_target=lambda:subtitle_target)
     sockets = []
     async def connect(*args, **kwargs):
-        socket = Socket()
+        socket = socket_factory()
         sockets.append(socket)
         return socket
     await agent.backend.aclose()
