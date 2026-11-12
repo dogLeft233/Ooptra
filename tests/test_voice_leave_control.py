@@ -127,8 +127,7 @@ def test_disabled_or_non_departure_input_keeps_room(tmp_path, enabled, intent):
         agent, playback, model = await room_agent(tmp_path, leave=intent)
         agent.settings.voice_leave_enabled = enabled
         await spoken(playback)
-        await until(lambda: 'recognize' in model.calls)
-        await settle(100)
+        assert await agent.wait_for_reply_end(timeout=1)
         assert ('interpret' in model.calls) is enabled
         assert agent.status()['joined'] and agent.test_platform.voice.leaves == 0
         assert not model.generated.is_set()

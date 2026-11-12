@@ -7,7 +7,14 @@ from types import SimpleNamespace
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
-from support.live_runtime import Playback, Socket, audio_message, make_live_agent, settle
+from support.live_runtime import (
+    Playback,
+    Socket,
+    audio_message,
+    make_live_agent,
+    settle,
+    wait_until,
+)
 
 from app.voice import VoiceCoordinator
 from operations.models import VoiceAgentSettings, VoiceApiSettings
@@ -122,12 +129,14 @@ def test_live_barge_in_drops_remaining_audio_until_next_turn(tmp_path):
         agent, playback, sockets = await make_live_agent(tmp_path, barge_in=True, barge_in_hold_ms=20)
         try:
             await sockets[0].deliver(audio_message(b"\1\0"))
+            await wait_until(lambda: playback.chunks == [b"\1\0"])
             assert playback.chunks == [b"\1\0"]
             await playback.capture("user", b"\x00\x40" * 320)
             await sockets[0].deliver(audio_message(b"\2\0"))
             assert playback.chunks == []
             await sockets[0].deliver({"serverContent": {"turnComplete": True}})
             await sockets[0].deliver(audio_message(b"\3\0"))
+            await wait_until(lambda: playback.chunks == [b"\3\0"])
             assert playback.chunks == [b"\3\0"]
         finally:
             await agent.leave()

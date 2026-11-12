@@ -131,7 +131,8 @@ async def run_cascade(*, backend, context, behavior, channel,
                       current, on_playing, observations=None, reply_text_to_channel: bool = False,
                       subtitle_target: RoomTarget | None = None, recognition=None) -> FlowResult:
     """取消必结尝试；执行后的失败使用渠道事实，执行前失败使用NotExecuted。"""
-    revision = context.snapshot(session.room_target).revision
+    revision = (recognition.trigger.context_version if recognition else
+                (await context.snapshot_async(session.room_target)).revision)
     trigger = recognition.trigger if recognition else AudioReady(trigger_id, session, user_key, revision)
     if trigger.session != session or trigger.user_key != user_key or trigger.trigger_id != trigger_id:
         return FlowResult(reason="stale_recognition")
@@ -170,7 +171,7 @@ async def run_cascade(*, backend, context, behavior, channel,
             trace_reason = "recognition_failed"
             end_reason = recognized.reason or "recognition_failed"
             return FlowResult(reason=end_reason)
-        revision = context.observe(Observation(
+        revision = await context.observe_async(Observation(
             trigger_id, session, session.session_id, permit.attempt_number,
             "recognized", text=recognized.text, user_key=user_key, input_ref=trigger_id))
         control = None
@@ -194,11 +195,16 @@ async def run_cascade(*, backend, context, behavior, channel,
             if priority.reason != "control_disabled":
                 trace_reason = end_reason = priority.reason
                 return FlowResult(user_text=recognized.text, reason=priority.reason)
+        # 上下文拥有历史与版本的一致性；本轮判断和生成共用一次准备结果。
+        # 原会话、说话者和 input_ref 不随其他成员的观察改变。
+        prepared = await context.prepare_context(ContextRequest(session, user_key, trigger_id))
+        if not current():
+            end_reason = "superseded"
+            return FlowResult(reason=end_reason)
+        revision = prepared.version
         assessment = None
         capabilities = getattr(backend, "capabilities", None)
         if recognized.text.strip() and capabilities is not None and capabilities().semantic_reply:
-            prepared = await context.prepare_context(ContextRequest(
-                session, user_key, trigger_id, known_revision=revision))
             assessment_started = time.monotonic()
             assessment = await backend.assess_reply(ControlInput(
                 recognized.text, trigger_id, session, user_key, permit.attempt_id),
@@ -209,7 +215,6 @@ async def run_cascade(*, backend, context, behavior, channel,
             if not current():
                 end_reason = "superseded"
                 return FlowResult(reason=end_reason)
-            revision = prepared.version
         decision = behavior.decide(RecognitionObserved(
             trigger, permit, recognized.text, revision, len(pcm)/2/sample_rate*1000, control, assessment), settings)
         if isinstance(decision, NoAction):
@@ -224,9 +229,6 @@ async def run_cascade(*, backend, context, behavior, channel,
         trace_reason = decision.reason or "reply"
         if observations is not None:
             observations.trace(session, trigger_id, user_key, "deciding", decision="speak", reason=trace_reason, outcome="pending")
-        if prepared is None:
-            prepared = await context.prepare_context(ContextRequest(
-                session, user_key, trigger_id, known_revision=intent.context_version))
         if not current():
             end_reason = "superseded"
             return FlowResult(reason=end_reason)

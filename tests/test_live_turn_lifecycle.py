@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from support.dialogue_fixtures import gemini_backend as GeminiLiveBackend
-from support.live_runtime import audio_message, make_live_agent, settle
+from support.live_runtime import audio_message, make_live_agent, settle, wait_until
 
 from dialogue import adapt_websocket as _AiohttpWs
 from operations.models import VoiceAgentSettings
@@ -20,8 +20,10 @@ def test_interleaved_chunks_trigger_barge_in_once(tmp_path):
     async def run():
         agent, playback, sockets = await make_live_agent(tmp_path, barge_in=True, barge_in_hold_ms=0)
         try:
-            for _ in range(CHUNKS):
+            for index in range(CHUNKS):
                 await sockets[0].deliver(audio_message())
+                if index == 0:
+                    await wait_until(lambda: bool(playback.chunks))
                 await playback.capture("u1", FRAME)
             assert playback.stops == 1
             assert len([event for event in sockets[0].sent if "audio" in event.get("realtimeInput", {})]) == CHUNKS
@@ -35,6 +37,7 @@ def test_speaking_is_false_after_playback_completion(tmp_path):
         agent, playback, sockets = await make_live_agent(tmp_path, barge_in=True, barge_in_hold_ms=0)
         try:
             await sockets[0].deliver(audio_message(text="回答"))
+            await wait_until(lambda: bool(playback.chunks))
             assert playback.chunks
             await sockets[0].deliver({"serverContent": {"turnComplete": True}})
             assert await agent.wait_for_reply_end(timeout=1)
@@ -85,6 +88,7 @@ def test_barge_in_rearms_for_the_next_turn(tmp_path):
         try:
             for expected in (1, 2):
                 await sockets[0].deliver(audio_message())
+                await wait_until(lambda: bool(playback.chunks))
                 await playback.capture("u1", FRAME)
                 assert playback.stops == expected
                 await sockets[0].deliver({"serverContent": {"turnComplete": True}})
@@ -98,6 +102,7 @@ def test_server_side_interrupted_clears_local_playback(tmp_path):
         agent, playback, sockets = await make_live_agent(tmp_path)
         try:
             await sockets[0].deliver(audio_message())
+            await wait_until(lambda: bool(playback.chunks))
             assert playback.chunks
             await sockets[0].deliver({"serverContent": {"interrupted": True}})
             assert await agent.wait_for_reply_end(timeout=1)

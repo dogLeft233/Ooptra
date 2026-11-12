@@ -168,7 +168,10 @@ class AliyunDeepSeekBackend(MimoCascadeBackend):
             )}, {"role": "user", "content": json.dumps({
                 "bot_persona": context.persona,
                 "aliases": aliases,
-                "history": [{"role": row.role, "content": row.content[:1500]} for row in context.history[-10:]],
+                "history": [{"role": row.role, "content": row.content[:1500],
+                             "speaker": row.user_key if row.role == "user" else "assistant",
+                             "ts": row.ts} for row in context.history[-10:]],
+                "current_speaker": input.user_key,
                 "current_utterance": input.text[:4000],
             }, ensure_ascii=False)}],
             "response_format": {"type": "json_object"}, "max_tokens": 128,

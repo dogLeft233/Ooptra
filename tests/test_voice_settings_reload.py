@@ -185,7 +185,8 @@ def test_reload_settings_rebuilds_memory_and_rewires_backend(monkeypatch, tmp_pa
                     tools=rt.agent.context_service.tools(prepared)))
                 assert b''.join([frame.pcm16 async for frame in audio.frames()]) == b'\1\0' * 20
                 assert [message['content'] for message in captured[0]['messages']
-                        if message['role'] == 'user'] == ['new history', 'current']
+                        if message['role'] == 'user'] == [
+                            json.dumps({'speaker': 'member', 'text': 'new history'}, ensure_ascii=False), 'current']
                 assert [row['content'] for row in create_memory(original_history_path).recent()] == ['old history']
             finally:
                 await rt.stop()

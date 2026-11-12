@@ -85,8 +85,10 @@ class SourceBridge(Protocol):
 class ContextService(Protocol):
     """权威台账与情境入口。
 
-    observe/record_output 是有限同步本地事务；耗时调用可交线程，调用方需在原
-    事件循环有序提交观察。prepare_context 捕获不可变原来源，不隐式切换来源。
+    运行期通过observe_async/snapshot_async及prepare_context处理磁盘等待；
+    observe/snapshot/history是同步兼容入口，仍可能等待锁和磁盘，仅供离线调用，
+    不与异步观察并发使用。record_output是有限同步事务，可由调用方安排线程。
+    prepare_context 捕获不可变原来源，不隐式切换来源。
     同 action/input ID 异内容报 ValueError；关闭后不接收新提交，已提交记录可恢复。
     tools 返回本次准备绑定端口，写工具必须使用 context 签发的有效授权。
     """
@@ -118,7 +120,35 @@ class ContextService(Protocol):
         ...
     def observe(self, observation: Observation) -> ContextRevision: ...
     def snapshot(self, scope: RoomTarget) -> SituationSnapshot: ...
-    async def prepare_context(self, request: ContextRequest) -> PreparedContext: ...
+    async def observe_async(self, observation: Observation) -> ContextRevision:
+        """所属loop有界受理观察，等待真实落盘后安装投影并返回版本。
+
+        至多128份在途（包括正在写入），满载抛BufferError，关闭后拒绝。
+        按受理顺序串行提交；乱序输入仍落盘但不回退投影。磁盘等待在线程，
+        可变情境仅在loop安装。调用者取消不撤销已受理工作；close排空并观察失败。
+        未开始执行协程前取消不受理。已受理失败由上下文安全记录唯一堆栈，
+        向等待者抛ObservationFailed；应用只记录自身流程失败终态，不重复堆栈。
+        """
+        ...
+    async def snapshot_async(self, scope: RoomTarget) -> SituationSnapshot:
+        """不阻塞loop地读取原范围；与异步观察串行，历史和台账版本同一事务。
+
+        取消仍收完已开始的磁盘读取；close等待资源收尾。同步observe/snapshot及
+        history兼容入口仍可等待磁盘/锁，仅供离线或由调用者安排阻塞执行。
+        """
+        ...
+    async def prepare_context(self, request: ContextRequest) -> PreparedContext:
+        """固定原房间/来源，准备近15分钟至多max_turns条多人历史并保留身份/时间。
+
+        不按request.user_key过滤房间现场；精确排除本次input_ref，个人历史查询不变。
+        当前input_ref的完整原输入才可签发记忆授权；指定说话者必须与原输入一致。
+        不指定known_revision时一次取得当前准备结果及其版本；后续观察不改写该结果。
+        指定known_revision用于严格版本约束；先查快照不能预留版本或保证随后准备成功。
+        已知版本冲突/关闭失败；台账读取不阻塞loop，与异步观察串行；
+        历史和台账版本来自同一事务。首次await（包括内部锁等待）前固定原来源；
+        等待期间换绑不改投新来源，也不为原输入向新来源签授权。不等待外部来源网络。
+        """
+        ...
     def record_output(self, record: OutputRecord) -> RecordReceipt: ...
     def delivery(self, delivery_id: str) -> DeliveryStatus: ...
     async def recall(self, request: RecallRequest) -> dict[str, Any]: ...

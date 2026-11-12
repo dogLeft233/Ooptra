@@ -38,6 +38,7 @@ from channels.api import Channel, Duplex, PlatformDirectory
 from channels.models import AudioInputPolicy, JoinRoom, LeaveRoom, RoomTarget, VadvConfig
 from channels.models import RoomOperation as VoiceOperation
 from context import create_context_service
+from context.models import ObservationFailed
 from core.audio import pcm16_rms
 from dialogue import create_backend
 from dialogue.api import (
@@ -677,8 +678,6 @@ class VoiceCoordinator:
         assert result.session is not None
         self.behavior.start_session(result.session)
         from context.models import Observation
-        self.context_service.observe(Observation("session:"+result.session.session_id,
-            result.session, result.session.session_id, 0, "session", complete=False))
         self.ingress.reset()
         self.output_controls.reset_mute()
         self._voice_suspended = False
@@ -686,6 +685,8 @@ class VoiceCoordinator:
         self._speaking = False
         self._rearm_barge_in()
         try:
+            await self.context_service.observe_async(Observation("session:"+result.session.session_id,
+                result.session, result.session.session_id, 0, "session", complete=False))
             await self.context_bridge.prepare(area, channel)
             await duplex.enable_listen(True)
 
@@ -1142,6 +1143,9 @@ class VoiceCoordinator:
                             applied = await self._apply_volume_command(control.volume)
                             if not self.output_muted:
                                 await self.speak_text(applied.get("message") or "语音输出调整失败")
+            except ObservationFailed as exc:
+                logger.error("event=voice.flow.failed session_id=%s input_ref=%s reason=context_observation",
+                             exc.session.session_id, exc.input_ref)
             except Exception:
                 logger.exception("event=voice.flow.failed session_id=%s", session.session_id)
 

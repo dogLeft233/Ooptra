@@ -99,6 +99,14 @@ async def settle(rounds=40):
         await asyncio.sleep(0)
 
 
+async def wait_until(predicate, timeout=1):
+    """等待真实可观察条件；超时仅作失败上限，不按调度轮数猜测磁盘完成。"""
+    async def wait():
+        while not predicate():
+            await asyncio.sleep(.001)
+    await asyncio.wait_for(wait(), timeout)
+
+
 async def make_live_agent(tmp_path, *, subtitle_target=None, **overrides):
     defaults = dict(enabled=True, backend="gemini_live", gemini_api_key="synthetic", reply_probability_percent=100,
                     voice_leave_enabled=False, voice_volume_enabled=False, listen_only_uids=[],

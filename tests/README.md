@@ -54,3 +54,9 @@ python -m pytest -v -o faulthandler_timeout=60
 语义接话：`tests/behavior/test_semantic_replies.py` 验证无抽样、叫名兜底和输入绑定；`tests/dialogue/test_reply_assessment.py` 验证真实HTTP与严格JSON边界；`tests/test_aliyun_deepseek.py` 贯通识别、语义候选、真实行为/上下文、生成与播放。外部ASR/TTS/LLM服务在本地协议服务器替代，真实叫名声学效果另行验证。
 
 逐句排障：`tests/context/test_voice_traces.py` 验证真实SQLite分页、重启、输入身份、记忆隔离、有界受理及取消关闭排空；`tests/app/test_trace_write_isolation.py` 验证真实SQLite写锁不阻塞事件循环；`tests/app/test_live_unplayed_trace.py` 验证真实Live过期且未播放轮次诊断终态；`tests/app/test_voice_transcript_api.py` 验证认证HTTP与参数边界；`tests/test_aliyun_deepseek.py` 验证真实协议/应用采集、未选中输入的最终转写及结束原因；`tests/browser/transcript-timeline.cjs` 验证正式资源中的昵称、文字、原因、播放终态、分页、新页缺口、旧页未完记录刷新、失败保留、迟到请求、XSS和窄屏。`tests/app/test_output_commit_lifecycle.py` 验证播放完成后取消SQLite提交等待仍保留真实播放终态。
+
+多人现场：`tests/context/test_room_conversation.py` 验证房间近期历史、身份、乱序和个人记忆隔离；`tests/test_aliyun_deepseek.py` 验证忙碌期间输入保留，以及说话者资料实际进入接话判断与正式生成HTTP请求。
+
+级联上下文交错：`tests/app/test_cascade_context_interleavings.py` 经公开准备入口控制新观察、取消和流程失效顺序，验证原回复、控制优先及语义/非语义两条路径；使用真实上下文和 SQLite，不连接真实模型或房间。
+
+异步观察：`tests/context/test_async_observations.py` 验证受理容量、取消、关闭、乱序和来源换绑；`tests/app/test_recognition_write_isolation.py` 使用真实SQLite写锁验证识别、快照及准备不阻塞事件循环，并验证事务失败诊断和进房失败/取消清理。

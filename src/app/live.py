@@ -19,7 +19,7 @@ from behavior.models import (
     resolve_volume_command,
 )
 from channels.models import ActionOutcome, PlaybackRequest, PlaybackResult, SetOutput
-from context.models import ContextRequest, Observation
+from context.models import ContextRequest, Observation, ObservationFailed
 from dialogue import audio_output
 from dialogue.models import Allow, AudioInput, ControlResolution, Hold, LiveSessionRequest, Reject
 
@@ -49,6 +49,7 @@ class LiveFlow:
         self._cancelled_controls = set()
         self._active_turns = set()
         self._failures = []
+        self._preparing = 0
 
     async def start(self):
         prepared = await self.context.prepare_context(ContextRequest(self.session))
@@ -60,13 +61,20 @@ class LiveFlow:
 
     def _observe(self, done):
         if not done.cancelled() and done.exception() is not None:
-            self._failures = [*self._failures[-7:], type(done.exception()).__name__]
+            error = done.exception()
+            if isinstance(error, ObservationFailed):
+                # 输入提交已有明确失败终态；它不表示模型/播放资源未收尾，
+                # 不能再作为关闭失败阻止实际退房。
+                logger.error("event=voice.live.flow_failed session_id=%s input_ref=%s reason=context_observation",
+                             error.session.session_id, error.input_ref)
+                return
+            self._failures = [*self._failures[-7:], type(error).__name__]
             logger.error("event=voice.live.flow_failed session_id=%s", self.session.session_id,
-                         exc_info=done.exception())
+                         exc_info=error)
 
     @property
     def busy(self):
-        return bool(self._outputs)
+        return bool(self._outputs) or self._preparing > 0
 
     async def send_input(self, user_key, pcm, rate):
         if self.live is not None and self.current() and not self._closed:
@@ -76,6 +84,13 @@ class LiveFlow:
         return f"{event.proposal.live_session_id}:{event.proposal.turn_id}"
 
     async def _prepare(self, event, *, complete=False):
+        self._preparing += 1
+        try:
+            return await self._prepare_context(event, complete=complete)
+        finally:
+            self._preparing -= 1
+
+    async def _prepare_context(self, event, *, complete=False):
         assert self.live is not None
         key = self._key(event)
         if key not in self._metadata and len(self._metadata) >= 128:
@@ -89,7 +104,7 @@ class LiveFlow:
             if self.observations is not None:
                 self.observations.trace(self.session, key, event.user_key, "recognized", text=event.text,
                     text_final=complete, reason="awaiting_decision")
-            self.context.observe(Observation(f"{key}:{self._sequence}", self.session,
+            await self.context.observe_async(Observation(f"{key}:{self._sequence}", self.session,
                 self.live.live_session_id, self._sequence, "recognized", event.text,
                 event.user_key, key, complete=complete))
         prepared = await self.context.prepare_context(ContextRequest(self.session, event.user_key, key))

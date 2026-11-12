@@ -50,7 +50,10 @@ def test_real_cascade_http_prompt_contains_old_equal_input_and_current_input_onc
                 sample_rate=16000, limit=0, settings=ReplySettings(), interpret_controls=False,
                 current=lambda:True, on_playing=lambda _:None)
             assert result.outcome.status == "completed"
-            assert [[message["content"] for message in body["messages"] if message["role"] == "user"] for body in requests] == [["你好", "你好"]]
+            human = [row['content'] for row in requests[0]['messages'] if row['role'] == 'user']
+            assert len(human) == 2
+            assert json.loads(human[0]) == {'speaker': 'u', 'text': '你好'}
+            assert human[1] == '你好'
             assert [row["content"] for row in context.history.recent()] == ["你好", "你好", "你好呀"]
         finally:
             await backend.aclose()
