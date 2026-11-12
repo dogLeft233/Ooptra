@@ -45,3 +45,5 @@ resolve_control仅转换实际结果，不执行SDK。scheduled仅表示已安�
 待选轮次在真实供应商边界前使用 `provider_turn_seconds` 硬等待（默认/最大60秒），不能用迟到转录窗口替代；收到边界后才开启 `late_transcription_seconds`。本地超时/断连/取消的 turn_finished 只解挂，`input_complete` 为假时不宣称整句完成。工具授权的有界输入定稿仍经 input_finalized/authorize_input 交接。
 
 输入成员发生混合时，该轮 speaker 不可恢复地清空，撤下已交授权并以 updated 传播身份变化；原表达上下文保持冻结，未来记忆调用不能继续使用旧身份。
+
+`aclose` 回收资源并返回至多128份已有真实轮次边界或已定稿的用户事实，包含已收到的晚转录；不等待未来转录，不交付缓存助手回复或未结束片段。重复关闭保留同一输入身份，由应用按原来源幂等提交。

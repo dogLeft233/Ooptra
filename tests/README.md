@@ -58,3 +58,5 @@ PR3 的旧 TurnSubmission/JSONL 回归已映射到当前 SQLite 事务回滚、`
 后续上游双存储故障矩阵在当前单 SQLite 设计中映射为 `test_output_commit_lifecycle.py` 的真实投递 SQL 故障/取消/重试：已观察输入不丢失，失败输出事务回滚，原来源恢复采集一次。第九轮拥塞回归覆盖关闭后九句均只有用户且原scope投递各一次，不恢复旧 JSONL/outbox 双写能力。
 
 Live 边界回归覆盖 Hold 跨晚转录窗口继续等待、无真实边界的硬超时/断连不提交半句、Alice/Bob 同轮输入无错误归属，以及旧 PreparedContext 工具授权撤销。使用真实 LiveFlow/ContextService 与本地协议替身；等待输入定稿不以播放结束替代。
+
+同一回归入口还覆盖停止、退房、配置重建与账号重绑时的已完成 Hold 输入，以及事件未消费、来源已切换和真实 SQLite 写入失败后的资源回收与原来源重试。

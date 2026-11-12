@@ -77,7 +77,7 @@ class LiveFlow:
     def _key(self, event):
         return f"{event.proposal.live_session_id}:{event.proposal.turn_id}"
 
-    async def _prepare(self, event, *, complete=False):
+    def _capture_input(self, event, *, complete=False):
         assert self.live is not None
         key = self._key(event)
         if key not in self._metadata and len(self._metadata) >= 128:
@@ -91,7 +91,13 @@ class LiveFlow:
         if not event.internal:
             self.context.observe(Observation(f"{key}:{self._sequence}", self.session,
                 self.live.live_session_id, self._sequence, "recognized", event.text,
-                event.user_key, key, complete=complete))
+                event.user_key, key, complete=complete,
+                context_ref=self._prepared.get(key, self._initial).context_ref))
+        return key
+
+    async def _prepare(self, event, *, complete=False):
+        assert self.live is not None
+        key = self._capture_input(event, complete=complete)
         prepared = await self.context.prepare_context(ContextRequest(self.session, event.user_key, key))
         if not self.current() or self._closed:
             return None
@@ -368,13 +374,37 @@ class LiveFlow:
         if reader is not None and reader is not current:
             reader.cancel()
             await asyncio.gather(reader, return_exceptions=True)
+        failures = []
+        completed_inputs = ()
+        close_cancelled = None
+        try:
+            completed_inputs = await self.live.aclose() if self.live is not None else ()
+        except asyncio.CancelledError as exc:
+            close_cancelled = exc
+        except Exception as exc:
+            failures.append(exc)
+            logger.exception('event=voice.live.session_close_failed session_id=%s',
+                             self.session.session_id)
+        for event in completed_inputs:
+            try:
+                self._capture_input(event, complete=True)
+            except Exception as exc:
+                failures.append(exc)
+                logger.exception('event=voice.live.input_capture_failed session_id=%s',
+                                 self.session.session_id)
         outputs = tuple(task for task in self._outputs if task is not current)
         for task in outputs:
             task.cancel()
         await asyncio.gather(*outputs, return_exceptions=True)
         await asyncio.gather(*tuple(self._input_commits), return_exceptions=True)
-        if self.live is not None:
-            await self.live.aclose()
+        from app.flows import finish_input
+        for event in completed_inputs:
+            try:
+                await finish_input(self.context, self._key(event))
+            except Exception as exc:
+                failures.append(exc)
+                logger.exception('event=voice.live.input_commit_failed session_id=%s',
+                                 self.session.session_id)
         for future in self._manual.values():
             if not future.done():
                 future.cancel()
@@ -383,5 +413,9 @@ class LiveFlow:
         self._prepared.clear()
         self._control_commands.clear()
         self._finalized.clear()
+        if close_cancelled is not None:
+            raise close_cancelled
+        if failures:
+            raise RuntimeError('Live会话关闭或完整输入保存失败') from failures[0]
         if self._failures:
             raise RuntimeError('Live流程存在未确认的失败：' + ','.join(self._failures))

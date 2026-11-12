@@ -54,6 +54,8 @@ class _Turn:
     rejection_reason: str = ""
     input_reported: bool = False
     speaker_ambiguous: bool = False
+    provider_boundary: bool = False
+    input_complete: bool = False
 
 
 class LiveSession:
@@ -123,7 +125,7 @@ class LiveSession:
         if self._turn is not None:
             turn = self._turn
             unfinished = not turn.input_reported
-            input_complete = turn.input_ready.is_set()
+            input_complete = turn.input_complete
             turn.state = "failed"
             turn.provider_done.set()
             turn.input_ready.set()
@@ -211,6 +213,9 @@ class LiveSession:
                                turn.speaker, turn.deadline, internal=turn.internal))
 
     def _finalize_input(self, turn: _Turn) -> None:
+        if self._closed.is_set():
+            return
+        turn.input_complete = True
         if not turn.input_ready.is_set():
             turn.input_ready.set()
             if not turn.provider_done.is_set() and turn.state == "allowed":
@@ -267,7 +272,7 @@ class LiveSession:
                 self._fail("turn_deadline")
             elif turn.state == "pending":
                 turn.state = "expired"
-                turn.input_reported = True
+                turn.input_reported = turn.input_complete = True
                 self._publish(LiveEvent("turn_finished", self.request.session, turn.ref,
                     turn.user_text, turn.speaker, reason="expired", internal=turn.internal,
                     input_complete=True))
@@ -350,7 +355,7 @@ class LiveSession:
                     turn.state = "cancelled"
                     self._publish(LiveEvent("turn_finished", self.request.session, turn.ref,
                         turn.user_text, turn.speaker, action_id=turn.action_id, reason="cancelled",
-                        input_complete=turn.input_ready.is_set()))
+                        input_complete=turn.input_complete))
         turn.job = ExpressionJob(intent.action_id, intent.session, produce,
                                  deadline=min(intent.deadline, turn.deadline))
         self._publish(LiveEvent("output_ready", self.request.session, turn.ref,
@@ -380,7 +385,7 @@ class LiveSession:
             await turn.job.aclose()
         self._publish(LiveEvent("turn_finished", self.request.session, turn.ref,
             turn.user_text, turn.speaker, action_id=turn.action_id, reason="interrupted",
-            input_complete=turn.input_ready.is_set()))
+            input_complete=turn.input_complete))
         await self._backend.interrupt()
 
     async def update_context(self, prepared, *, tools=None) -> ResolveReceipt:
@@ -591,7 +596,7 @@ class LiveSession:
                     self._finalize_input(turn)
                 if turn.state == "pending":
                     turn.state = "superseded"
-                    turn.input_reported = True
+                    turn.input_reported = turn.input_complete = True
                     self._publish(LiveEvent("turn_finished", self.request.session, turn.ref,
                         turn.user_text, turn.speaker, reason="superseded", input_complete=True))
                 self._last = turn
@@ -633,15 +638,17 @@ class LiveSession:
                 turn.audio.put_nowait((chunk, rate))
                 turn.buffered_bytes += len(chunk)
         if server.get("interrupted"):
+            turn.provider_boundary = True
             turn.state = "interrupted"
             turn.provider_done.set()
             if turn.job is not None:
                 self._spawn(turn.job.aclose())
             self._publish(LiveEvent("turn_finished", self.request.session, turn.ref,
                 turn.user_text, turn.speaker, action_id=turn.action_id, reason="interrupted",
-                input_complete=turn.input_ready.is_set()))
+                input_complete=turn.input_complete))
             self._schedule_input_finalization(turn)
         elif server.get("turnComplete"):
+            turn.provider_boundary = True
             logger.info("event=dialogue.live.generated input_chars=%s output_chars=%s state=%s",
                         len(turn.user_text), len(turn.text), turn.state)
             turn.provider_done.set()
@@ -691,7 +698,11 @@ class LiveSession:
                             task.cancel()
                     await asyncio.gather(getter, closed, return_exceptions=True)
 
-    async def aclose(self) -> None:
+    async def aclose(self) -> tuple[LiveEvent, ...]:
+        completed_inputs = tuple(LiveEvent("turn_finished", self.request.session, turn.ref,
+            turn.user_text, turn.speaker, action_id=turn.action_id, reason="closed", input_complete=True)
+            for turn in self._turns.values()
+            if not turn.internal and turn.user_text.strip() and (turn.provider_boundary or turn.input_complete))
         self._closed.set()
         self._state = "closed" if self._state != "failed" else "failed"
         for turn in self._turns.values():
@@ -709,3 +720,4 @@ class LiveSession:
         if self._backend._task_session is self:
             self._backend._task_session = None
             await self._backend.close()
+        return completed_inputs

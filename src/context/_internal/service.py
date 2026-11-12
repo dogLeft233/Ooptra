@@ -70,6 +70,10 @@ class ContextService:
         # Only explicit session observations can replace an active session. Delayed transcription remains history.
         active = (observation.session.session_id not in self._retired_sessions and
                   (current is None or current[0].session == observation.session or observation.kind == "session"))
+        if observation.context_ref is not None:
+            current_source = (self.bridge.session_id if self.bridge.context.get("ok") is True
+                              and self.bridge._room == asdict(observation.session.room_target) else "local")
+            active = active and observation.context_ref.binding_id == current_source
         if observation.kind == "recognized" and not observation.user_key:
             previous_input = self._inputs.get(observation.input_ref)
             projected = current[0] if current is not None else None
@@ -83,7 +87,17 @@ class ContextService:
         if observation.kind == "recognized" and observation.complete:
             source = self.bridge.context
             event = None
-            if (observation.text.strip() and source.get("ok") is True and self.bridge._room == asdict(observation.session.room_target)
+            if observation.context_ref is not None:
+                origin = self._bindings.get(observation.context_ref)
+                original_source = self._source_snapshots.get(observation.context_ref, {})
+                if (origin is not None and observation.text.strip()
+                        and ("memory_scopes" not in original_source
+                             or (original_source.get("memory_scopes") and original_source.get("provider")))):
+                    event = {"protocol": 1, "request_id": "input-" + observation.input_ref,
+                        **copy.deepcopy(origin), "operation": "commit", "created_at": time.time(),
+                        "payload": {"user_text": observation.text[:4000], "reply_text": "",
+                                    "speaker": observation.user_key, "interrupted": False}}
+            elif (observation.text.strip() and source.get("ok") is True and self.bridge._room == asdict(observation.session.room_target)
                     and ("memory_scopes" not in source or (source.get("memory_scopes") and source.get("provider")))):
                 event = self.bridge._event("commit", {"user_text": observation.text[:4000],
                     "reply_text": "", "speaker": observation.user_key, "interrupted": False})
@@ -150,7 +164,9 @@ class ContextService:
         self._grants = {key: grant for key, grant in self._grants.items() if grant.expires_at >= time.time()}
         grants: tuple[WriteAuthorization, ...] = ()
         observed = self._inputs.get(request.input_ref)
-        if active and observed and observed.complete and observed.session == request.session and observed.user_key and self._explicit_remember(observed.text):
+        if (active and observed and observed.complete and observed.session == request.session
+                and (observed.context_ref is None or observed.context_ref == ref)
+                and observed.user_key and self._explicit_remember(observed.text)):
             grant = WriteAuthorization(uuid.uuid4().hex, ref, request.input_ref, time.time() + 120)
             self._grants[grant.grant_id] = grant
             grants = (grant,)

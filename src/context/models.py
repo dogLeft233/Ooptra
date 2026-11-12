@@ -105,12 +105,17 @@ class Observation:
     input_ref: str = ""
     members: tuple[str, ...] = ()
     complete: bool = True
+    context_ref: ContextRef | None = None
 
     def __post_init__(self) -> None:
         if not self.event_id or not self.connection_id or type(self.sequence) is not int or self.sequence < 0:
             raise ValueError("观察需要事件、连接和非负序号")
         if self.kind not in {"session", "recognized", "members", "activity"}:
             raise ValueError("未知观察类型")
+        if self.context_ref is not None and not isinstance(self.context_ref, ContextRef):
+            raise ValueError("观察来源必须是ContextRef")
+        if self.context_ref is not None and self.context_ref.session != self.session:
+            raise ValueError("观察来源与渠道会话不一致")
         if self.kind == "recognized" and not self.input_ref:
             raise ValueError("识别观察需要稳定输入引用")
 

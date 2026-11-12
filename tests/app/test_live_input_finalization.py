@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import suppress
 
 import pytest
 from support.live_runtime import Socket, audio_message
@@ -300,5 +301,130 @@ def test_local_provider_deadline_without_boundary_never_commits_partial_input(tm
             assert await context.bridge.poll(wait=0) == []
         finally:
             await flow.close()
+            await context.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_closing_held_live_turn_keeps_only_provider_completed_input(tmp_path, completed):
+    async def scenario():
+        context, socket, flow = await open_flow(tmp_path, shared=True, probability=0,
+            keywords=("机器人",), late_seconds=2)
+        try:
+            await socket.deliver(audio_message(user_text="完整问句", text="缓存回复", done=completed))
+            if completed:
+                await socket.deliver({"serverContent": {"inputTranscription": {"text": "追加说明"}}})
+            await flow.close()
+            expected = [{"role": "user", "content": "完整问句追加说明"}] if completed else []
+            assert context.history.as_messages() == expected
+            events = await context.bridge.poll(wait=0)
+            assert len(events) == int(completed)
+            if completed:
+                assert events[0]["payload"]["reply_text"] == ""
+                assert events[0]["scope"]["memory_scopes"] == [{"umo": "group:original"}]
+        finally:
+            await flow.close()
+            await context.close()
+    asyncio.run(scenario())
+
+
+def test_live_close_releases_playback_when_completed_input_cannot_be_saved(tmp_path, monkeypatch):
+    import sqlite3
+
+    async def scenario():
+        context, socket, flow = await open_flow(tmp_path, shared=True, late_seconds=2)
+        await socket.deliver(audio_message(user_text="已结束的问题", text="缓存回答", done=True))
+        assert flow.busy
+        connect = sqlite3.connect
+        def failing_history(*args, **kwargs):
+            db = connect(*args, **kwargs)
+            def authorize(operation, table, *_):
+                return (sqlite3.SQLITE_DENY if operation == sqlite3.SQLITE_INSERT
+                        and table == "history" else sqlite3.SQLITE_OK)
+            db.set_authorizer(authorize)
+            return db
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(sqlite3, "connect", failing_history)
+                with pytest.raises((sqlite3.DatabaseError, RuntimeError)):
+                    await flow.close()
+            assert socket.closed
+            assert not flow.busy, "保存失败仍须回收播放任务"
+            # 首次保存故障仍应可查询；重试完成输入持久化。
+            with suppress(RuntimeError):
+                await flow.close()
+            assert context.history.as_messages() == [{"role": "user", "content": "已结束的问题"}]
+        finally:
+            await context.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("operation", ["stop", "leave", "refresh", "bind"])
+def test_live_lifecycle_keeps_provider_completed_held_input(tmp_path, operation):
+    from support.live_runtime import make_live_agent
+
+    async def scenario():
+        agent, _, sockets = await make_live_agent(tmp_path, reply_probability_percent=0,
+            force_reply_keywords=["机器人"])
+        try:
+            await agent._live_flow.send_input("Alice", b"\0\x40" * 320, 16000)
+            await sockets[0].deliver(audio_message(user_text="已结束的输入", text="缓存回复", done=True))
+            if operation == "refresh":
+                await agent.refresh(["gemini_model"])
+            elif operation == "leave":
+                assert (await agent.leave())["ok"]
+            else:
+                if operation == "bind":
+                    from types import SimpleNamespace
+                    async def leave(): pass
+                    agent.bind_bot(SimpleNamespace(voice=SimpleNamespace(backend=None, leave=leave)))
+                await agent.stop()
+            assert sockets[0].closed
+            assert agent.memory.as_messages() == [{"role": "user", "content": "已结束的输入"}]
+        finally:
+            await agent.stop()
+    asyncio.run(scenario())
+
+
+def test_stale_unconsumed_live_events_keep_input_in_original_source(tmp_path):
+    async def scenario():
+        context, socket, flow = await open_flow(tmp_path, shared=True, late_seconds=2)
+        try:
+            flow.current = lambda: False
+            await socket.deliver(audio_message(user_text="原来源的问题", text="尚未受理的输出", done=True))
+            await prepare_source(context.bridge, {"ok": True, "provider": "memory_companion",
+                "memory_scopes": [{"umo": "group:new"}]})
+            await flow.close()
+            assert context.history.as_messages() == [{"role": "user", "content": "原来源的问题"}]
+            events = await context.bridge.poll(wait=0)
+            assert len(events) == 1
+            assert events[0]["scope"]["memory_scopes"] == [{"umo": "group:original"}]
+            assert events[0]["payload"]["reply_text"] == ""
+        finally:
+            await flow.close()
+            await context.close()
+    asyncio.run(scenario())
+
+
+def test_live_close_releases_playback_when_socket_shutdown_fails(tmp_path):
+    async def scenario():
+        context, socket, flow = await open_flow(tmp_path, late_seconds=2)
+        await socket.deliver(audio_message(user_text="完整问题", text="缓存回答", done=True))
+        assert flow.busy
+        close_socket = socket.close
+        async def failing_close():
+            await close_socket()
+            raise OSError("synthetic socket shutdown failure")
+        socket.close = failing_close
+        try:
+            with pytest.raises((OSError, RuntimeError)):
+                await flow.close()
+            assert not flow.busy
+            socket.close = close_socket
+            with suppress(RuntimeError):
+                await flow.close()
+            assert context.history.as_messages() == [{"role": "user", "content": "完整问题"}]
+        finally:
+            socket.close = close_socket
             await context.close()
     asyncio.run(scenario())

@@ -11,6 +11,13 @@ def session(name="s1"):
     return SessionRef("run", "binding", name, RoomTarget("area", "room"))
 
 
+@pytest.mark.parametrize("origin", [{}, "source", 1])
+def test_observation_rejects_unparsed_source_reference(origin):
+    with pytest.raises(ValueError, match="ContextRef"):
+        Observation("input", session(), "wire", 1, "recognized", "hello", "u", "input",
+                    context_ref=origin)
+
+
 def test_output_and_delivery_survive_restart_without_duplicate_history(tmp_path):
     async def scenario():
         path = str(tmp_path / "voice_memory.jsonl")
