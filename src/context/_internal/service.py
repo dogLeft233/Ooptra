@@ -9,7 +9,7 @@ import uuid
 from collections import deque
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from channels.models import RoomTarget
 from context._internal.memory.ledger import ContextLedger, encoded
@@ -20,6 +20,7 @@ from context.models import (
     ContextRequest,
     ContextRevision,
     Observation,
+    ObservationFailed,
     OutputRecord,
     PreparedContext,
     RecallRequest,
@@ -37,7 +38,10 @@ ROOM_HISTORY_MAX_AGE_SECONDS = 15 * 60
 logger = logging.getLogger(__name__)
 
 
-async def _wait_owned(task: asyncio.Task[None]) -> None:
+T = TypeVar("T")
+
+
+async def _wait_owned(task: asyncio.Task[T]) -> T:
     cancelled = None
     while not task.done():
         try:
@@ -46,9 +50,10 @@ async def _wait_owned(task: asyncio.Task[None]) -> None:
             cancelled = exc
         except Exception:
             break
-    task.result()
+    result = task.result()
     if cancelled is not None:
         raise cancelled
+    return result
 
 
 class ContextService:
@@ -78,9 +83,13 @@ class ContextService:
         self._source_snapshots: dict[ContextRef, dict[str, Any]] = {}
         self._inputs: dict[str, Observation] = {}
         self._grants: dict[str, WriteAuthorization] = {}
+        self._async_lock = asyncio.Lock()
+        self._observation_tasks: set[asyncio.Task[ContextRevision]] = set()
+        self._observation_loop: asyncio.AbstractEventLoop | None = None
 
-    def _revision(self):
-        return ContextRevision(self._version, len(self._source_generations), self._ledger.revision())
+    def _revision(self, history_revision: int | None = None):
+        return ContextRevision(self._version, len(self._source_generations),
+                               self._ledger.revision() if history_revision is None else history_revision)
 
     def record_voice_trace(self, trace: VoiceTrace) -> None:
         if self._closed:
@@ -143,11 +152,74 @@ class ContextService:
     def observe(self, observation: Observation) -> ContextRevision:
         if self._closed:
             raise RuntimeError("上下文已关闭")
+        self._check_observation(observation)
+        revision = self._persist_observation(observation)
+        return self._install_observation(observation, revision)
+
+    def _check_observation(self, observation: Observation) -> None:
         fingerprint = encoded(asdict(observation))
+        if observation.event_id in self._seen and self._seen[observation.event_id] != fingerprint:
+            raise ValueError("观察 ID 内容冲突")
+
+    def _persist_observation(self, observation: Observation) -> int:
+        # 仅台账事务进入线程；投影、去重及授权始终由所属loop安装。
+        if observation.kind == "recognized" and observation.complete:
+            self._ledger.commit_input(observation.input_ref, ConfirmedTurn(observation.text, "", "silent", observation.user_key,
+                                       observation.session.room_target.channel),
+                                       room=encoded(asdict(observation.session.room_target)),
+                                       session=observation.session.session_id)
+        return self._ledger.revision()
+
+    async def observe_async(self, observation: Observation) -> ContextRevision:
+        if self._closed:
+            raise RuntimeError("上下文已关闭")
+        loop = asyncio.get_running_loop()
+        if self._observation_loop is not None and self._observation_loop is not loop:
+            raise RuntimeError("异步观察必须属于同一事件循环")
+        self._observation_loop = loop
+        if len(self._observation_tasks) >= 128:
+            raise BufferError("上下文观察容量已满")
+        task = asyncio.create_task(self._observe_owned(observation), name="context-observation")
+        self._observation_tasks.add(task)
+        task.add_done_callback(self._observe_observation_result)
+        # 取消只撤回调用者等待；受理后的写入及loop投影仍由上下文拥有。
+        waiter: asyncio.Future[ContextRevision] = loop.create_future()
+
+        def deliver(done: asyncio.Task[ContextRevision]) -> None:
+            if waiter.done():
+                return
+            if done.cancelled():
+                waiter.cancel()
+            elif (error := done.exception()) is not None:
+                waiter.set_exception(error)
+            else:
+                waiter.set_result(done.result())
+
+        task.add_done_callback(deliver)
+        return await waiter
+
+    def _observe_observation_result(self, task: asyncio.Task[ContextRevision]) -> None:
+        self._observation_tasks.discard(task)
+        if not task.cancelled():
+            task.exception()  # 即使调用者已取消，仍消费拥有任务的终态。
+
+    async def _observe_owned(self, observation: Observation) -> ContextRevision:
+        try:
+            async with self._async_lock:
+                self._check_observation(observation)
+                write = asyncio.create_task(asyncio.to_thread(self._persist_observation, observation))
+                revision = await _wait_owned(write)
+                return self._install_observation(observation, revision)
+        except Exception:
+            logger.exception("event=context.observation.failed session_id=%s input_ref=%s",
+                             observation.session.session_id, observation.input_ref)
+            raise ObservationFailed(observation.session, observation.input_ref) from None
+
+    def _install_observation(self, observation: Observation, history_revision: int) -> ContextRevision:
+        fingerprint = encoded(asdict(observation))
+        self._check_observation(observation)
         if observation.event_id in self._seen:
-            if self._seen[observation.event_id] != fingerprint:
-                raise ValueError("观察 ID 内容冲突")
-            return self._revision()
+            return self._revision(history_revision)
         room = encoded(asdict(observation.session.room_target))
         key = (observation.connection_id, observation.session.session_id)
         previous = self._sequences.get(key, -1)
@@ -156,8 +228,6 @@ class ContextService:
         active = (observation.session.session_id not in self._retired_sessions and
                   (current is None or current[0].session == observation.session or observation.kind == "session"))
         if observation.kind == "recognized" and observation.complete:
-            self._ledger.commit_input(observation.input_ref, ConfirmedTurn(observation.text, "", "silent", observation.user_key,
-                                       observation.session.room_target.channel), room=room, session=observation.session.session_id)
             self._inputs[observation.input_ref] = observation
             if len(self._inputs) > 4096:
                 self._inputs.pop(next(iter(self._inputs)))
@@ -166,7 +236,7 @@ class ContextService:
             self._seen.pop(next(iter(self._seen)))
         # 多人ASR乱序完成仍是输入事实；只阻止较旧观察回退当前投影。
         if observation.sequence <= previous:
-            return self._revision()
+            return self._revision(history_revision)
         self._sequences[key] = observation.sequence
         if active:
             self._version += 1
@@ -181,7 +251,7 @@ class ContextService:
             elif current:
                 self._retired_sessions.add(current[0].session.session_id)
             self._observations[room] = (projection, self._version)
-        return self._revision()
+        return self._revision(history_revision)
 
     def snapshot(self, scope: RoomTarget) -> SituationSnapshot:
         room = encoded(asdict(scope))
@@ -192,17 +262,35 @@ class ContextService:
                                  observation.text if observation else "",
                                  self._ledger.scoped_history(room=room))
 
+    async def snapshot_async(self, scope: RoomTarget) -> SituationSnapshot:
+        if self._closed:
+            raise RuntimeError("上下文已关闭")
+        async with self._async_lock:
+            room = encoded(asdict(scope))
+            read = asyncio.create_task(asyncio.to_thread(self._ledger.scoped_history_revision, room=room))
+            history, revision = await _wait_owned(read)
+            current = self._observations.get(room)
+            observation = current[0] if current else None
+            return SituationSnapshot(scope, observation.session if observation else None,
+                self._revision(revision), observation.members if observation else (),
+                observation.complete if observation else False,
+                observation.text if observation else "", history)
+
     async def prepare_context(self, request: ContextRequest) -> PreparedContext:
         if self._closed:
             raise RuntimeError("上下文已关闭")
-        self._loop = asyncio.get_running_loop()
-        # Capture before any await; source IDs and payloads must never follow a later global source.
-        revision = self._revision()
-        if request.known_revision is not None and request.known_revision != revision:
-            raise ValueError("准备请求的上下文版本已过期")
+        # 首次await包括等待内部锁；原来源不能跟随锁等待期间的换绑。
         bridge_id = self.bridge.session_id
         source = copy.deepcopy(self.bridge.context)
         bridge_room = dict(self.bridge._room)
+        async with self._async_lock:
+            return await self._prepare_context(request, bridge_id, source, bridge_room)
+
+    async def _prepare_context(self, request: ContextRequest, bridge_id: str,
+                               source: dict[str, Any], bridge_room: dict[str, Any]) -> PreparedContext:
+        self._loop = asyncio.get_running_loop()
+        # Capture before any await; source IDs and payloads must never follow a later global source.
+        observation_version, source_generation = self._version, len(self._source_generations)
         matches = bridge_room == asdict(request.session.room_target)
         active = source.get("ok") is True and matches
         if active:
@@ -215,12 +303,19 @@ class ContextService:
         else:
             ref = ContextRef(request.session, 0, "local")
         room = encoded(asdict(request.session.room_target))
-        history = self._ledger.scoped_history(room=room, source=ref.binding_id,
-                                              exclude_input_ref=request.input_ref, since=time.time() - ROOM_HISTORY_MAX_AGE_SECONDS)
+        read = asyncio.create_task(asyncio.to_thread(self._ledger.scoped_history_revision,
+            room=room, source=ref.binding_id, exclude_input_ref=request.input_ref,
+            since=time.time() - ROOM_HISTORY_MAX_AGE_SECONDS))
+        history, history_revision = await _wait_owned(read)
+        revision = ContextRevision(observation_version, source_generation, history_revision)
+        if observation_version != self._version:
+            raise ValueError("准备期间情境已变更")
+        if request.known_revision is not None and request.known_revision != revision:
+            raise ValueError("准备请求的上下文版本已过期")
         self._grants = {key: grant for key, grant in self._grants.items() if grant.expires_at >= time.time()}
         grants: tuple[WriteAuthorization, ...] = ()
         observed = self._inputs.get(request.input_ref)
-        if active and observed and observed.complete and observed.session == request.session and observed.user_key and (not request.user_key or observed.user_key == request.user_key) and self._explicit_remember(observed.text):
+        if active and bridge_id == self.bridge.session_id and observed and observed.complete and observed.session == request.session and observed.user_key and (not request.user_key or observed.user_key == request.user_key) and self._explicit_remember(observed.text):
             grant = WriteAuthorization(uuid.uuid4().hex, ref, request.input_ref, time.time() + 120)
             self._grants[grant.grant_id] = grant
             grants = (grant,)
@@ -300,12 +395,15 @@ class ContextService:
 
     async def _close_resources(self) -> None:
         try:
+            if self._observation_tasks:
+                await asyncio.gather(*tuple(self._observation_tasks), return_exceptions=True)
             if self._trace_writer is not None:
                 await _wait_owned(self._trace_writer)
         finally:
             await self.bridge.close()
-            # 先收完已受理诊断，再关闭共用台账；重复关闭观察同一任务。
-            await asyncio.to_thread(self._ledger.close)
+            # 同时等待正在进行的异步快照/准备读取，再关闭共用台账。
+            async with self._async_lock:
+                await asyncio.to_thread(self._ledger.close)
 
 
 class BoundTools:

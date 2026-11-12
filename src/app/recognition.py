@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from behavior.models import AttemptFinished, AttemptPermit, AttemptRejected, AudioReady
 from channels.models import IncomingAudio, UtteranceResult
-from context.models import Observation
+from context.models import Observation, ObservationFailed
 from dialogue.api import RecognitionStream
 from dialogue.models import AudioInput
 
@@ -36,27 +36,35 @@ class RecognitionInputs:
         self._prefix: dict[str, tuple[int, bytearray]] = {}
         self._closing: set[asyncio.Task] = set()
         self._rejected: set[str] = set()
+        self._generation = 0
 
     async def _watch(self, item: PreparedRecognition):
         try:
             result = await item.stream.result()
-            if result.status == "recognized":
-                try:
-                    self.host.context_service.observe(Observation(
-                        item.trigger.trigger_id, item.trigger.session, item.trigger.session.session_id,
-                        item.permit.attempt_number, "recognized", text=result.text,
-                        user_key=item.trigger.user_key, input_ref=item.trigger.trigger_id))
-                except Exception:
-                    logger.exception("event=context.recognition.failed session_id=%s input_ref=%s",
-                                     item.trigger.session.session_id, item.trigger.trigger_id)
-            self.host.observations.trace(item.trigger.session, item.trigger.trigger_id, item.trigger.user_key,
-                "recognized", text=result.text, reason="awaiting_decision" if result.text else result.status,
-                recognition_status=result.status)
         except asyncio.CancelledError:
             return
         except Exception:
             self.host.observations.trace(item.trigger.session, item.trigger.trigger_id, item.trigger.user_key,
                 "recognized", reason="recognition_failed", recognition_status="failed")
+            return
+        self.host.observations.trace(item.trigger.session, item.trigger.trigger_id, item.trigger.user_key,
+            "recognized", text=result.text, reason="awaiting_decision" if result.text else result.status,
+            recognition_status=result.status)
+        if result.status == "recognized":
+            try:
+                await self.host.context_service.observe_async(Observation(
+                    item.trigger.trigger_id, item.trigger.session, item.trigger.session.session_id,
+                    item.permit.attempt_number, "recognized", text=result.text,
+                    user_key=item.trigger.user_key, input_ref=item.trigger.trigger_id))
+            except BufferError:
+                logger.warning("event=context.recognition.rejected session_id=%s input_ref=%s reason=capacity",
+                               item.trigger.session.session_id, item.trigger.trigger_id)
+            except ObservationFailed:
+                # 已受理工作的堆栈归上下文，ASR诊断已保留成功事实。
+                return
+            except Exception:
+                logger.exception("event=context.recognition.rejected session_id=%s input_ref=%s",
+                                 item.trigger.session.session_id, item.trigger.trigger_id)
 
     async def _close(self, item: PreparedRecognition, reason: str):
         if item.expiry is not None and item.expiry is not asyncio.current_task():
@@ -76,6 +84,7 @@ class RecognitionInputs:
 
     def invalidate(self):
         """所属loop的同步断点通知；立即撤回租约，异步关闭由本拥有者观察。"""
+        self._generation += 1
         items = list(self._active.values()) + list(self._ready.values())
         self._active.clear()
         self._ready.clear()
@@ -125,7 +134,13 @@ class RecognitionInputs:
                 prefix.extend(cut.stream_pcm16)
                 if len(prefix) < audio.sample_rate*2*self.host._input_policy().min_utterance_ms/1000:
                     return ""
-                revision = self.host.context_service.snapshot(session.room_target).revision
+                generation = self._generation
+                revision = (await self.host.context_service.snapshot_async(session.room_target)).revision
+                if generation != self._generation:
+                    return ""  # reset已清理旧prefix，不能再清掉新窗口。
+                if self.host.channels.snapshot().session != session:
+                    self._prefix.pop(uid, None)
+                    return ""
                 trigger = AudioReady(uuid4().hex, session, "oopz:"+uid, revision)
                 permit = self.host.behavior.admit(trigger, self.host.settings.cascade_turn_limit)
                 self._prefix.pop(uid, None)

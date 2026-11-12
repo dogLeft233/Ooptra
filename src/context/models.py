@@ -80,6 +80,19 @@ class ContextRevision:
     history_revision: int = 0
 
 
+class ObservationFailed(RuntimeError):
+    """已受理观察失败；上下文已按原会话记录唯一异常堆栈。
+
+    消费方记录自己的流程终态即可，不重复打印底层堆栈；无等待者时也由上下文观察。
+    此异常不代表识别失败。容量及关闭拒收不属于已受理失败。
+    """
+
+    def __init__(self, session: SessionRef, input_ref: str):
+        super().__init__("上下文观察提交失败")
+        self.session = session
+        self.input_ref = input_ref
+
+
 @dataclass(frozen=True)
 class ContextRef:
     session: SessionRef

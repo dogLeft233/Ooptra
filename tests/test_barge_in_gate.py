@@ -1,7 +1,7 @@
 """真实应用音频入口验证抢话门限；仅替换平台、WebSocket 和扬声器。"""
 import asyncio
 
-from support.live_runtime import audio_message, make_live_agent
+from support.live_runtime import audio_message, make_live_agent, wait_until
 
 LOUD_FRAME = b"\x00\x40" * 320
 QUIET_FRAME = b"\x00\x01" * 320
@@ -11,6 +11,7 @@ FRAMES_TO_HOLD = 15
 async def begin(tmp_path, *, hold_ms=300):
     agent, playback, sockets = await make_live_agent(tmp_path, barge_in=True, barge_in_hold_ms=hold_ms)
     await sockets[0].deliver(audio_message())
+    await wait_until(lambda: bool(playback.chunks))
     assert playback.chunks, "必须先产生真实播放，零次打断的断言才有意义"
     return agent, playback, sockets[0]
 

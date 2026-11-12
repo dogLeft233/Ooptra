@@ -131,7 +131,8 @@ async def run_cascade(*, backend, context, behavior, channel,
                       current, on_playing, observations=None, reply_text_to_channel: bool = False,
                       subtitle_target: RoomTarget | None = None, recognition=None) -> FlowResult:
     """取消必结尝试；执行后的失败使用渠道事实，执行前失败使用NotExecuted。"""
-    revision = context.snapshot(session.room_target).revision
+    revision = (recognition.trigger.context_version if recognition else
+                (await context.snapshot_async(session.room_target)).revision)
     trigger = recognition.trigger if recognition else AudioReady(trigger_id, session, user_key, revision)
     if trigger.session != session or trigger.user_key != user_key or trigger.trigger_id != trigger_id:
         return FlowResult(reason="stale_recognition")
@@ -170,7 +171,7 @@ async def run_cascade(*, backend, context, behavior, channel,
             trace_reason = "recognition_failed"
             end_reason = recognized.reason or "recognition_failed"
             return FlowResult(reason=end_reason)
-        revision = context.observe(Observation(
+        revision = await context.observe_async(Observation(
             trigger_id, session, session.session_id, permit.attempt_number,
             "recognized", text=recognized.text, user_key=user_key, input_ref=trigger_id))
         control = None
@@ -196,7 +197,7 @@ async def run_cascade(*, backend, context, behavior, channel,
                 return FlowResult(user_text=recognized.text, reason=priority.reason)
         # 控制解释期间其他成员的识别仍会提交房间事实；准备与决策使用
         # 最新版本，但保留本次已核对的原会话、说话者和 input_ref。
-        revision = context.snapshot(session.room_target).revision
+        revision = (await context.snapshot_async(session.room_target)).revision
         assessment = None
         capabilities = getattr(backend, "capabilities", None)
         if recognized.text.strip() and capabilities is not None and capabilities().semantic_reply:

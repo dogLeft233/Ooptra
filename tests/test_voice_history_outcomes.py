@@ -5,7 +5,7 @@ import base64
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 from support.channel_fixtures import make_voice_agent
-from support.live_runtime import Playback, audio_message, make_live_agent, settle
+from support.live_runtime import Playback, audio_message, make_live_agent, settle, wait_until
 
 
 def test_client_interruption_never_records_the_full_generated_reply(tmp_path):
@@ -13,6 +13,7 @@ def test_client_interruption_never_records_the_full_generated_reply(tmp_path):
         agent, playback, sockets = await make_live_agent(tmp_path, barge_in=True, barge_in_hold_ms=0)
         try:
             await sockets[0].deliver(audio_message(user_text="question", text="complete generated answer"))
+            await wait_until(lambda: bool(playback.chunks))
             assert playback.chunks
             await playback.capture("u", b"\x00\x40" * 320)
             assert playback.stops == 1

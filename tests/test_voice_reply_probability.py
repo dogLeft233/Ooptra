@@ -4,7 +4,7 @@ import asyncio
 import random
 
 import pytest
-from support.live_runtime import audio_message, make_live_agent
+from support.live_runtime import audio_message, make_live_agent, wait_until
 
 from operations import load_voice_agent_settings
 from webui import config_editor
@@ -95,6 +95,7 @@ def test_live_zero_probability_drops_reply_but_keeps_listening_and_human_memory(
             assert not playback.chunks and not agent.last_reply
             assert not agent.status()["speaking"]
             assert agent.turns == 0
+            assert await agent.wait_for_reply_end(timeout=1)
             assert agent.memory.as_messages() == [{"role": "user", "content": "human"}]
         finally:
             await agent.leave()
@@ -103,16 +104,24 @@ def test_live_zero_probability_drops_reply_but_keeps_listening_and_human_memory(
 
 def test_live_uses_one_probability_draw_per_turn_and_hot_changes_apply_next_turn(tmp_path, monkeypatch):
     samples = iter([0.8, 0.1])
-    monkeypatch.setattr(random, "random", lambda: next(samples))
+    draws = []
+    def draw():
+        value = next(samples)
+        draws.append(value)
+        return value
+    monkeypatch.setattr(random, "random", draw)
     async def run():
         agent, playback, sockets = await make_live_agent(tmp_path, reply_probability_percent=30, force_reply_keywords=[])
         socket = sockets[0]
         try:
             await socket.deliver(audio_message(b"\1\0"))
+            await wait_until(lambda: len(draws) == 1)
             agent.settings.reply_probability_percent = 100
             await socket.deliver(audio_message(b"\2\0", done=True))
+            assert await agent.wait_for_reply_end(timeout=1)
             assert playback.chunks == []
             await socket.deliver(audio_message(b"\3\0"))
+            await wait_until(lambda: playback.chunks == [b"\3\0"])
             agent.settings.reply_probability_percent = 0
             await socket.deliver(audio_message(b"\4\0", text="reply", done=True))
             await agent.wait_for_reply_end(timeout=1)
