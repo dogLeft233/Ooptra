@@ -1,6 +1,6 @@
 # 来源准备与 AstrBot RPC
 
-状态：目标内部子模块，尚无 Python 实现。入口见 [上下文管理](../../README.md)。隐藏来源规则、人格准备、授权目标、外部请求及轮询租约。规则配置和长期记忆的权威仍在 AstrBot；这里不复制一份可独立修改的 group_map。
+状态：部分迁移。[bridge.py](bridge.py) 已拥有 AstrBot protocol=1 来源准备、短 RPC、outbox 与领取租约，公开入口见 `context.api.SourceBridge`。准备结果与来源快照已隔离，写入先落盘后发布；完整具名授权/回执协议仍是下文目标设计。入口见 [上下文管理](../../README.md)。隐藏来源规则、人格准备、授权目标、外部请求及轮询租约。规则配置和长期记忆的权威仍在 AstrBot；这里不复制一份可独立修改的 group_map。
 
 ## 类型与内部入口
 

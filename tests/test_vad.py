@@ -21,18 +21,20 @@ from __future__ import annotations
 
 import struct
 
+from channels import create_vad
+from channels.api import VoiceActivityDetector
+from channels.models import VadvConfig
+from core.audio import pcm16_rms
 from voice_agent.agent import _MIN_UTTERANCE_RMS
-from voice_agent.vad import EnergyVad, VadvConfig
 
 SR = 16000
 FRAME_MS = 30
 
 
-def _vad(**kw) -> EnergyVad:
-    cfg = VadvConfig(sample_rate=SR, frame_ms=FRAME_MS, silence_ms=700)
-    for k, v in kw.items():
-        setattr(cfg, k, v)
-    return EnergyVad(cfg)
+def _vad(**kw) -> VoiceActivityDetector:
+    values = dict(sample_rate=SR, frame_ms=FRAME_MS, silence_ms=700)
+    values.update(kw)
+    return create_vad(VadvConfig(**values))
 
 
 def tone(amplitude: float, ms: int) -> bytes:
@@ -45,7 +47,7 @@ def samples(ms: int) -> int:
     return int(SR * ms / 1000) * 2
 
 
-def feed(vad: EnergyVad, data: bytes, chunk_bytes: int = 1920) -> list[bytes]:
+def feed(vad: VoiceActivityDetector, data: bytes, chunk_bytes: int = 1920) -> list[bytes]:
     """按真实推流的粒度喂，收集切出来的句子。"""
     out: list[bytes] = []
     for i in range(0, len(data), chunk_bytes):
@@ -65,7 +67,7 @@ def test_utterance_carries_the_actual_speech() -> None:
     got = feed(_vad(), tone(0.15, 600) + tone(0.0, 1200))
     assert len(got) == 1, f"应该正好切出一句，实际 {len(got)} 句"
     assert len(got[0]) == samples(600), f"语音被截断：{len(got[0])}B != {samples(600)}B"
-    assert EnergyVad._rms(got[0]) > 0.1, "切出来的不是说话声"
+    assert pcm16_rms(got[0]) > 0.1, "切出来的不是说话声"
 
 
 def test_leading_silence_is_not_included() -> None:
@@ -73,7 +75,7 @@ def test_leading_silence_is_not_included() -> None:
     got = feed(_vad(), tone(0.0, 1500) + tone(0.15, 450) + tone(0.0, 1500))
     assert len(got) == 1
     assert len(got[0]) == samples(450)
-    assert EnergyVad._rms(got[0]) > 0.1
+    assert pcm16_rms(got[0]) > 0.1
 
 
 def test_trailing_silence_is_trimmed_off() -> None:
@@ -106,7 +108,7 @@ def test_noise_floor_utterance_is_quiet_enough_for_the_agent_gate() -> None:
     但切出来的 RMS 必须低于 agent 的闸门，否则又变成「没人说话也接话」。"""
     got = feed(_vad(), tone(0.015, 16000))
     assert got, "底噪没有被切出来？那这条断言就没意义了"
-    assert EnergyVad._rms(got[-1]) < _MIN_UTTERANCE_RMS
+    assert pcm16_rms(got[-1]) < _MIN_UTTERANCE_RMS
 
 
 # ----------------------------------------------------------------------
@@ -122,7 +124,7 @@ def test_real_speech_clears_the_agent_gate() -> None:
     got = feed(_vad(), tone(0.03, 450) + tone(0.0, 1500))
     assert len(got) == 1
     assert 0.03 > _MIN_UTTERANCE_RMS >= 0.0179, "闸门挪了，这条测试的前提变了"
-    assert EnergyVad._rms(got[0]) > _MIN_UTTERANCE_RMS
+    assert pcm16_rms(got[0]) > _MIN_UTTERANCE_RMS
 
 
 def test_max_utterance_ms_forces_a_cut() -> None:

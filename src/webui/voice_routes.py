@@ -322,7 +322,7 @@ def build_voice_routes(
             return err(f"{type(exc).__name__}：试听生成失败，请检查模型与音色配置")
 
     async def voice_preview_prompts(request: web.Request) -> web.Response:
-        from voice_agent.auto_visit_settings import parse_auto_visit_config
+        from behavior import parse_auto_visit_config
         from voice_agent.preview import saved_prompts
         controller = getattr(voice_runtime, "auto_visit", None)
         config = controller.config if controller is not None else parse_auto_visit_config(None)

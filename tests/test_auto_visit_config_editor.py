@@ -96,18 +96,20 @@ def test_sync_runtime_is_serialized_with_sequential_sparse_saves(config_file, mo
     first_sync = Event()
     release_first = Event()
     second_sync = Event()
-    original_sync = editor._sync_runtime
+    calls = []
 
-    def delayed_sync(namespace, updates):
-        areas = namespace['VOICE_AUTO_VISIT_CONFIG']['areas']
-        if 'c' not in areas:
+    def delayed_runtime():
+        # The injected runtime port is reached under the same lock as the file
+        # commit. A second save cannot overtake the first runtime synchronization.
+        calls.append(True)
+        if len(calls) == 1:
             first_sync.set()
             assert release_first.wait(3)
         else:
             second_sync.set()
-        original_sync(namespace, updates)
+        return module
 
-    monkeypatch.setattr(editor, '_sync_runtime', delayed_sync)
+    monkeypatch.setattr(editor, '_runtime_config', delayed_runtime)
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(editor.apply_auto_visit_updates, {'areas': {'a': {'daily_limit': 1}}})
         assert first_sync.wait(3)
@@ -129,10 +131,11 @@ def test_failed_disk_write_never_syncs_runtime(config_file, monkeypatch):
     path, module = config_file
     original = path.read_bytes()
 
-    def fail_write(writes):
+    def fail_write(*args):
         raise OSError('disk failed')
 
-    monkeypatch.setattr(editor, 'replace_text_files_atomically', fail_write)
+    import os
+    monkeypatch.setattr(os, 'replace', fail_write)
     with pytest.raises(OSError):
         editor.apply_auto_visit_updates({'daily_limit': 2})
     assert path.read_bytes() == original

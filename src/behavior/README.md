@@ -1,6 +1,6 @@
 # 行为决策
 
-当前状态：**部分实现**。级联输入尝试额度及概率/关键词/成员窗口已迁入；完整决策、反馈、冷却与串门协调仍为目标设计。已实现契约见 [公开接口](api.py)、[结果类型](models.py) 与 [能力工厂](__init__.py)，以下完整决策签名仍不可直接调用。全局规则见 [系统架构](../../ARCHITECTURE.md)，目录约束见 [代码要求](../../docs/coding-standards.md#模块目录与接口导航)。
+当前状态：**部分实现**。现有尝试额度、接话策略、单槽信箱/冷却、抢话许可和串门调度/台账已迁入；统一决策/反馈和主动话题仍为目标设计。已实现契约见 [公开接口](api.py)、[结果类型](models.py) 与 [能力工厂](__init__.py)，以下完整决策签名仍不可直接调用。全局规则见 [系统架构](../../ARCHITECTURE.md)，目录约束见 [代码要求](../../docs/coding-standards.md#模块目录与接口导航)。
 
 ## 职责与非职责
 
@@ -23,7 +23,7 @@
 
 `create_reply_policy()` 返回概率选择、关键词规范化及有界成员窗口能力。级联与 Live 后端已直接使用该入口，原 `voice_agent/reply_policy.py` 已移除；供应商或传输变更不需要重新实现这些算法。时钟和随机源可以注入，模块不导入旧后端或配置对象。
 
-当前额度每次申请代表一个新输入；尚未实现目标触发 ID 去重、AttemptFinished、冷却及完整行动台账。Live 的一次抽样缓存、迟到转录等待和回合协调仍在旧后端，不宣称已经完成完整决策模块。
+当前额度每次申请代表一个新输入；尚未实现目标触发 ID 去重、AttemptFinished 及完整行动台账；现有冷却已有独立调度能力。Live 的一次抽样缓存、迟到转录等待和回合协调仍在生成内部适配，不宣称已经完成完整决策模块。
 
 验证入口：`python -m pytest tests/behavior tests/test_conversation_window.py tests/test_voice_reply_probability.py tests/test_voice_turn_limit.py -q`。公开额度测试覆盖耗尽、失败不退款语义、同会话登记与旧会话拒绝；现有级联/Live 回归验证关键词窗口、抽样与换房行为。真实双机器人验收由应用层按 [验收指南](../../docs/bot-pair-acceptance.md) 执行。
 
@@ -51,8 +51,14 @@
 
 允许 `context.models`、`channels.models` 和公共机制；不依赖两者实现、对话生成或系统维护。时钟、随机源和状态存储由工厂注入，本模块定义所需窄端口，不创建跨全库的万能存储接口。
 
-现有证据：`tests/test_auto_visit_controller.py`、`tests/test_auto_visit_state.py`、`tests/test_round_throttle.py`、`tests/test_voice_turn_limit.py`、`tests/test_voice_reply_probability.py`。迁入后 `tests/behavior/` 用可控时钟/随机源验证沉默不生成、预留不超额、重复反馈、手动优先和主动触发；当前测试不是新接口验证。
+现有证据：`tests/test_auto_visit_controller.py`、`tests/test_auto_visit_state.py`、`tests/test_round_throttle.py`、`tests/test_voice_turn_limit.py`、`tests/test_voice_reply_probability.py`。迁入后 `tests/behavior/` 用可控时钟/随机源验证沉默不生成、预留不超额、重复反馈、手动优先和主动触发；旧集成覆盖保留；新接口验证见本页末尾及内部模块导航。
 
 ## 实现与阅读顺序
 
 迁入后依次阅读 `api.py` → `models.py` → 所需 `_internal/` 实现。内部能力是职责划分，不要求立即创建同名目录、类或文档；具有独立状态和维护需求时再增加子模块说明。跨模块只使用公开契约，工厂由应用装配，禁止返回内部可变对象。迁移批次与验收见 [重构准备计划](../../docs/superpowers/plans/2026-11-08-module-refactor-readiness.md)。
+
+### 本批迁移状态
+
+原串门控制器、配置解析和持久访问台账已迁入 `_internal/visits/`，通过 `create_auto_visits` / `create_visit_store` 装配。`VisitsHost` 是应用注入的窄执行端口，不暴露 SDK 或整个 VoiceAgent 配置；检查计划、问候/告别重试、冷却和持久化预留只有此模块拥有。当前仍为异步控制器驱动端口，尚非完整意图/反馈状态机。
+
+最新输入信箱/冷却与抢话许可已迁入 `_internal/replies/`；接口见 [api.py](api.py)，公开验证见 `tests/behavior/test_reply_scheduler.py`、`test_speech_interrupt_policy.py` 和 `test_visit_service.py`。外部配置快照不能原地启用串门；未知进房结果保留预留并暂停。

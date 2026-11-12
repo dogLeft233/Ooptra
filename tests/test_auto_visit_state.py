@@ -3,8 +3,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from behavior import create_visit_store as AutoVisitStateStore
 from core import config_file_store
-from voice_agent.auto_visit_state import AutoVisitStateStore
 
 NOW = datetime(2026, 10, 6, 15, 59, tzinfo=timezone.utc)
 

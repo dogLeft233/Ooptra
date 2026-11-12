@@ -6,9 +6,9 @@ from types import SimpleNamespace
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from context import create_context_bridge as ContextBridge
+from operations.models import VoiceApiSettings
 from voice_agent.api import VoiceApiServer
-from voice_agent.context_bridge import ContextBridge
-from voice_agent.settings import VoiceApiSettings
 from webui.voice_routes import build_voice_routes
 
 

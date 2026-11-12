@@ -6,8 +6,8 @@ from uuid import uuid4
 
 from behavior import create_cascade_attempts
 from channels.models import JoinRoom, RoomTarget
+from operations.models import VoiceAgentSettings, VoiceApiSettings
 from voice_agent.agent import VoiceAgent
-from voice_agent.settings import VoiceAgentSettings, VoiceApiSettings
 
 
 async def establish_room(agent) -> None:
@@ -37,6 +37,8 @@ async def establish_room(agent) -> None:
 
 class Duplex:
     transport = None
+    output_muted = False
+    output_volume = 50
 
     async def enable_listen(self, enabled=True):
         return {"ok": True}

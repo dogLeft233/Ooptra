@@ -12,11 +12,11 @@ import wave
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from voice_agent.backends import create_backend
-from voice_agent.backends.base import ControlIntentDetector, SessionStarter
-from voice_agent.backends.mimo_cascade import wav_to_pcm16
+from behavior import create_reply_policy
+from dialogue import create_backend, wav_to_pcm16
+from dialogue.api import ControlIntentDetector, SessionStarter
+from operations import resolve_agent_proxy_url
 from voice_agent.preview import EphemeralMemory
-from voice_agent.settings import resolve_agent_proxy_url
 
 
 def _short_wav(data: bytes) -> tuple[bytes, int]:
@@ -174,7 +174,7 @@ async def diagnose(agent, *, network: bool = False, audio_wav: bytes | None = No
     add("oopz", "Oopz 连接", "pass" if connected else "fail",
         "已连接" if connected else "请先在账号页登录，并确认桥接连接状态")
     key = settings.mimo_api_key if mimo else settings.gemini_api_key
-    from voice_agent.backends.gemini_live import live_url_has_key
+    from dialogue import live_url_has_key
     configured = (bool(settings.dashscope_api_key and settings.deepseek_api_key) if aliyun
                   else bool(key or (not mimo and live_url_has_key(settings.gemini_base_url))))
     add("credentials", "模型凭据", "pass" if configured else "fail",
@@ -202,7 +202,7 @@ async def diagnose(agent, *, network: bool = False, audio_wav: bytes | None = No
                 fresh.reply_probability_percent = 100
                 fresh.voice_leave_enabled = True
             def fresh_live():
-                value = create_backend(dataclasses.replace(fresh), EphemeralMemory())
+                value = create_backend(dataclasses.replace(fresh), EphemeralMemory(), reply_policy=create_reply_policy())
                 resources.append(value)
                 return value
             async def retire(value):

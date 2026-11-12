@@ -93,6 +93,14 @@ class AudioPushResult:
     reason: str = ""
 
 
+@dataclass(frozen=True)
+class PlaybackResult:
+    """原会话单次输出的实际证据；不表达生成或历史已提交。"""
+
+    status: Literal["completed", "silent", "interrupted", "failed"]
+    submitted_bytes: int = 0
+
+
 def _require_command(action_id: str, source: str) -> None:
     if (
         not isinstance(action_id, str)
@@ -144,3 +152,34 @@ class AreaMembership:
     area: str
     status: Literal["confirmed", "unavailable", "invalid_response"]
     rooms: tuple[RoomMembership, ...] = ()
+
+
+@dataclass(frozen=True)
+class RoomOperation:
+    """实际成功进退房的通知；在执行锁释放后交付。"""
+
+    kind: str
+    source: str
+    area: str
+    channel: str
+    visit_id: str
+
+
+@dataclass(frozen=True)
+class VadvConfig:
+    sample_rate: int = 16000
+    frame_ms: int = 30
+    # 与 VoiceAgentSettings.silence_ms 保持一致：700ms 对中文偏短，会把一句话切碎。
+    silence_ms: int = 1200
+    max_utterance_ms: int = 15000
+    energy_threshold: float = 0.012  # 归一化 RMS 阈值，可按环境调
+
+
+    def __post_init__(self) -> None:
+        import math
+        for value in (self.sample_rate, self.frame_ms, self.silence_ms, self.max_utterance_ms):
+            if type(value) is not int or value <= 0:
+                raise ValueError("VAD 采样率及窗口必须为正整数")
+        if (type(self.energy_threshold) not in (int, float)
+                or not math.isfinite(self.energy_threshold) or not 0 <= self.energy_threshold <= 1):
+            raise ValueError("VAD 能量阈值必须是 0-1 的有限数值")

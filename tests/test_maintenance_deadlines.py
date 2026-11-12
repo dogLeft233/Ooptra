@@ -9,7 +9,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from webui import maintenance, maintenance_cleanup, maintenance_network
+from tests.support.maintenance_harness import maintenance, maintenance_cleanup, maintenance_network
 
 
 def test_backup_status_does_not_wait_for_git_or_inventory(tmp_path, monkeypatch):

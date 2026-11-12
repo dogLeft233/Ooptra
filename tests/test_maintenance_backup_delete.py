@@ -6,7 +6,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from webui.maintenance import MaintenanceService, mount_maintenance_routes
+from tests.support.maintenance_harness import MaintenanceService, mount_maintenance_routes
 from webui.server import WebUIConsole
 
 

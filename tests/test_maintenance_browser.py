@@ -2,7 +2,7 @@ import asyncio
 import io
 import tarfile
 
-from webui import maintenance
+from tests.support.maintenance_harness import maintenance
 
 
 def test_browser_preparation_failure_does_not_stop_current_service(tmp_path, monkeypatch):

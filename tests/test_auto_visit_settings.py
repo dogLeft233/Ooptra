@@ -3,7 +3,7 @@ from types import MappingProxyType
 
 import pytest
 
-from voice_agent.auto_visit_settings import (
+from behavior import (
     effective_area,
     merge_auto_visit_patch,
     parse_auto_visit_config,

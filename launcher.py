@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
-from webui.maintenance_worker import main
+from operations import create_supervisor
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(create_supervisor().supervise(Path(__file__).resolve().parent))

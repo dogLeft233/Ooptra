@@ -88,7 +88,7 @@ def test_password_rotation_invalidates_sessions_and_plugin_secret(monkeypatch):
 
 def test_standalone_api_uses_only_shared_webui_password(monkeypatch):
     import config
-    from voice_agent.settings import load_voice_agent_settings
+    from operations import load_voice_agent_settings
     monkeypatch.setattr(config, "WEBUI_CONFIG", {"token": "shared-password"})
     monkeypatch.setattr(config, "VOICE_API_CONFIG", {"token": "obsolete-password"})
     monkeypatch.setenv("VOICE_API_TOKEN", "obsolete-environment-password")
@@ -105,7 +105,7 @@ def test_settings_have_one_password_and_one_persona_editor():
 
 def test_initial_setup_persists_shared_password_and_cannot_overwrite_it(monkeypatch, tmp_path):
     import config
-    from voice_agent.settings import load_voice_agent_settings
+    from operations import load_voice_agent_settings
     from webui import config_editor
     path = tmp_path / "config.py"
     path.write_text('WEBUI_CONFIG = {"token": ""}\n', encoding="utf-8")
@@ -176,7 +176,7 @@ def test_unrelated_config_save_preserves_shared_runtime_password(monkeypatch, tm
 def test_saved_password_is_canonical_and_environment_only_bootstraps_empty_config(monkeypatch):
     import config
     from bridge.runtime import apply_runtime_overrides
-    from voice_agent.settings import load_voice_agent_settings
+    from operations import load_voice_agent_settings
     monkeypatch.setenv("BOT_WEBUI_TOKEN", "environment-bootstrap")
     monkeypatch.setattr(config, "WEBUI_CONFIG", {"token": "saved-password"})
     apply_runtime_overrides()
@@ -204,8 +204,8 @@ def test_empty_password_allows_only_minimal_local_update_health(monkeypatch):
 
 
 def test_password_rotation_reaches_standalone_api_even_if_voice_reload_fails(monkeypatch):
+    from operations.models import VoiceApiSettings
     from voice_agent.api import VoiceApiServer
-    from voice_agent.settings import VoiceApiSettings
     async def check():
         console, app = console_app()
         async def failing_reload():
@@ -227,4 +227,127 @@ def test_password_rotation_reaches_standalone_api_even_if_voice_reload_fails(mon
             assert console._maintenance.token == "new-password"
             assert (await plugin.get("/voice/status", headers={"Authorization": "Bearer shared-password"})).status == 401
             assert (await plugin.get("/voice/status", headers={"Authorization": "Bearer new-password"})).status == 200
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("initial_setup", [False, True])
+def test_cancelled_configuration_request_finishes_saved_password_rotation(tmp_path, monkeypatch, initial_setup):
+    import contextlib
+    import threading
+
+    from operations.models import VoiceApiSettings
+    from webui import config_editor
+
+    entered, release = threading.Event(), threading.Event()
+    initial = "" if initial_setup else "shared-password"
+    path = tmp_path / "config.py"
+    path.write_text(f'WEBUI_CONFIG = {{"token": {initial!r}}}\n', encoding="utf-8")
+    config = SimpleNamespace(WEBUI_CONFIG={"token": initial})
+
+    def running_config():
+        entered.set()
+        assert release.wait(3)
+        return config
+
+    monkeypatch.setattr(config_editor, "CONFIG_PATH", str(path))
+    monkeypatch.setattr(config_editor, "_runtime_config", running_config)
+
+    async def check():
+        console, app = console_app(initial)
+        reloaded = asyncio.Event()
+        handlers = []
+
+        async def reload_settings():
+            reloaded.set()
+            return {}
+
+        console._voice_runtime = SimpleNamespace(api_settings=VoiceApiSettings(token=initial),
+                                                 reload_settings=reload_settings)
+        console._maintenance = SimpleNamespace(token=initial)
+
+        @web.middleware
+        async def capture(request, handler):
+            if request.method == "POST":
+                handlers.append(asyncio.current_task())
+            return await handler(request)
+
+        app.middlewares.append(capture)
+        app.router.add_post("/api/config", console._handle_config_post)
+        async with TestClient(TestServer(app)) as client:
+            endpoint = "/api/auth/setup" if initial_setup else "/api/config"
+            payload = ({"password": "new-password"} if initial_setup else
+                       {"updates": {"webui": {"token": "new-password"}}})
+            request = asyncio.ensure_future(client.post(
+                endpoint, json=payload,
+                headers={} if initial_setup else {"Authorization": "Bearer shared-password"}))
+            try:
+                assert await asyncio.to_thread(entered.wait, 2)
+                handlers[0].cancel()
+                await asyncio.sleep(0)
+                handlers[0].cancel()
+                release.set()
+                await asyncio.wait_for(reloaded.wait(), 1)
+                assert (await client.get("/api/private", headers={"Authorization": "Bearer new-password"})).status == 200
+                assert (await client.get("/api/private", headers={"Authorization": "Bearer shared-password"})).status == 401
+                assert console._voice_runtime.api_settings.token == "new-password"
+                assert console._maintenance.token == "new-password"
+                assert config.WEBUI_CONFIG["token"] == "new-password"
+                assert "new-password" in path.read_text(encoding="utf-8")
+            finally:
+                release.set()
+                request.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await request
+    asyncio.run(check())
+
+
+def test_console_stop_waits_for_accepted_configuration_application(tmp_path, monkeypatch):
+    import contextlib
+
+    from operations.models import VoiceApiSettings
+    from webui import config_editor
+
+    path = tmp_path / "config.py"
+    path.write_text('WEBUI_CONFIG = {"token": "shared-password"}\n', encoding="utf-8")
+    monkeypatch.setattr(config_editor, "CONFIG_PATH", str(path))
+    monkeypatch.setattr(config_editor, "_runtime_config", lambda: SimpleNamespace(WEBUI_CONFIG={}))
+
+    async def check():
+        console, app = console_app()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def reload_settings():
+            entered.set()
+            await release.wait()
+            return {}
+
+        console._voice_runtime = SimpleNamespace(api_settings=VoiceApiSettings(token="shared-password"),
+                                                 reload_settings=reload_settings)
+        app.router.add_post("/api/config", console._handle_config_post)
+        async with TestClient(TestServer(app)) as client:
+            request = asyncio.ensure_future(client.post(
+                "/api/config", json={"updates": {"webui": {"token": "new-password"}}},
+                headers={"Authorization": "Bearer shared-password"}))
+            stop = None
+            try:
+                await asyncio.wait_for(entered.wait(), 1)
+                stop = asyncio.create_task(console.stop())
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                assert not stop.done()
+                stop.cancel()
+                await asyncio.sleep(0)
+                assert not stop.done()
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await stop
+                assert (await client.get("/api/private", headers={"Authorization": "Bearer new-password"})).status == 200
+            finally:
+                release.set()
+                if stop is not None:
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await stop
+                request.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await request
     asyncio.run(check())

@@ -1,6 +1,14 @@
 # 接话策略与回合额度
 
-状态：部分实现。级联会话尝试额度在 [attempts.py](attempts.py)，概率/关键词及成员窗口在 [policy.py](policy.py)；冷却、幂等反馈与 Live 提议协调仍为目标契约。入口见 [行为决策](../../README.md)。将“是否回应、等待哪句、预留哪次尝试、何时可再次回应”作为一项能力，隐藏概率、关键词、窗口、冷却和未完成意图，避免调用者拼装多步检查。
+状态：部分实现。级联会话尝试额度在 [attempts.py](attempts.py)，概率/关键词及成员窗口在 [policy.py](policy.py)；最新输入/冷却已进入 [scheduler.py](scheduler.py)，连续抢话许可进入 [barge_in.py](barge_in.py)；幂等反馈与 Live 提议协调仍为目标契约。入口见 [行为决策](../../README.md)。将“是否回应、等待哪句、预留哪次尝试、何时可再次回应”作为一项能力，隐藏概率、关键词、窗口、冷却和未完成意图，避免调用者拼装多步检查。
+
+## 已实现调度与抢话能力
+
+`create_reply_scheduler` 拥有单槽最新输入、冷却期限及代次；`reset` 使旧输入和旧反馈失效，并唤醒尚在等待旧冷却的消费者。旧等待者在触碰新 pending 前复查代次；取消等待回收定时器，保留随后新提交的输入。单个消费者驱动公开 `next/finish`，任务取消和模型生命周期由应用负责。
+
+`create_barge_in_gate` 接受已确认 `SpeechActivity`，拥有逐成员连续发声时长和本轮最多一次的许可。安静活动清理对应成员累计；`rearm` 清理所有累计。0 毫秒保持第一帧立即抢话的兼容规则。策略不持有原始 PCM、渠道或模型；实际停止播放由应用根据许可协调。状态最多保留 256 个近期成员，避免来源标识异常增长。
+
+公开验证：`tests/behavior/test_reply_scheduler.py`（最新替换、旧代次不能吞新输入、重置立即解除旧冷却、取消释放等待）、`tests/behavior/test_speech_interrupt_policy.py`（逐成员连续发声、静音重置、每轮一次、输入校验）。旧集成验证见 `tests/test_round_throttle.py`、`tests/test_barge_in_gate.py`。
 
 ## 类型与内部接口
 

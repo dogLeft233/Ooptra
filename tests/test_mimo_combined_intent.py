@@ -6,7 +6,7 @@ import json
 import pytest
 from test_voice_operations import make_agent
 
-from voice_agent.voice_control import VoiceControlDecision
+from behavior.models import VoiceControlDecision
 
 
 @pytest.mark.parametrize("leave,percent,expected_models", [(False, 100, ["chat", "tts"]), (True, 100, ["chat"]), (True, 0, ["intent"])])
@@ -47,7 +47,7 @@ def test_selected_turn_combines_intent_and_chat_but_zero_percent_can_leave(tmp_p
         reply = await agent.backend.handle_utterance(b"audio", sample_rate=16000)
         kinds = ["tts" if item["model"] == "tts" else "intent" if item["max_tokens"] == 64 else "chat" for item in requests]
         assert kinds == expected_models
-        assert (reply.raw.get("voice_control") == "leave") is leave
+        assert (reply.control is not None and reply.control.leave) is leave
         assert bool(reply.pcm16) is (not leave)
         instructions = requests[0]["messages"][0]["content"]
         assert "不要出去" in instructions and "他说你出去吧" in instructions
@@ -88,7 +88,7 @@ def test_malformed_combined_result_never_triggers_leave_or_leaks_json_to_tts(tmp
         monkeypatch.setattr(agent.backend, "_http", http)
         agent.backend.asr, agent.backend.detect_control_intent, agent.backend.tts = asr, intent, tts
         reply = await agent.backend.handle_utterance(b"audio", sample_rate=16000)
-        assert reply.pcm16 and not reply.raw.get("voice_control")
+        assert reply.pcm16 and reply.control is None
         assert agent.status()["voice_observation"]["recent_decisions"][-1]["reason"] == "reply"
         await agent.backend.aclose()
     asyncio.run(run())
@@ -112,7 +112,7 @@ def test_failed_combined_request_still_checks_semantic_leave_and_never_speaks(tm
         agent.backend.asr, agent.backend.chat_with_intent = asr, combined
         agent.backend.detect_control_intent, agent.backend.tts = intent, tts
         reply = await agent.backend.handle_utterance(b"audio", sample_rate=16000)
-        assert reply.raw["voice_control"] == "leave"
+        assert reply.control is not None and reply.control.leave
         assert not reply.pcm16
         assert agent.status()["voice_observation"]["recent_decisions"][-1]["reason"] == "control"
     asyncio.run(run())
@@ -144,6 +144,6 @@ def test_malformed_isolated_intent_is_observed_as_error_not_probability(tmp_path
         monkeypatch.setattr(agent.backend, "_http", http)
         agent.backend.asr = asr
         reply = await agent.backend.handle_utterance(b"audio", sample_rate=16000)
-        assert not reply.raw.get("voice_control") and not reply.pcm16
+        assert reply.control is None and not reply.pcm16
         assert agent.status()["voice_observation"]["recent_decisions"][-1]["reason"] == "error"
     asyncio.run(run())

@@ -1,6 +1,6 @@
 # 配置事务
 
-状态：**部分实现**。`service.py` 已提供音量保存，`document.py` 已接管共用 AST 补丁/文档校验；完整版本化事务仍是下述目标设计。内部代码仅供 `operations` 内部使用，不是新的跨模块 API。模块外见 [系统维护](../../README.md)，文件写入机制仍复用 `core.config_file_store`，不复制一份文件锁。WebUI 的通用字段解析、元数据和运行时同步仍在旧编辑器；它复用本模块公开文档操作与 `OutputVolume`，音量规则没有新旧两份。`VoiceRuntime` 使用注入的 `Configuration` 持久化音量。
+状态：**现有保存能力已迁入，版本化事务待实现**。`settings.py` 拥有语音配置加载、环境优先级和就地应用规则，公开设置类型归 `operations.models`；`service.py` 拥有全部字段保存与运行字典同步，`document.py` 拥有共用 AST 补丁/文档校验。公开入口见 [系统维护](../../README.md) 的 `Configuration.save_fields` 与 `save_output_volume`。文件写入复用 `core.config_file_store` 的同进程锁。WebUI 保留表单 schema、字段准入与归一化；不再读取/提交配置文件或执行运行同步。`VoiceRuntime` 继续用注入的 `Configuration` 保存音量。下文版本指纹、请求回执和组件热应用协调仍为目标设计。
 
 ## 边界与选择
 
@@ -33,6 +33,8 @@ ConfigFiles.commit(expected_revision, patched_document) -> ConfigCommit | Confli
 
 ## 提交、取消与恢复
 
+现有同步保存由输入任务拥有：WebUI 将“文件保存、共享 token 同步、必要热应用和已授权重连”放入受控任务，取消 HTTP 等待者仍会观察任务实际结束，然后传播取消；并发保存连同应用串行。WebUI 停止时关闭保存准入、等待在途任务，再释放维护/HTTP资源；应用入口必须在关闭语音等业务资源前等待控制台收尾。音量命令同样观察其保存线程结束。上述不提供崩溃恢复，也不为阻塞写入虚构强制取消；以下版本化阶段仍为目标设计。
+
 ```text
 parsed → acquired mutation gate → checked revision → staged → committed
   → applying → applied / partially-applied / restart-required
@@ -52,10 +54,14 @@ parsed → acquired mutation gate → checked revision → staged → committed
 
 ## 首批迁移与验证
 
-已迁入通用文本补丁、文档校验和单字段音量保存。`FileConfiguration` 持有文件路径和运行配置读取端口；保存期间复用 `core` 的同进程文件锁，只在文件替换成功后修改音量字段，不覆盖其他运行时环境值。它不持有独立配置副本，且不会在构建/导入时加载配置。音量的十进制字符串兼容解析与 10–100 范围由 `OutputVolume` 唯一维护。旧编辑器仍保留展示元数据以及非音量字段准入；完整请求版本/回执/热应用协调仍待实现。
+已迁入通用文本补丁、可信文档校验与全字段保存事务。`FileConfiguration` 持有文件路径、运行配置读取端口和可选的纯分组合并规则；复用共享文件锁，将读文件、针对当前值合并、校验、磁盘替换与所保存字段同步放在同一事务中。音量与 WebUI 保存都走这一实现，其他环境覆盖不被覆盖。构造/导入不加载配置，自动串门合并规则由输入边界注入，不产生维护对行为实现的依赖。
 
-新增公开入口证据见 `tests/operations/test_configuration.py`；现有 WebUI AST 回归通过兼容转调继续守住同一份算法，未为测试放宽内部导入。音量持久化的异步等待由现有 `VoiceOutputControls` 观察并等完成，取消不使写线程失去拥有者。
+`ConfigurationChange` 在输入边界解析为分组、来源和字段路径，冻结嵌套输入，避免校验完成后又被原始字典修改。它只确认保存结构，不授予编辑权限；字段白名单和语义规则由相应入口批准。`ConfigurationSaveReceipt` 只列出保存字段，业务组件的热应用由应用装配继续处理。音量的十进制字符串兼容与范围仍由 `OutputVolume` 唯一维护。
 
-后续提取其余字段解析及保存，用 HTTP 适配保留现有响应。涉及凭据写入时保留原文件权限与符号链接行为，不把模型环境密钥搬进 WebUI。
+公开入口证据见 `tests/operations/test_configuration.py`：保留正文/环境覆盖、跨组与嵌套字段保存、输入快照、磁盘失败与动态目标拒绝。原编辑器 AST 测试已直接调用公开文档能力；自动串门并发保存通过注入的运行配置端口验证串行，不再 patch WebUI 私有同步函数。
+
+字段展示和准入继续由 HTTP 输入边界处理，现有响应保持兼容。涉及凭据写入时保留原文件权限与符号链接行为，不把模型环境密钥搬进 WebUI。
 
 现有证据测试：`tests/test_config_editor.py`、`tests/test_config_file_store.py`、`tests/test_voice_settings_reload.py`、`tests/test_auto_visit_config_editor.py`。新增公开行为测试需验证：非法输入不写；并发版本冲突；保存成功/热应用失败可查询；重试不应用旧版本；提交中请求取消不释放许可；进程重启不沿用旧 applied 状态。用 tmp_path 和模拟运行端口，不写当前配置。此处只是待实现验收，现有测试不证明目标类型/API 已存在。
+
+配置加载验证见 `tests/operations/test_voice_configuration_loading.py`：显式隔离来源下的环境优先级、默认/限值兼容、密钥脱敏及独立子进程中的导入无凭据加载。原设置重载、语音字段配置、共享认证 token 与 Aliyun `.env.local` 无变量插值测试继续回归。

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from webui import maintenance_storage as storage
+from tests.support.maintenance_harness import maintenance_storage as storage
 
 
 def sharing_error():

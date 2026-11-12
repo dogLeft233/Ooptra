@@ -1,6 +1,6 @@
 # 备份与数据边界
 
-状态：待实现内部设计。公开入口由 [系统维护](../../README.md) 提供。当前 `webui.maintenance_storage.BackupStore`、`maintenance_cleanup` 拥有归档与清理知识；迁移优先保留既有备份可读，不改用户数据布局。
+状态：现有归档和清理实现已迁入本目录的 `storage.py`、`cleanup.py`。公开入口见 [系统维护](../../README.md) 及 `api.BackupArchive`、`api.StorageScanner`；保留现有归档格式和用户数据布局。以下具名验证引用、停机凭据是后续目标契约，尚未实现。
 
 ## 独立职责
 
@@ -42,6 +42,8 @@ Backups.apply_cleanup(plan: CleanupPlan, protected: BackupReferences) -> Cleanup
 
 ## 迁移与测试
 
-先迁移 `BackupStore` 和清理逻辑，保留现有归档版本、分页与删除兼容响应；部署准备从新内部能力取得具名验证对象。不能一边保留旧恢复入口绕过保护，一边宣称数据边界已统一。
+`BackupStore` 和清理逻辑已迁入，保留现有归档版本、分页与删除兼容响应；部署准备仍使用原有校验返回值，具名验证对象有待后续实现。不能一边保留旧恢复入口绕过保护，一边宣称数据边界已统一。
 
 现有证据：`tests/test_maintenance_backups.py`、`tests/test_maintenance_archive_boundaries.py`、`tests/test_maintenance_backup_delete.py`、`tests/test_maintenance_storage_cleanup.py`。需补受验证引用被替换、恢复前未停机、在线/离线快照语义、任务引用损坏和清理重检的公开行为测试；使用隔离目录和合成凭据，不恢复当前仓库。
+
+公开行为验证见 `tests/operations/test_maintenance_contract.py`。现有 HTTP 备份删除/清理回归与真实 SQLite 归档测试继续使用同一实现；取消备份等待者后，维护门面持续拥有写线程及互斥，避免第二个变更和未结束 I/O 交错。

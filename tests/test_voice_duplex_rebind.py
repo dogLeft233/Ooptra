@@ -24,9 +24,9 @@ import asyncio
 import logging
 from typing import Any
 
+from channels import create_duplex as VoiceDuplex
+from operations import load_voice_agent_settings
 from voice_agent.agent import VoiceAgent
-from voice_agent.duplex import VoiceDuplex
-from voice_agent.settings import load_voice_agent_settings
 
 # ----------------------------------------------------------------------
 # 替身：真 VoiceDuplex + 假 transport / 假 bot（不碰 Playwright 与网络）
@@ -132,14 +132,12 @@ def _make_agent() -> VoiceAgent:
     agent.settings.barge_in = True
     agent.settings.listen_only_uids = []
     agent.duplex = None
-    agent._duplex_close_tasks = set()
+    agent._lifecycle_tasks = set()
     agent.backend = FakeBackend()
     agent.live_mode = True
     agent._bot = None
     agent._speaking = False
-    agent._barge_in_armed = True
     agent._live_output_lock = asyncio.Lock()
-    agent._barge_in_speech_ms = {}
     agent._user_buffers = {}
     agent._vad = None
     agent._task = None
@@ -164,7 +162,7 @@ async def _tidy(agent: VoiceAgent) -> None:
 
 async def _settle(agent: VoiceAgent) -> None:
     """等 bind_bot 交给事件循环的那次 close() 真正跑完（不等就是不确定的）。"""
-    await asyncio.gather(*agent._duplex_close_tasks, return_exceptions=True)
+    await asyncio.gather(*agent._lifecycle_tasks, return_exceptions=True)
 
 
 # ----------------------------------------------------------------------
@@ -181,7 +179,7 @@ def test_bind_bot_drops_duplex_bound_to_old_transport() -> None:
         agent.bind_bot(FakeBot(old_transport))
         await agent.join("area1", "chan1")
 
-        assert isinstance(agent.duplex, VoiceDuplex)
+        assert agent.duplex is not None
         assert agent.duplex.transport is old_transport
         assert agent._joined is True
 

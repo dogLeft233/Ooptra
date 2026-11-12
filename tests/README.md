@@ -11,6 +11,7 @@ tests/
   behavior/                 # 决策、调度、冷却与配额
   dialogue/                 # 生成契约、供应商适配与流式取消
   operations/               # 配置、备份、升级与恢复
+  app/                      # 应用输出结果与历史提交
   integration/              # 多模块协作和回归路径
   acceptance/               # 真实联调控制器的隔离 HTTP 测试（不连接模型）
   architecture/             # 目录和依赖约束
@@ -19,7 +20,7 @@ tests/
   conftest.py               # 少量全局准备；模块 fixture 放各自 conftest.py
 ```
 
-目录按测试实际需要创建。当前 `channels/`、`behavior/` 和 `operations/` 已包含公开契约测试；`acceptance/` 使用本地 HTTP 服务验证手动验收工具，不调用真实 Oopz/模型；`architecture/` 包含目录/依赖和测试发现检查；其余原有平铺测试保持原位，随对应实现逐批迁移。新五模块代码的测试放到同名目录；旧路径修复可以继续使用其原测试文件。测试布局要求由审查维护，架构脚本目前不冻结旧测试文件清单。
+目录按测试实际需要创建。当前五模块同名目录和 `app/` 均已包含公开契约测试；`acceptance/` 使用本地 HTTP 服务验证手动验收工具，不调用真实 Oopz/模型；`architecture/` 包含目录/依赖和测试发现检查；其余原有平铺测试保持原位，随对应实现逐批迁移。生成供应商使用本地 HTTP 模型服务检验协议和并发 sink；上下文使用真实隔离文件检验恢复与提交。新五模块代码的测试放到同名目录；旧路径修复可以继续使用其原测试文件。测试布局要求由审查维护，架构脚本目前不冻结旧测试文件清单。
 
 ## 归属和测试接口
 
@@ -40,3 +41,13 @@ python -m pytest -v -o faulthandler_timeout=60
 ```
 
 模块迁入后可执行 `python -m pytest tests/<module>/ -q`。全套测试仍从根目录执行，浏览器命令见 `.github/workflows/ci.yml`，语音运行验收见 [双机器人联调](../docs/bot-pair-acceptance.md)。目录重排本身不能代替真实集成验证。
+
+历史收尾：`tests/test_voice_history_outcomes.py` 覆盖非流式识别后等待 chat/TTS 时停止，仅保留原用户输入；Live 公告在渠道成功确认后仅追加助手文本。
+
+提交取消窗口：`tests/test_voice_history_outcomes.py` 用真实阻塞 JSONL 写入覆盖流式/非流式 stop 后仅一份输入/助手及一个 outbox 请求；`tests/context/test_turn_submission.py` 检查取消同时磁盘失败仍被观察且不重复受理。
+
+Live 排空取消：`tests/test_voice_history_outcomes.py` 经真实模型消息、阻塞渠道排空与真实 JSONL/outbox，覆盖停止、退房及来源刷新，确保仅保留原scope输入。阻塞提交回归通过取消事件握手同步，兼容 Python 3.10，不依赖 `Task.cancelling`。
+
+两存储故障矩阵：`tests/context/test_turn_submission.py` 使用真实不可写目标路径覆盖外部失败、本地失败、双失败及取消/重复等待；`tests/test_voice_history_outcomes.py` 用九轮真实Live消息和八个阻塞排空确认，验证满载输入背压及九份原scope历史/outbox，无未确认助手记录。
+
+关闭前完成输入：`tests/test_voice_history_outcomes.py` 覆盖关键词等待期间stop/leave/refresh/同步bind保留原scope用户事实，bind阻塞真实写入验证close等待；未turnComplete片段不保存，真实晚转录窗口过期不拼接旧轮或释放缓存助手。

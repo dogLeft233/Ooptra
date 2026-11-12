@@ -20,15 +20,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import struct
-import time
-from types import SimpleNamespace
 
 import pytest
 from support.channel_fixtures import establish_room
 
+from dialogue.models import VoiceReply
+from operations.models import VoiceAgentSettings
 from voice_agent.agent import VoiceAgent
-from voice_agent.backends.base import VoiceReply
-from voice_agent.settings import VoiceAgentSettings
 
 SR = 16000
 
@@ -48,7 +46,7 @@ class _RecordingBackend:
     async def aclose(self) -> None:
         pass
 
-    async def handle_utterance(self, pcm, *, sample_rate, user_key="", channel_key=""):
+    async def handle_utterance(self, pcm, *, sample_rate, user_key="", channel_key="", on_recognition=None):
         self.seen.append(pcm)
         return VoiceReply(user_text="", text="", pcm16=b"")
 
@@ -77,7 +75,6 @@ def _agent(utterance: bytes | None = None, **overrides) -> tuple[VoiceAgent, _Re
     agent.backend = _RecordingBackend()
     agent._busy = asyncio.Lock()
     agent._speaking = False
-    agent._barge_in_armed = True
     agent._user_buffers = {}
     agent.settings.area = "area1"
     agent.settings.channel = "chan1"
@@ -89,171 +86,12 @@ def _agent(utterance: bytes | None = None, **overrides) -> tuple[VoiceAgent, _Re
     return agent, agent.backend
 
 
-def _offer(agent: VoiceAgent, pcm: bytes, *, age: float = 0.0) -> None:
-    """放进信箱，可选伪造「入槽时刻」以模拟已经等了很久。"""
+def _offer(agent, pcm):
     agent._offer_utterance("u1", pcm, SR)
-    assert agent._pending is not None
-    if age:
-        uid, data, rate, _ = agent._pending
-        agent._pending = (uid, data, rate, time.monotonic() - age)
 
 
-def _take(agent: VoiceAgent) -> tuple[str, bytes, int, float]:
-    """照 ``_round_worker`` 的取法把信槽取空。"""
-    item, agent._pending = agent._pending, None
-    agent._pending_event.clear()
-    assert item is not None
-    return item
-
-
-# ----------------------------------------------------------------------
-# 单槽信箱：只留最新的一条
-# ----------------------------------------------------------------------
-
-
-def test_mailbox_keeps_only_the_newest(caplog) -> None:
-    """第三句进来时，前两句都得走 —— 用户已经往前说了，回旧的只会驴唇不对马嘴。"""
-
-    async def run() -> None:
-        agent, _ = _agent()
-        with caplog.at_level(logging.INFO, logger="voice_agent.agent"):
-            _offer(agent, b"first")
-            _offer(agent, b"second")
-            _offer(agent, b"third")
-        assert agent._pending is not None
-        assert agent._pending[1] == b"third", "信箱里留的不是最新的那条"
-        assert caplog.text.count("丢弃积压回合") == 2
-
-    asyncio.run(run())
-
-
-def test_newest_utterance_wins_during_the_cooldown(caplog) -> None:
-    """冷却期里用户又说了 → 改回**最新**的那条，不是把两句都回。
-
-    这条是用户明确选的语义：「缓存最新一条，冷却一结束就回」。
-    """
-
-    async def run() -> None:
-        agent, backend = _agent(reply_cooldown_ms=200)
-        await establish_room(agent)
-        _offer(agent, b"first")
-        await agent._throttled_round(_take(agent))
-        assert backend.seen == [b"first"]
-
-        # 冷却期内用户先说了 stale，又补了 fresh
-        _offer(agent, b"stale")
-        task = asyncio.create_task(agent._throttled_round(_take(agent)))
-        await asyncio.sleep(0.05)  # 让它进到 sleep(remaining)
-        _offer(agent, b"fresh")
-        await task
-
-        assert backend.seen == [b"first", b"fresh"], "回的是被顶掉的那条"
-
-    asyncio.run(run())
-
-
-# ----------------------------------------------------------------------
-# 冷却
-# ----------------------------------------------------------------------
-
-
-def test_cooldown_delays_the_next_round(monkeypatch) -> None:
-    """完整说完一条后，下一条要等满冷却才开。"""
-
-    async def run() -> None:
-        from voice_agent import agent as agent_module
-
-        agent, backend = _agent(reply_cooldown_ms=150)
-        await establish_room(agent)
-        now = [100.0]
-        waits = []
-
-        async def sleep(seconds):
-            waits.append(seconds)
-            now[0] += seconds
-
-        # Windows monotonic clocks can round a 150ms real sleep down to 140ms.
-        # Verify the required deadline and requested wait with a controlled clock.
-        monkeypatch.setattr(agent_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
-        monkeypatch.setattr(agent_module.asyncio, "sleep", sleep)
-        _offer(agent, b"first")
-        await agent._throttled_round(_take(agent))
-        assert agent._cooldown_until == pytest.approx(100.15)
-
-        _offer(agent, b"second")
-        await agent._throttled_round(_take(agent))
-
-        assert waits == pytest.approx([0.15])
-        assert agent._cooldown_until == pytest.approx(100.30)
-        assert backend.seen == [b"first", b"second"]
-
-    asyncio.run(run())
-
-
-def test_cooldown_zero_means_no_wait() -> None:
-    """0 = 关掉冷却，退回旧行为（一键回滚用）。"""
-
-    async def run() -> None:
-        agent, backend = _agent(reply_cooldown_ms=0)
-        await establish_room(agent)
-        started = time.monotonic()
-        for payload in (b"a", b"b", b"c"):
-            _offer(agent, payload)
-            await agent._throttled_round(_take(agent))
-        assert backend.seen == [b"a", b"b", b"c"]
-        assert time.monotonic() - started < 0.5
-
-    asyncio.run(run())
-
-
-def test_barge_in_skips_the_cooldown() -> None:
-    """被抢话打断的回合不设冷却 —— 抢话的人要的是立刻被回应，不是再等一轮。"""
-
-    async def run() -> None:
-        agent, _ = _agent(reply_cooldown_ms=5000)
-
-        async def _barged(uid, pcm, sample_rate):  # 模拟 _on_remote_pcm 里的抢话
-            await agent._interrupt_speaking()
-
-        agent._handle_utterance = _barged  # type: ignore[method-assign]
-        _offer(agent, b"x")
-        await agent._throttled_round(_take(agent))
-
-        assert agent._cooldown_until == 0.0, "被抢话了还设冷却，抢话的人要白等 5 秒"
-
-    asyncio.run(run())
-
-
-def test_normal_reply_does_set_the_cooldown() -> None:
-    """对照组：没被抢话就得设冷却。别把上一条的语义做成一刀切。"""
-
-    async def run() -> None:
-        agent, _ = _agent(reply_cooldown_ms=5000)
-        _offer(agent, b"x")
-        await agent._throttled_round(_take(agent))
-        assert agent._cooldown_until > time.monotonic()
-
-    asyncio.run(run())
-
-
-# ----------------------------------------------------------------------
-# 过期
-# ----------------------------------------------------------------------
-
-
-def test_stale_round_is_dropped(caplog) -> None:
-    """等到超过「冷却 + 3s」还没轮到 = 用户早说别的去了，回它等于自言自语。"""
-
-    async def run() -> None:
-        agent, backend = _agent(reply_cooldown_ms=0)
-        await establish_room(agent)
-        with caplog.at_level(logging.INFO, logger="voice_agent.agent"):
-            _offer(agent, b"old", age=99.0)
-            await agent._throttled_round(_take(agent))
-        assert backend.seen == [], "过期回合还是送去 ASR 了"
-        assert "丢弃过期回合" in caplog.text
-
-    asyncio.run(run())
+async def _take(agent):
+    return await agent.reply_scheduler.next(agent._reply_cooldown())
 
 
 # ----------------------------------------------------------------------
@@ -269,7 +107,8 @@ def test_short_utterance_is_dropped_before_asr(caplog) -> None:
         agent, backend = _agent(short)
         with caplog.at_level(logging.INFO, logger="voice_agent.agent"):
             await agent._on_remote_pcm("u1", short, SR)
-        assert agent._pending is None, "过短回合还是进了信箱"
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(agent.reply_scheduler.next(0), 0.01)
         assert "丢弃过短回合" in caplog.text
         assert backend.seen == []
 
@@ -284,7 +123,7 @@ def test_a_real_sentence_clears_the_duration_gate(caplog) -> None:
         agent, _ = _agent(long_enough)
         with caplog.at_level(logging.INFO, logger="voice_agent.agent"):
             await agent._on_remote_pcm("u1", long_enough, SR)
-        assert agent._pending is not None, "真句子被时长闸门误伤了"
+        assert (await agent.reply_scheduler.next(0)).pcm == long_enough
         assert "丢弃过短回合" not in caplog.text
 
     asyncio.run(run())
@@ -298,7 +137,7 @@ def test_min_utterance_zero_disables_the_gate(caplog) -> None:
         agent, _ = _agent(short, min_utterance_ms=0)
         with caplog.at_level(logging.INFO, logger="voice_agent.agent"):
             await agent._on_remote_pcm("u1", short, SR)
-        assert agent._pending is not None
+        assert (await agent.reply_scheduler.next(0)).pcm == short
         assert "丢弃过短回合" not in caplog.text
 
     asyncio.run(run())
@@ -318,12 +157,13 @@ def test_worker_starts_on_join_and_stops_on_leave() -> None:
         task = agent._round_task
         assert task is not None and not task.done()
 
-        _offer(agent, b"leftover")
+        agent._offer_utterance("user", b"leftover", SR)
         await agent._stop_round_worker()
 
         assert agent._round_task is None
         assert task.done(), "worker 没被取消，退房后还在跑"
-        assert agent._pending is None, "残留的句子被带到下次进房了"
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(agent.reply_scheduler.next(0), 0.01)
 
     asyncio.run(run())
 
@@ -373,7 +213,7 @@ def test_hot_switch_to_cascade_starts_the_worker(monkeypatch) -> None:
         await establish_room(agent)
         agent.live_mode = True  # 进房时是 Live，worker 没起来
         # 新后端是个「不像 Live」的（name=mimo_cascade、没有 push_audio）
-        monkeypatch.setattr(agent_mod, "create_backend", lambda s, m: _RecordingBackend())
+        monkeypatch.setattr(agent_mod, "create_backend", lambda s, m, **kwargs: _RecordingBackend())
 
         await agent.refresh(["backend"])
         assert agent.live_mode is False, "前提没成立：没切成级联"
@@ -399,7 +239,7 @@ def test_hot_switch_to_live_stops_the_worker(monkeypatch) -> None:
         assert task is not None
 
         # 切回 Live：create_backend 返回一个「像 Live」的后端
-        monkeypatch.setattr(agent_mod, "create_backend", lambda s, m: _FakeLiveBackend())
+        monkeypatch.setattr(agent_mod, "create_backend", lambda s, m, **kwargs: _FakeLiveBackend())
         monkeypatch.setattr(agent_mod, "_is_live_backend", lambda b: True)
         await agent.refresh(["backend"])
 

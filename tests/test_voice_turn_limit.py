@@ -4,7 +4,7 @@ import asyncio
 import pytest
 from test_voice_operations import make_agent
 
-from voice_agent.backends.base import VoiceReply
+from dialogue.models import VoiceReply
 
 
 def test_budget_blocks_concurrent_and_failed_rounds_until_rejoin(tmp_path, monkeypatch):

@@ -85,6 +85,39 @@ def test_dynamic_voice_target_is_rejected_before_configuration_execution(tmp_pat
     assert runtime.VOICE_AGENT_CONFIG == {"output_volume": 50}
 
 
+def test_normalized_save_updates_multiple_groups_without_losing_environment_values(tmp_path):
+    from operations.models import ConfigurationChange
+    path = tmp_path / "config.py"
+    path.write_text(
+        '# user comment\nVOICE_AGENT_CONFIG = {"gemini": {"voice": "old", "model": "disk"}}\n'
+        'WEBUI_CONFIG = {"port": 3090, "host": "127.0.0.1"}\n', encoding="utf-8")
+    runtime = SimpleNamespace(
+        VOICE_AGENT_CONFIG={"gemini": {"voice": "old", "model": "environment"}},
+        WEBUI_CONFIG={"port": 3090, "host": "environment-host"})
+    change = ConfigurationChange.from_normalized(
+        {"voice": {"gemini.voice": "new"}, "webui": {"port": 4090}},
+        sources={"voice": "VOICE_AGENT_CONFIG", "webui": "WEBUI_CONFIG"})
+    receipt = create_configuration(path=path, runtime_config=lambda: runtime).save_fields(change)
+    assert receipt.changed_fields() == {"voice": ["gemini.voice"], "webui": ["port"]}
+    assert runtime.VOICE_AGENT_CONFIG == {"gemini": {"voice": "new", "model": "environment"}}
+    assert runtime.WEBUI_CONFIG == {"port": 4090, "host": "environment-host"}
+    assert '# user comment' in path.read_text(encoding="utf-8")
+
+
+def test_parsed_configuration_owns_snapshot_of_nested_inputs(tmp_path):
+    from operations.models import ConfigurationChange
+    path = tmp_path / "config.py"
+    path.write_text('VOICE_AUTO_VISIT_CONFIG = {}\n', encoding="utf-8")
+    raw = {"auto_visit": {"defaults": {"enter_prompts": ["original"]}}}
+    change = ConfigurationChange.from_normalized(raw, sources={"auto_visit": "VOICE_AUTO_VISIT_CONFIG"})
+    raw["auto_visit"]["defaults"]["enter_prompts"].append("late mutation")
+    copy = change.to_updates()
+    copy["auto_visit"]["defaults"]["enter_prompts"].append("also late")
+    runtime = SimpleNamespace()
+    create_configuration(path=path, runtime_config=lambda: runtime).save_fields(change)
+    assert runtime.VOICE_AUTO_VISIT_CONFIG == {"defaults": {"enter_prompts": ["original"]}}
+
+
 @pytest.mark.parametrize("failed", [False, True])
 def test_cancelled_save_observes_disk_completion_and_releases_storage(tmp_path, monkeypatch, failed):
     import os

@@ -3,23 +3,7 @@ import asyncio
 import contextlib
 from typing import Any
 
-from voice_agent.backends.mimo_cascade import clamp_reply, sanitize_for_tts
-
-
-def announcement_instruction(kind: str, template: str) -> str:
-    if kind not in {"enter", "leave"}:
-        raise ValueError("kind must be enter or leave")
-    action = "刚进入语音房，向大家自然打招呼" if kind == "enter" else "即将退出语音房，向大家自然告别"
-    return (
-        f"【内部语音事件指令，不是真人发言】{action}。"
-        "结合当前人设，每次重新组织为一到两句中文口语，总共不超过35字。"
-        "只表达下面的意图，不引用此前房间或对话历史，不解释指令，不说系统信息。"
-        f"意图：{template}"
-    )
-
-
-def clean_announcement(text: str) -> str:
-    return clamp_reply(sanitize_for_tts(text), limit=35)
+from dialogue import clean_announcement
 
 
 async def run_announcement(agent: Any, kind: str, template: str, visit_id: str | None, epoch: int,
@@ -31,7 +15,7 @@ async def run_announcement(agent: Any, kind: str, template: str, visit_id: str |
     agent._announcement_audio = 0
     agent._announcement_text = ""
     agent._announcement_error = ""
-    agent._pending = None
+    agent.reply_scheduler.reset()
 
     def check_current() -> None:
         if (epoch != agent._operation_epoch or not agent._joined
@@ -86,8 +70,8 @@ async def run_announcement(agent: Any, kind: str, template: str, visit_id: str |
         if not drain.get("ok"):
             raise RuntimeError(drain.get("error") or "playback did not complete")
         agent.last_reply = text
+        await agent._record_output("", text, "announcement", session, "completed")
         if not agent.live_mode:
-            agent.memory.append("assistant", text, user_key="announcement", channel_key=f"{agent._area}/{agent._channel}")
             agent.turns += 1
         return {"ok": True, "text": text, "error": ""}
 

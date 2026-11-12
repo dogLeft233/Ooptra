@@ -1,6 +1,6 @@
 # 部署任务与受管执行
 
-状态：待实现内部设计，应用与父进程都属于此能力的不同角色。公开 API 及生命周期见 [系统维护](../../README.md)；不新增一个部署服务或通用工作流引擎。当前证据入口：`MaintenanceService`、`maintenance_worker.switch/supervise`、`launcher.py`。
+状态：现有维护门面、更新网络适配和受管父进程已迁入 `service.py`、`network.py`、`supervisor.py`，应用与父进程是此能力的不同角色。公开入口见 [系统维护](../../README.md) 的 `api.Maintenance`、`api.UpdateTransport`、`api.Supervisor`。下文版本化计划、CAS、显式 quiesce/handoff 为后续目标设计，不能视作当前实现。
 
 ## 边界与结构
 
@@ -62,6 +62,8 @@ switching/checking → rolling-back → rolled-back | failed（需人工恢复�
 
 本子模块可调用 [备份能力](../backups/README.md)，读取 [配置检查](../configuration/README.md) 的只读指纹，并使用 operations 公共管理端口；后两者不反向调用部署。operations 外观持有小型 mutation gate 协调“配置提交/热应用”和“维护受理”，只负责互斥，不再存一套任务状态机。
 
-先提取查询/计划/台账，与原路由并存适配，再迁移准备与父进程交接；最后移除旧私有入口。每步校验历史 job/schema 可读、旧部署启动不丢身份数据、手动 main.py 仍明确不支持受管切换。
+查询、台账、准备和父进程监督已迁入；WebUI 只保留 HTTP 适配，旧 `maintenance_worker/network/storage/cleanup` 文件已移除。当前仍读写原有 JSON schema 和阶段名，准备完成后发出停机回调、父确认退出后切换；尚无目标版本化计划和显式 handoff 对象。手动 main.py 仍明确不支持受管切换。
 
 现有证据测试：`tests/test_maintenance_worker.py`、`tests/test_maintenance_atomic_status.py`、`tests/test_maintenance_deadlines.py`、`tests/test_maintenance_health.py`、`tests/test_maintenance_rehearsal.py`。需新增目标端口行为：重复计划只受理一次、配置变化使计划失效、准备中 HTTP 超时、交接单写者、PID 复用拒绝、候选降级成功、checking期间新进程写请求被拒、quiesce后确实触发退出、部分关闭失败不伪报旧服务正常、回滚失败保留证据。隔离 fixture 模拟进程和文件；不在当前部署执行真实升级。
+
+`MaintenancePlatform` 注入外部时钟、命令、网络、存储与健康查询。备份/删除/清理的线程由服务观察至真实结束，等待者取消不释放正在使用的变更许可。准备线程由 `close` 等待，不允许父进程切换与仍在准备的线程并行。现有隔离 `test_maintenance_rehearsal.py` 继续验证真实子进程切换与候选失败回滚，不在当前仓库执行升级。

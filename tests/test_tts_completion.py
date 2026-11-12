@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from channels import create_duplex as VoiceDuplex
 from oopz_sdk.transport.voice_browser import BrowserVoiceTransport
-from voice_agent.duplex import VoiceDuplex
 
 
 def test_completion_waits_for_source_and_audio_clock_tail():

@@ -8,8 +8,9 @@ import dataclasses
 import io
 import wave
 
-from voice_agent.backends import create_backend
-from voice_agent.settings import VoiceAgentSettings
+from behavior import create_reply_policy
+from dialogue import create_backend
+from operations.models import VoiceAgentSettings
 
 
 class EphemeralMemory:
@@ -24,7 +25,7 @@ class EphemeralMemory:
 
 
 def saved_prompts(config, kind: str, area: str = "") -> list[str]:
-    from voice_agent.auto_visit_settings import effective_area
+    from behavior import effective_area
     if kind not in {"enter", "leave"}:
         return []
     policy = effective_area(config, area) if area else config.defaults
@@ -51,7 +52,7 @@ class PreviewService:
         fresh = dataclasses.replace(settings)
         if voice:
             fresh.mimo_tts_voice = fresh.gemini_voice = fresh.aliyun_tts_voice = voice
-        backend = create_backend(fresh, EphemeralMemory())
+        backend = create_backend(fresh, EphemeralMemory(), reply_policy=create_reply_policy())
         async with self._lock:
             try:
                 return await asyncio.wait_for(self._generate(backend, fresh, kind, text), 30)
@@ -65,7 +66,7 @@ class PreviewService:
                     await asyncio.gather(cleanup, return_exceptions=True)
 
     async def _generate(self, backend, settings, kind: str, text: str) -> dict:
-        if settings.backend in {"mimo", "mimo_cascade", "cascade", "cascade_mimo", "aliyun_deepseek"}:
+        if not backend.capabilities().live:
             actual = text if kind == "voice" else await backend.rewrite_announcement(kind, text)
             pcm, rate = await backend.tts(actual)
         else:

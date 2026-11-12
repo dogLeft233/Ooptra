@@ -1,12 +1,12 @@
 import pytest
 
-from webui import maintenance_worker as worker
+from tests.support.maintenance_harness import maintenance_worker as worker
 
 
 def test_detached_updated_install_retains_its_verified_source(tmp_path, monkeypatch):
-    from webui.maintenance import MaintenanceService
+    from tests.support.maintenance_harness import MaintenanceService
 
-    monkeypatch.setattr("webui.maintenance.__version__", "261007-dev")
+    monkeypatch.setattr("tests.support.maintenance_harness.maintenance.__version__", "261007-dev")
     current = "a" * 40
     git_dir = tmp_path / ".git"
     git_dir.mkdir()

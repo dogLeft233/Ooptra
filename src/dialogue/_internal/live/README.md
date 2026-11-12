@@ -1,6 +1,6 @@
 # 实时模型会话
 
-状态：**待实现的内部设计**。现有 Gemini 仍在 `src/voice_agent/backends/gemini_live.py`；本文不是已验证供应商保证。公开能力见 [对话生成](../../README.md)，实际房间/播放归渠道，接话策略归行为，来源与记忆归上下文。
+状态：**Gemini 会话实现已迁入，提议/许可式接口待实现**。当前 [会话实现](gemini_live.py) 拥有 WebSocket、重连、迟到转写和工具任务；使用注入策略，结束或丢弃回合通过不可变 `GeneratedTurn` 回调交给应用，完全不写权威历史。以下完整事件/许可契约仍是目标设计，本文不是已验证供应商保证。公开能力见 [对话生成](../../README.md)，实际房间/播放归渠道，接话策略归行为，来源与记忆归上下文。
 
 ## 边界与选择
 
@@ -77,6 +77,8 @@ allowed → interrupted / failed
 
 设计故障序列：先出音频 → Hold → turnComplete → 2 秒窗口内关键词转录修订 → Allow → 仅一次释放原缓存；超时后的相同转录不复活；Allow 与切房并发则渠道仍拒绝旧 S1；工具未回执时关闭，旧结果不发送新连接；控制工具提出退房/音量先经行为与渠道，工具取消后不得把新轮误退房，退房成功但原 socket 关闭不重发动作；Allow 重复响应返回原绑定、未受理才发 NotExecuted(permission)；慢消费者不能阻止收到 interrupted。
 
-现有证据为 `GeminiLiveBackend._handle_server_msg/_reset_session/close`、`VoiceAgent._wire_live` 以及 `tests/test_conversation_window.py`、`tests/test_gemini_session_lifecycle.py`、`tests/test_live_turn_lifecycle.py`、`tests/test_astrbot_live_context.py`。当前实现仍在后端内判断概率/窗口并写 MemoryStore/ContextBridge，不能称为本文边界已成立。
+现有证据为 `GeminiLiveBackend._handle_server_msg/_reset_session/close`、`VoiceAgent._wire_live` 以及 `tests/test_conversation_window.py`、`tests/test_gemini_session_lifecycle.py`、`tests/test_live_turn_lifecycle.py`、`tests/test_astrbot_live_context.py`。当前实现仍在后端内协调概率/窗口许可；策略实例由行为注入，MemoryStore/ContextBridge 写入已全部移出生成。完整提议/许可与有界 dispatcher 仍待落地，不能称为本文全部边界已成立。
 
-首个切片使用现有 JSON 消息夹具构造真实适配的隔离试验：reader/dispatcher/闸门保留真实代码，替换网络和行为端口，断言未获批输出为零、ID/修订不串轮、字节上限、晚转录兼容、关闭无悬空任务。随后移除后端策略和直接记忆写入。该试验通过才开始替换现有 Live 通路；真实模型与房间的时序/延迟仍须按语音联调验收实测，不用夹具通过冒充供应商验证。
+首个切片使用现有 JSON 消息夹具构造真实适配的隔离试验：reader/dispatcher/闸门保留真实代码，替换网络和行为端口，断言未获批输出为零、ID/修订不串轮、字节上限、晚转录兼容、关闭无悬空任务。直接记忆写入已移除；后续继续迁出后端中的策略协调。该试验通过才开始替换现有 Live 通路；真实模型与房间的时序/延迟仍须按语音联调验收实测，不用夹具通过冒充供应商验证。
+
+当前撤销能力 `detach_completed_input` 原子移交已完成缓存轮次的用户事实并丢弃助手缓存，重复取出为空。晚转录窗口仍由生成判断：窗口内到达修订可拼回该完成轮，过期后的片段不附到已撤销轮；尚未turnComplete的收集片段不作为完成输入交付。取消、来源刷新与换绑的真实消息回归见 `tests/test_voice_history_outcomes.py`。

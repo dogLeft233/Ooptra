@@ -5,8 +5,8 @@ import sys
 
 import pytest
 
-from webui.maintenance import MaintenanceService
-from webui.maintenance_storage import BackupStore
+from operations import create_backup_store as BackupStore
+from tests.support.maintenance_harness import MaintenanceService
 
 
 def candidate(root, name, content=b"retired"):
@@ -99,7 +99,7 @@ def test_unreadable_runtime_record_blocks_cleanup_conservatively(tmp_path):
 
 
 def test_expired_cleanup_preview_leaves_every_candidate_intact(tmp_path, monkeypatch):
-    from webui import maintenance
+    from tests.support.maintenance_harness import maintenance
     retired = candidate(tmp_path, ".venv-update-" + "a" * 32)
     service = MaintenanceService(tmp_path)
     preview = service.preview_cleanup()
@@ -110,7 +110,7 @@ def test_expired_cleanup_preview_leaves_every_candidate_intact(tmp_path, monkeyp
 
 
 def test_storage_query_reuses_scan_but_new_backup_invalidates_it(tmp_path, monkeypatch):
-    from webui import maintenance
+    from tests.support.maintenance_harness import maintenance
     original = maintenance.inventory
     scans = []
     def tracked(*args):

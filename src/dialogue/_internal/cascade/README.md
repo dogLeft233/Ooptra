@@ -1,6 +1,6 @@
 # 级联识别与表达
 
-状态：**待实现的内部设计**。现有入口仍在 `src/voice_agent/backends/`。本页定义级联内部边界；公开契约及依赖以 [对话生成](../../README.md) 为准，实际播放、历史提交与额度不在这里。
+状态：**供应商实现已迁入，任务式契约待实现**。当前入口为 [MiMo](mimo_cascade.py) 与 [阿里/DeepSeek](aliyun_deepseek.py)，由模块工厂装配。生成读取已确认历史、返回不可变结果，不再提前追加用户/助手历史；应用根据播放结果提交。以下任务式接口仍是目标设计。本页定义级联内部边界；公开契约及依赖以 [对话生成](../../README.md) 为准，实际播放、历史提交与额度不在这里。
 
 ## 为什么保留为一个内部子模块
 
@@ -51,14 +51,14 @@ created → closed
 
 生成通过工厂注入的 `ContextToolPort` 执行 recall/remember，协议定义见 [模块公开契约](../../README.md)。LLM 只能给查询或内容；context_ref、授权 grant 引用和目标由已准备上下文及合法请求给定，不能让模型提供任意来源。工具结果可继续用于本轮提示，但不是“外部记忆已成功”的空泛承诺。
 
-已准备上下文和工具结果是证据输入，助手全文仍为生成草稿。任务不调用 `MemoryStore.append`、`ContextBridge.record_turn` 或更改 outbox。实际发送/播放范围由应用将渠道结果与生成证据提交上下文。
+已准备上下文和工具结果是证据输入，助手全文仍为生成草稿。任务不调用 `MemoryStore.append`、`ContextBridge.record_turn` 或更改 outbox。实际发送/播放范围由应用将渠道结果与生成证据提交上下文。当前兼容桥接调用捕获创建时的来源代次，外部请求完成及每次工具调用前后复查；来源切换会拒绝旧生成，不能把旧模型的工具请求投递到新来源。
 
 ## 现状证据与迁移切片
 
-- `MimoCascadeBackend._decide_utterance` 目前混合 ASR、概率/窗口、控制判断、聊天、写历史与 TTS；`chat_with_intent` 把控制候选与回复合并。须保留外部行为，先让识别/分类可独立使用，再迁移策略与历史，不能把搬文件当完成。
-- `AliyunDeepSeekBackend.handle_utterance_stream/_queue_text/_clear_stream` 目前通过共享 `_audio_sink/_texts/_tts_task` 协调流；首个表达任务切片将这些状态收进 job，保留 DeepSeek 分句与阿里 TTS 的流式能力。
+- `MimoCascadeBackend._decide_utterance` 目前编排 ASR、注入的概率/窗口策略、控制判断、聊天与 TTS；`chat_with_intent` 把控制候选与回复合并。须保留外部行为，先让识别/分类可独立使用，再迁移策略与历史，不能把搬文件当完成。
+- `AliyunDeepSeekBackend.handle_utterance_stream/_queue_text/_clear_stream` 目前通过每实例 `_audio_sink/_texts/_tts_task` 协调流，生成互斥覆盖 sink 绑定、生成与清理，同实例并发调用串行而不串音；首个表达任务切片将这些状态收进 job，保留 DeepSeek 分句与阿里 TTS 的流式能力。
 - `VoiceBackend.effective_persona` 当前读取 context bridge；迁入后使用传入的 PreparedContext，不再追踪全局可变桥对象。
 
 可复查测试：`tests/test_aliyun_deepseek.py`、`tests/test_mimo_combined_intent.py`、`tests/test_mimo_decision_recovery.py`、`tests/test_mimo_chat_history.py`、`tests/test_backend_audit_regressions.py`。新模块测试目标目录为 `tests/dialogue/`，不预建空测试。
 
-首个切片：抽出阿里级联的独立表达 job，用真实分句/队列协调与模拟外部 WebSocket 验证；旧接话路径通过兼容适配调用，不立即重写所有后端。退出需证明两个并行 job 状态不串、NoControl 与分类失败可区分、固定台词不读历史、取消不留 sender/TTS、半轮失败不重播。随后逐项迁出 `_decide_utterance` 的策略和记忆职责；在此之前明确标为兼容过渡。
+首个切片：抽出阿里级联的独立表达 job，用真实分句/队列协调与模拟外部 WebSocket 验证；旧接话路径通过兼容适配调用，不立即重写所有后端。退出需证明两个并行 job 状态不串、NoControl 与分类失败可区分、固定台词不读历史、取消不留 sender/TTS、半轮失败不重播。权威记忆写入已迁出；随后逐项拆开 `_decide_utterance` 的策略流程；在此之前明确标为兼容过渡。

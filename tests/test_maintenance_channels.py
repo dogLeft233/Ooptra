@@ -3,8 +3,8 @@ import asyncio
 import pytest
 from test_maintenance_update import git
 
-from webui import maintenance
-from webui.maintenance_storage import atomic_json
+from operations import write_maintenance_record as atomic_json
+from tests.support.maintenance_harness import maintenance
 
 
 @pytest.fixture
@@ -29,10 +29,10 @@ def remote(monkeypatch, sha):
         return original(root, args, timeout, env)
 
     monkeypatch.setattr(maintenance, "run_command", run)
-    from webui import maintenance_network
+    from tests.support.maintenance_harness import maintenance_network
     def unavailable_api(*args):
         raise ValueError("offline test fixture")
-    monkeypatch.setattr(maintenance_network, "_api_sha", unavailable_api)
+    monkeypatch.setattr(maintenance_network, "api_lookup", unavailable_api)
 
 
 def test_beta_is_a_distinct_installed_channel(repo):

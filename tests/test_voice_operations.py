@@ -6,12 +6,12 @@ from types import SimpleNamespace
 import pytest
 from support.channel_fixtures import make_voice_agent as make_agent
 
-from voice_agent.settings import load_voice_agent_settings
+from operations import load_voice_agent_settings
 
 
 @pytest.mark.parametrize("operation", ["leave", "stop_current_reply"])
 def test_stop_reply_when_backend_query_completes_does_not_wait_forever(tmp_path, monkeypatch, operation):
-    from voice_agent.backends.base import VoiceReply
+    from dialogue.models import VoiceReply
 
     async def run():
         agent = make_agent(tmp_path)
@@ -100,9 +100,9 @@ def test_old_empty_room_check_cannot_leave_a_rejoined_room(tmp_path):
 
 def test_empty_guard_uses_real_agent_and_retries_failed_manual_exit(tmp_path):
     async def run():
-        from voice_agent.auto_visit import AutoVisitController
-        from voice_agent.auto_visit_settings import parse_auto_visit_config
-        from voice_agent.auto_visit_state import AutoVisitStateStore
+        from behavior import create_auto_visits as AutoVisitController
+        from behavior import create_visit_store as AutoVisitStateStore
+        from behavior import parse_auto_visit_config
 
         agent = make_agent(tmp_path)
         agent._bot.config = SimpleNamespace(person_uid="bot")
@@ -119,7 +119,7 @@ def test_empty_guard_uses_real_agent_and_retries_failed_manual_exit(tmp_path):
             sleep=asyncio.sleep,
         )
         store = AutoVisitStateStore(tmp_path / "visits.json")
-        ctrl = AutoVisitController(agent, parse_auto_visit_config({}), store, clock=clock)
+        ctrl = AutoVisitController(agent, parse_auto_visit_config({}), store, enabled=lambda: agent.settings.enabled, clock=clock)
         agent.set_operation_callback(ctrl.on_operation)
         ctrl.set_bot_ready(True)
         try:
@@ -344,7 +344,8 @@ def test_retirement_blocks_new_remote_input_without_stopping_current_reply(tmp_p
         assert agent.begin_auto_retirement("v")
         await agent._on_remote_pcm("human", b"\x00\x40" * 320, 16000)
         assert agent._speaking, "new human audio barged into the retiring reply"
-        assert agent._pending is None
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(agent.reply_scheduler.next(0), 0.01)
         await agent.leave()
         assert not agent._retiring_visit_id
     asyncio.run(run())

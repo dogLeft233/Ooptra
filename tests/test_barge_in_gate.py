@@ -24,8 +24,8 @@ from typing import Any
 
 from support.channel_fixtures import establish_room
 
+from operations import load_voice_agent_settings
 from voice_agent.agent import VoiceAgent
-from voice_agent.settings import load_voice_agent_settings
 
 #: 16k / mono / 16bit 的 20ms 音频帧。
 #: 采样值 0x4000 = 16384 → 归一化 RMS 0.5，稳过 _BARGE_IN_ENERGY(0.012)
@@ -39,6 +39,9 @@ FRAMES_TO_HOLD = HOLD_MS // FRAME_MS  # 15
 
 
 class FakeDuplex:
+    output_muted = False
+    output_volume = 50
+
     def __init__(self) -> None:
         self.stop_calls = 0
 
@@ -112,9 +115,7 @@ async def _make_agent(*, hold_ms: int = HOLD_MS) -> tuple[VoiceAgent, FakeDuplex
     agent.settings.sample_rate_in = 16000
     agent._bot = None
     agent._speaking = False
-    agent._barge_in_armed = True
     agent._live_output_lock = asyncio.Lock()
-    agent._barge_in_speech_ms = {}
     agent._user_buffers = {}
     agent._vad = None
     agent._task = None

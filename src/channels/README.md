@@ -1,6 +1,8 @@
 # 渠道交互
 
-当前状态：**首个房间控制切片已实现，第一批尚未整体验收**。已实现契约以 [api.py](api.py)、[models.py](models.py) 和 [工厂](__init__.py) 为准；下文其余能力仍为待实现目标。全局规则见 [系统架构](../../ARCHITECTURE.md)，目录约束见 [代码要求](../../docs/coding-standards.md#模块目录与接口导航)。
+当前状态：**房间控制、目录与音频能力已实现，完整动作/事件协议仍待迁移**。已实现契约以 [api.py](api.py)、[models.py](models.py) 和 [工厂](__init__.py) 为准；下文其余能力仍为待实现目标。全局规则见 [系统架构](../../ARCHITECTURE.md)，目录约束见 [代码要求](../../docs/coding-standards.md#模块目录与接口导航)。
+
+`create_playback(channel, session, duplex)` 提供迁移期单次 `Playback`：拥有提交证据、静音抑制、打断与三十秒排空确认，应用只消费不可变 `PlaybackResult`。它不包含生成选择、历史可提交性或完整 Play 动作台账；取消与原会话校验见 [公开契约](api.py)。
 
 ## 职责与非职责
 
@@ -12,8 +14,8 @@
 | --- | --- | --- |
 | 平台与文字适配 | Oopz/OneBot 编解码、身份映射、连接重试；保留现有映射库 | `src/bridge/`、`src/oopz/`、`src/onebot_v11/` |
 | [房间会话](_internal/session/README.md) | bot 绑定、真实房间、会话代次、进退房互斥、断连清理 | `VoiceAgent.join/leave`、`BridgeController` |
-| [音频收发与播放](_internal/output/README.md) | PCM 格式、采集窗口、输出背压、静音和音量、流结束确认 | `VoiceDuplex`、`voice_agent/output_controls.py`、SDK voice 适配 |
-| 动作执行台账 | 动作去重、执行前置条件、终态与取消、可查询结果 | `voice_agent/operations.py` 和 `VoiceAgent` 中执行协调 |
+| [音频收发与播放](_internal/output/README.md) | PCM 格式、采集窗口、输出背压、静音和音量、流结束确认 | `create_duplex` / `create_output_controls` / `create_vad`，实现位于内部 output；SDK voice 适配 |
+| 动作执行台账 | 动作去重、执行前置条件、终态与取消、可查询结果 | `Channel.execute/outcome` 及 `models.RoomOperation`；`VoiceAgent` 仍有高层流程协调 |
 
 采集端负责音频质量和分段边界，不解释自然语言；无人时长等策略从语音活动观察计算。SDK 内状态是适配实现，模块外不再读取它构造第二份真实状态。
 
@@ -25,7 +27,7 @@
 
 首个切片已覆盖旧会话拒绝、重复动作、排队取消、进房取消补偿、退房失败、在途推送屏障、换绑迟到结果和不合作传输超时；调用示例及验收见 [渠道契约测试](../../tests/channels/test_room_contract.py)。运行 `python -m pytest tests/channels -q`。
 
-仍待迁移：bot/duplex 异步换绑及释放、手动抢占调度、VoiceAgent 的高层操作锁/控制代次、完整 Play/SendText 及事件流。当前不支持显式 `cancel`；不宣称跨重启去重、完整帧格式校验或播放完成确认。`push_audio` 成功只表示一次传输提交；不替代下一批的播放终态。
+仍待迁移：bot/duplex 异步换绑及释放、手动抢占调度、VoiceAgent 的高层操作锁/控制代次、完整 Play/SendText 及事件流。当前不支持显式 `cancel`；不宣称跨重启去重、完整帧格式校验或统一播放终态。`push_audio` 成功只表示一次传输提交；不替代下一批的播放终态。
 
 ## 后续公开契约
 
@@ -95,3 +97,9 @@
 ## 实现与阅读顺序
 
 迁入后依次阅读 `api.py` → `models.py` → 所需 `_internal/` 实现。内部能力是职责划分，不要求立即创建同名目录、类或文档；具有独立状态和维护需求时再增加子模块说明。跨模块只使用公开契约，工厂由应用装配，禁止返回内部可变对象。迁移批次与验收见 [重构准备计划](../../docs/superpowers/plans/2026-11-08-module-refactor-readiness.md)。
+
+### 本批音频迁移
+
+音频采集、200 帧有界队列、输出音量/静音和 VAD 已从旧目录迁入 `_internal/output/`；使用 [公开接口](api.py) 与包工厂。采集回调及队列按 capture epoch 隔离，关闭后清理旧帧；重启不能投递旧回调。相对音量策略由行为解析，通过 `OutputControls.adjust` 在共享输出控制锁内取得当前音量，保存成功与音频应用结果分别报告。配置读写只经注入保存端口。
+
+验证：`tests/channels/test_duplex_lifecycle.py`，以及原 `test_voice_output_controls.py` / `test_tts_completion.py` / `test_vad.py`；完整播放动作与帧台账仍是内部目标设计。

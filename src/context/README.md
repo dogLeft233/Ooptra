@@ -1,6 +1,6 @@
 # 上下文管理
 
-当前状态：**目标设计，业务代码尚未迁入**。以下签名为待实现契约，不可直接导入；首条真实路径迁入时创建 `api.py`、`models.py` 和工厂，之后以代码契约为准，删除本文重复签名。全局规则见 [系统架构](../../ARCHITECTURE.md)，目录约束见 [代码要求](../../docs/coding-standards.md#模块目录与接口导航)。
+当前状态：**部分迁移**。本地 JSONL 历史、具名确认回合提交与 AstrBot 来源/RPC/outbox 已进入本模块；情境投影、完整事务台账与授权 grant 仍是目标契约。已实现接口以 [api.py](api.py)、[models.py](models.py) 和包工厂为准。全局规则见 [系统架构](../../ARCHITECTURE.md)，目录约束见 [代码要求](../../docs/coding-standards.md#模块目录与接口导航)。
 
 ## 职责与非职责
 
@@ -17,6 +17,16 @@
 目标内部依赖：模块协调器 → situation、memory、sources；sources → memory的窄投递端口；memory和situation不反向导入sources。共享数据用本模块具名类型。协调器只组合快照与准备/记录流程，不保存第二份来源、历史或当前房间状态。
 
 比较后选择三项深能力：单一大ContextBridge容易混淆临时等待和耐久状态；把历史与outbox拆开则迫使调用者处理双写与恢复。因此将二者合并为台账，把独立变化的情境投影和外部协议分开。内部目录只保存本次必要设计，Python文件随真实迁移创建。
+
+## 已实现使用入口
+
+应用通过 `context.create_memory(path, max_turns)` 和 `context.create_context_bridge(timeout=..., outbox_path=...)` 装配；旧 `voice_agent.memory`、`voice_agent.context_bridge` 已移除。
+
+- `ConversationHistory` 拥有本地 JSONL 文件与人格。`record(ConfirmedTurn)` 在同一锁、一次文件写入中提交输入及已确认助手回复，返回本地 `RecordReceipt`；未完成输出不得携带完整助手文字。返回成功不代表 fsync 或 AstrBot 写入确认，也不保证跨提交幂等。`append` 保留独立输入记录与兼容能力，实际输出由应用确认后提交。
+- `SourceBridge` 拥有来源准备、短 RPC、待写队列与租约。`bind_turn(speaker=...)` 返回本轮 `TurnRecorder`，固定原会话/来源/授权并幂等提交；迟到结果只投递原目标、不更新新会话历史，持久失败不标记已提交。`prepare` 结果绑定原准备代次；`clear` 不清理已受理写入和 `bindings`。`context`、`history`、`poll` 都返回独立快照，不开放可变队列。
+- protocol=1 写请求先写 outbox 再提供给 worker；取消等待保留原 request ID/原目标。落盘失败抛出 `OSError`，不宣称已排队；恢复数据不合法时拒绝启动写入。构造器的 `outbox_path=None` 仅用于明确选择内存模式的调用方。
+
+`create_turn_submission(history, bridge, speaker=...)` 固定原来源和存储，返回一次 `TurnSubmission`。首次 `record(ConfirmedTurn)` 受理事实，正常记录和取消兜底共用同一任务；上下文拥有 JSONL 线程及取消后的真实完成观察，失败保留为同一次失败，不重新受理或当成成功。取消在受理任务结束后传播。同步历史的其他操作与 outbox 文件操作仍会阻塞调用线程。当前 JSONL 历史与 outbox JSON 仍分别保存，**未实现共同事务**；近期历史尚未按房间/来源严格隔离。下面设计中的 `record(OutputRecord)`、`delivery`、授权 grant 与 SQLite 导入不能视作当前 `ConversationHistory.record(ConfirmedTurn)` 已具备的能力。
 
 ## 待实现公开契约
 
@@ -39,7 +49,7 @@
 
 只允许向下引用 `channels.models` 和公共技术机制；不导入行为、生成、维护或 WebUI。AstrBot 协议在自己的适配内部；[现有同步说明](../../docs/astrbot-context-sync.md) 是迁移兼容依据，不改写外部协议。
 
-现有证据：`tests/test_astrbot_context_bridge.py`、`tests/test_astrbot_live_context.py`、`tests/test_memory_recent.py`。迁入后在 `tests/context/` 验证隔离、迟到观察、持久化失败、重复结果和回执、切来源后旧 outbox；公开契约尚未实现。
+验证入口：`tests/context/` 覆盖来源快照隔离、准备完成后切换、取消写入后的原 ID 恢复、磁盘失败与坏恢复数据，以及 JSONL 解析和具名回合提交；既有 `tests/test_astrbot_context_bridge.py`、`tests/test_astrbot_live_context.py`、`tests/test_memory_recent.py` 保留协议与运行回归。执行 `python -m pytest -q tests/context tests/test_astrbot_context_bridge.py tests/test_astrbot_live_context.py tests/test_memory_recent.py`。尚未验证目标事务台账、按 action ID 幂等与完整授权 grant。
 
 ## 最小数据形状与调用
 
@@ -49,11 +59,8 @@
 
 ## 实现与阅读顺序
 
-迁入后依次阅读 `api.py` → `models.py` → 所需 `_internal/` 实现。内部能力是职责划分，不要求立即创建同名目录、类或文档；具有独立状态和维护需求时再增加子模块说明。跨模块只使用公开契约，工厂由应用装配，禁止返回内部可变对象。迁移批次与验收见 [重构准备计划](../../docs/superpowers/plans/2026-11-08-module-refactor-readiness.md)。
+依次阅读 `api.py` → `models.py` → 所需 `_internal/` 实现。内部能力是职责划分，不要求立即创建同名目录、类或文档；具有独立状态和维护需求时再增加子模块说明。跨模块只使用公开契约，工厂由应用装配，禁止返回内部可变对象。迁移批次与验收见 [重构准备计划](../../docs/superpowers/plans/2026-11-08-module-refactor-readiness.md)。
 
+Live 生成证据到达时也固定本轮 `TurnSubmission`。播放仍在排空时取消，应用只交付原用户输入；已受理正常提交的取消兜底复用同一结果，不追加未确认助手文本，也不另建外部请求。
 
-## 当前兼容路径的回合绑定
-
-迁移前的实现入口为 [`ContextBridge.bind_turn`](../voice_agent/context_bridge.py)，返回具名 `TurnRecorder` 端口，隐藏原会话、房间、来源作用域、写授权与幂等记录状态。`VoiceAgent._handle_streamed_reply` 在启动本轮前绑定，正常结果与取消后的最终识别共用同一记录端口。原目标 outbox 可继续按既有规则交付，旧会话结果不更新新会话 history；入队不代表外部确认。没有扩大原来源的写权限。
-
-本地 `MemoryStore` 仍由旧后端流程调用：取消时幂等保留已识别用户输入，合成未完成时不追加完整助手内容。这是当前迁移差距，不代表目标事务接口已实现。验证见 `tests/test_astrbot_context_bridge.py` 与 `tests/test_aliyun_deepseek.py`。
+一次提交分别尝试外部 outbox 与本地 JSONL，任一失败不跳过另一份已授权记录。仅外部失败时，在本地完成后抛出原外部异常；本地也失败时抛本地异常并用显式 `__cause__` 保留外部异常，两边失败均可观察且兼容 Python 3.10。失败优先于等待取消。重复等待不重试任一存储，成功一边不会被补写第二份；没有跨文件原子性承诺。

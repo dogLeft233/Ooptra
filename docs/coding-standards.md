@@ -38,13 +38,13 @@ src/
     legacy.py               # 按需添加：唯一的旧业务模块兼容入口
 ```
 
-- 当前渠道已有首个进退房/最小音频入口，其余目标模块主要为导航设计；迁入真实路径时再添加具体类型和工厂。公开接口以 `api.py` 为事实来源，README 保留导航与必要约定，避免长期维护两份接口清单。
+- 五模块均已迁入实际运行能力；新增能力仍须有真实调用方，不提前创建空接口。公开接口以 `api.py` 为事实来源，README 保留导航与必要约定，避免长期维护两份接口清单。
 - 外部调用者通过 `<module>.api`、`<module>.models` 使用契约；装配通过包顶层导出的工厂创建实现。公开名称显式导出，避免 `import *`。`api.py` 和 `models.py` 独立于 `_internal/`，通过参数注入依赖。
 - 跨模块传递拥有者定义的公开类型。接收者需要不同形状时在自己的适配处转换，避免双向导入或将所有业务类型放进 `core`。跨模块契约形成环时调整类型归属与注入方向。
 - 业务模块内部按实际复杂度分文件。先用简单文件组织；仅在具有独立职责、状态或替换需求时增加子模块。避免统一强加 `controller/service/repository` 多层转发或为每个类建立目录。
 - 新增一级业务模块时先修改架构与目录检查规则，说明现有模块无法容纳该职责的原因。`app` 只协调，`core` 只存通用机制，二者避免形成新的业务中心。
 - 旧目录 `bridge`、`oopz`、`onebot_v11`、`voice_agent`、`webui` 仍承载现有实现，允许修复和迁移；独立新能力优先放目标模块。旧依赖集中在目标模块的 `_internal/legacy.py`，渠道的 SDK 适配可直接在 `channels/_internal/adapters/` 内依赖 `oopz_sdk`。适配只做转换和委托，业务状态归目标模块。
-- `python scripts/check_architecture.py` 检查允许的 `src` 一级目录、目标模块结构、公开入口、跨模块私有导入及旧模块依赖位置。本地提交钩子和 CI 执行同一检查。它按根架构检查目标模块依赖方向，拒绝逆向业务环；不执行应用，不分析动态导入、对象属性、工厂返回类型及模块内部/旧模块环；这些仍按 [代码审查要求](code-review.md) 核对。旧模块互相调用暂不纳入新契约检查。
+- `python scripts/check_architecture.py` 检查允许的 `src` 一级目录、目标模块结构、公开入口、跨模块私有导入及旧模块依赖位置。本地提交钩子和 CI 执行同一检查。它按根架构检查目标模块依赖方向，拒绝逆向业务环；不执行应用，不分析动态导入、对象属性、工厂返回类型及模块内部/旧模块环；这些仍按 [代码审查要求](code-review.md) 核对。已迁出的旧实现路径禁止重新创建；其他旧模块互相调用暂不纳入新契约检查。
 
 测试集中在 `tests/` 并按模块分目录，具体归属和迁移规则见 [测试导航](../tests/README.md)。
 
@@ -69,7 +69,7 @@ src/
 接口模板沿用真实模块，避免另建平行示例：
 
 ```python
-from voice_agent.voice_control import VolumeCommand, parse_volume_command
+from behavior.models import VolumeCommand, parse_volume_command
 
 
 def require_volume_command(raw: object) -> VolumeCommand:
@@ -79,7 +79,7 @@ def require_volume_command(raw: object) -> VolumeCommand:
     return command  # 调用方继续传递 command，而不是 raw。
 ```
 
-`src/voice_agent/voice_control.py` 是首批严格类型检查的解析模块：动作使用 `Literal`，构造器检查音量范围和退房/音量互斥关系。现有单一 `VolumeCommand` 仍用运行时约束表达 action/value 关系；类型检查尚不能从 `action == "set"` 单独推导 value 非空。旧后端中的字典协议仍需渐进迁移，不把该试点视为全库完成。
+`src/behavior/models.py` 持有严格类型检查的语音控制解析类型：动作使用 `Literal`，构造器检查音量范围和退房/音量互斥关系。现有单一 `VolumeCommand` 仍用运行时约束表达 action/value 关系；类型检查尚不能从 `action == "set"` 单独推导 value 非空。生成的 `VoiceReply.control` 保留解析对象；供应商其他协议边界继续按需迁移，不把该试点视为全库完成。
 
 新建或修改解析边界时，补充非法输入、直接构造绕过、解析结果被消费的回归测试；按实际约束覆盖布尔值混入整数、缺字段、未知操作、额外字段、越界及互斥组合。类型完整后将模块加入 `tool.pyright.strict`，验证调用方也接收具体类型。
 
