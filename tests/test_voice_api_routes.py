@@ -21,8 +21,8 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from app.http import VoiceApiServer
 from operations.models import VoiceApiSettings
-from voice_agent.api import VoiceApiServer
 from webui.voice_routes import build_voice_routes, mount_voice_routes
 
 # ----------------------------------------------------------------------
@@ -65,6 +65,11 @@ class FakeMemory:
 
 
 class FakeAgent:
+    @property
+    def directory(self):
+        from channels import create_oopz_directory
+        return create_oopz_directory(self._bot)
+
     def __init__(self, members_result: Any = None) -> None:
         self.settings = FakeSettings()
         self.memory = FakeMemory()
@@ -93,7 +98,7 @@ class FakeAgent:
         return {"ok": True}
 
     async def speak_text(self, text: str) -> dict:
-        # 与 VoiceAgent.speak_text 保持一致：空文本是错误，不是成功
+        # 与 VoiceCoordinator.speak_text 保持一致：空文本是错误，不是成功
         if not (text or "").strip():
             return {"ok": False, "error": "text required"}
         return {"ok": True, "chars": len(text), "mode": "live"}

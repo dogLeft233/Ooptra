@@ -6,15 +6,16 @@ import sys
 import pytest
 
 from tests.support.maintenance_harness import maintenance_worker as worker
+from tests.support.maintenance_harness import switch_stopped
 
 
 def git(root, *args):
     return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
 
 
-@pytest.mark.parametrize("candidate", ["ready", "crash", "not_ready", "no_supervisor"])
+@pytest.mark.parametrize("candidate", ["ready", "gated_ready", "crash", "not_ready", "no_supervisor"])
 def test_real_process_switch_and_failed_candidate_rollback(tmp_path, monkeypatch, candidate):
-    crash = candidate != "ready"
+    crash = candidate not in {"ready", "gated_ready"}
     check_health = worker.healthy
     monkeypatch.setattr(worker, "healthy", lambda process, job, timeout=3: check_health(process, job, timeout=timeout))
     with socket.socket() as probe:
@@ -22,11 +23,15 @@ def test_real_process_switch_and_failed_candidate_rollback(tmp_path, monkeypatch
         port = probe.getsockname()[1]
     code = '''import json, os, sys, threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+def activation_allowed():
+    try: return json.loads(Path("data/maintenance/job.json").read_text()).get("phase") in {"complete", "rolled_back"}
+    except (OSError, ValueError): return False
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(json.dumps({"ok": True, "process": {"pid": os.getpid(), "executable": sys.executable, "update_id": os.environ.get("OOPTRA_UPDATE_ID"), "bootstrap_ready": True}, "bridge": {"runtime": {"supervisor_alive": True}, "oopz": {"connected": False}, "onebot": {"connected": False}}}).encode())
+        self.wfile.write(json.dumps({"ok": True, "process": {"pid": os.getpid(), "executable": sys.executable, "start_marker": os.environ.get("OOPTRA_PROCESS_MARKER"), "update_id": os.environ.get("OOPTRA_UPDATE_ID"), "bootstrap_ready": True}, "bridge": {"runtime": {"supervisor_alive": True}, "oopz": {"connected": False}, "onebot": {"connected": False}}}).encode())
     def log_message(self, *args): pass
 def control():
     if sys.stdin.readline().strip() == "OOPTRA_STOP": os._exit(0)
@@ -44,6 +49,9 @@ HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
     old = git(tmp_path, "rev-parse", "HEAD")
     replacement = {
         "ready": code + "\n# replacement\n",
+        "gated_ready": code.replace('"bootstrap_ready": True',
+            '"bootstrap_ready": True, "candidate_waiting_commit": not activation_allowed()').replace(
+            '"supervisor_alive": True', '"supervisor_alive": activation_allowed()'),
         "crash": "raise SystemExit(3)",
         "not_ready": code.replace('"bootstrap_ready": True', '"bootstrap_ready": False'),
         "no_supervisor": code.replace('"supervisor_alive": True', '"supervisor_alive": False'),
@@ -55,7 +63,7 @@ HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
     git(tmp_path, "checkout", "--detach", old)
     job = {"id": "rehearsal", "action": "update", "old_sha": old, "target_sha": target,
            "old_python": sys.executable, "new_python": sys.executable, "health_port": port}
-    process = worker.switch(tmp_path, job)
+    process = switch_stopped(tmp_path, job)
     try:
         assert process is not None
         assert job["phase"] == ("rolled_back" if crash else "complete")

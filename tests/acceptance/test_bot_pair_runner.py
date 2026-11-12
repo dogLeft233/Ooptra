@@ -45,11 +45,15 @@ def test_pair_requires_completed_audio_and_always_leaves(tmp_path, produce_audio
                     opening = True
                     for instance in instances:
                         with (instance.root / "logs/oopz_bot.log").open("a", encoding="utf-8") as stream:
-                            stream.write(("流式语音回合完成：已输出音频=True\n" if produce_audio else "流式语音回合完成：已输出音频=False\n") * 3)
+                            stream.write("流式语音回合完成：已输出音频=True\n" * 3)
                     return web.json_response({"ok": True, "pcm_bytes": 400})
                 status = {"joined": rooms[index], "speaking": False, "cascade_turn_limit": 3,
                           "cascade_attempts": 3 if opening else 0, "turns": (4-index) if opening else 0,
                           "last_user_text": "对方真实输入", "last_reply": "自然接话"}
+                old = [{"trigger_id":f"old-{number}","reason":"reply","outcome":"completed"} for number in range(8)]
+                fresh = ([{"trigger_id":f"new-{number}","reason":"reply","outcome":"completed" if produce_audio else "failed"}
+                          for number in range(3)] if opening else [])
+                status["voice_observation"] = {"recent_decisions":old+fresh}
                 return web.json_response({"ok": True, "status": status, **status})
 
             app = web.Application()

@@ -1,48 +1,23 @@
 # 来源准备与 AstrBot RPC
 
-状态：部分迁移。[bridge.py](bridge.py) 已拥有 AstrBot protocol=1 来源准备、短 RPC、outbox 与领取租约，公开入口见 `context.api.SourceBridge`。准备结果与来源快照已隔离，写入先落盘后发布；完整具名授权/回执协议仍是下文目标设计。入口见 [上下文管理](../../README.md)。隐藏来源规则、人格准备、授权目标、外部请求及轮询租约。规则配置和长期记忆的权威仍在 AstrBot；这里不复制一份可独立修改的 group_map。
+[bridge.py](bridge.py) 保留 protocol=1 的准备、工具、绑定管理和 HTTP 传输；[service.py](../service.py) 捕获不可变来源并签发授权。接口与类型见 [上下文公开入口](../../api.py)。来源规则和长记忆归 AstrBot，不复制可独立修改的 group_map。
 
-## 类型与内部入口
+## 准备与工具
 
-| 数据 | 字段与不变量 |
-| --- | --- |
-| `SourceBinding` | `binding_id, source_generation, room_scope, source_kind, persona_umo/persona_id, provider, memory_route_id, memory_targets`；目标保存完整 UMO、平台身份、群/私聊类别和 memory_persona_id，显式空目标不能回退默认 |
-| `ContextRef` | `session_ref, source_generation, binding_id`；定位一次准备所用的不可变绑定，不能用当前设置重新解释旧请求 |
-| `PreparedSource` | 绑定、人格、记忆摘要、来源/记忆新鲜度、明确降级状态；personality可用与RPC在线分开 |
-| `RpcRequest` | `request_id, protocol=1, session_id, room, scope, created_at, operation, typed_payload`；只在本子模块协议适配中变成字典 |
+`bridge.prepare(area,channel)` 先提升来源会话代次，结果只安装到原会话；切换后的迟到结果丢弃。`prepare_context` 捕获来源完整快照，返回 `ContextRef`、人设、版本与历史。`tools(prepared)` 仅提供原快照及本次授权工具能力，不把可变 bridge 交生成。
 
-- `prepare_source(request: SourceRequest) -> PreparedSource`：来源由已授权配置确定，模型不得指定目标；等待回执有界，返回仍绑定请求的会话/来源代次，调用方复查后安装。
-- `recall(request: RecallRequest) -> RecallResult`：检查 ContextRef 与检索授权，查询所选目标；显式不可用不同于查无结果。
-- `remember(request: RememberRequest) -> RememberReceipt`：验证写入授权和不可变绑定后，调用 memory 台账先持久化；不在本地建立第二份耐久 outbox。
-- `bindings(request: BindingRequest) -> BindingResult`：具名分支为查询目录/保存来源/删除来源/保存映射/删除映射，保留现有协议；仅管理员入口调用，配置请求不受语音切房取消。
-- `poll(request: PollRequest) -> PollResult`、`resolve(receipt: RpcReceipt) -> RpcResolution`：供已认证 HTTP 适配；receipt 校验 peer、request ID、操作范围，原始 JSON 必须先解析。PollResult具名区分已领取批次/等待截止/PeerConflict/Closed；RpcResolution区分Accepted/Duplicate/Unknown/Rejected，应用不直接修改 pending/outbox。
+`RecallRequest` 绑定来源和工具 ID。`RememberRequest` 还须提供 context 已登记的 `WriteAuthorization`；授权来自完整且稳定说话者的明确原输入，不能由模型造同形对象获得权限。授权 120 秒过期，刷新来源立即撤销新调用。模型只给 query/content，不选择任何 UMO、人格或平台目标。既有管理员对私聊共享/写回的授权仍由插件来源规则负责。
 
-`ContextRef`、来源及工具请求/结果为 `context.models` 公共类型；RPC 传输类型是否公开只按 HTTP 入口实际需求决定，不能暴露 pending 字典。`BindingRequest` 只提供已有来源管理能力，不扩成通用远程命令。
+显式写入先经 SQLite 台账提交，再发布领取；queued 只表示本地耐久受理，外部确认之前不能称已长期保存。工具 ID 对应原请求 ID，同 ID 异内容冲突；短等待读取与耐久投递分离，取消等待不删除已受理写入。
 
-## 授权与工具调用
+## HTTP 与租约
 
-`RecallRequest` 含 `tool_call_id, context_ref, query, speaker_ref`；`RememberRequest` 含 `tool_call_id, context_ref, content, speaker_ref, authorization`。内容沿用现有 1–2000 字边界；工具调用 ID 是幂等关联，不能充当授权。
+HTTP 只负责认证和解析：`PollRequest` 区分 events/timeout/peer_conflict/closed；`RpcReceipt.parse` 保存不可变 JSON 快照，`resolve_receipt` 内部验证 peer 并区分 accepted/duplicate/unknown/rejected；`BindingRequest.parse` 限制既有 list/save/delete/source-save/source-delete/source-options。`events()` 每次返回独立字典。
 
-`WriteAuthorization` 是context签发并登记的受限grant引用：`grant_id, context_ref, input_ref/admin_request_ref, approved_targets, expires_at`，批准理由与证据保存在context内部。`prepare`依据已经 `observe` 的原输入事实、确定的请求/管理员既有策略，返回可用 `authorized_write_grants`；没有证据就返回空集合，不要求app凭模型判断制造授权。模型只能提供content，app从本轮准备结果选取适用grant，remember按grant_id查登记并复核绑定/期限/目标，直接构造同形对象不能授权。
+保留 pending 最多 16、每批最多 8、poll 最长 20 秒、普通读取租约 8 秒、写/配置租约 25 秒、peer 在线 35 秒。bindings 不受语音切房取消；close 才结束全部短等待。outbox 原始事件/回执由台账持久化，内存仅是可重建工作集，租约无需跨进程保留。
 
-明确请求的识别用本项目已经批准的输入解析/授权规则；不能从生成模型自报“用户要求”推导写权限。语音转录无稳定说话者、多人混合或语义不明确且无管理员预授权时返回 `WriteDenied`。保留现有明确记忆工具能力可由管理员既有共享/写回授权策略授予，但该策略必须可定位和审查，不能隐含放宽。私聊共享/写回仍须已有管理员配置。旧上下文不能借工具请求写到新来源；若原绑定被撤销，新工具调用拒绝，已受理 outbox 保留原目标及审计状态，按既有协议处理，不自动重定向。
+投递部分确认时台账按 UMO 单调合并；重启后 request ID、原房间与原来源不变，只传未确认目标。clear 不清耐久投递，也不把旧目标重定向到新来源。RPC/来源的旧字典接口保留为 protocol=1 兼容适配，生产模型通过绑定工具端口，不能用旧 tool 绕授权。
 
-生成模块经 app 注入的 `ContextToolPort` 使用这些具名请求/结果，不能持有 `ContextBridge` 或访问 pending。模型 reader 不等待外部检索；独立工具任务有拥有者，取消只撤销未执行等待，不宣称第三方已经开始的写入被撤销。
+## 验证
 
-## RPC 与状态机
-
-准备状态：`Unprepared → Preparing → Ready/Degraded/Unavailable`。已有 Live 会话遇临时桥接离线保留已加载人格，但新检索明确失败；刷新/重进房提升来源代次。迟到 prepare/recall 不安装到新会话。
-
-短 RPC pending 与 durable delivery 分开：pending 最多 16 个，轮询每批最多 8 个，最长等待 20 秒；保留现有操作租约（写/配置 25 秒，普通读取 8 秒）及 peer 35 秒在线判断，迁移不能悄悄改变。短读取超时结束等待；remember 超时返回原 DeliveryId 的 pending/unknown，不重新构造写入 ID。
-
-sources 拥有网络等待 Future、peer 租约和可重建领取时间；memory 拥有 durable entry/逐目标回执。poll 合并短请求与 memory.ready；一次请求 ID 不在两处重复领取。resolve 先定位原请求，再由所属短 RPC 或 memory.apply_receipt 收尾。RPC 重复回执返回 duplicate/known，不重新写历史；未知 ID 明确 unknown。
-
-关闭取消短读取与轮询 Future；bindings 是否继续由其管理任务拥有者决定，不绑语音房间生命周期。投递队列不随切房清空；坏恢复数据使诊断降级并停止不安全写入，不当作空队列。
-
-## 依赖、迁移及验证
-
-sources 可使用 memory 的窄投递端口；memory 不反向调用 sources。两者共享的 SourceBinding 定义在 context 公共类型。模块协调器读取 situation 并调用 prepare_source，不让来源层反向查询活动房间。
-
-证据：`ContextBridge.prepare/request/poll/resolve/tool/clear` 与 [同步说明](../../../../docs/astrbot-context-sync.md)；当前 `clear` 保护 bindings、outbox保留原scope，迁移必须保留。先迁短 RPC/来源准备及公开工具端口，再把 durable delivery 接 memory，HTTP 保留现有路由和 protocol=1。
-
-目标验证：来源切换迟到响应、显式空来源、私聊授权、同 peer 重连/其他 peer 租约拒绝、poll与remember不重复领取、超时未知、原 ID 重试、bindings不被切房取消。换 AstrBot 传输只影响本适配；更改记忆目标是领域契约变化，不能伪装成存储替换。当前均为设计分析。
+`tests/context/test_transactional_context.py`、`tests/context/test_sources_contract.py`、`tests/test_astrbot_context_bridge.py` 验证准备迟到、明确降级、快照隔离、原 ID 重试、部分确认重启、坏文件、授权、peer 和 bindings 跨切房。外部真实插件长期记忆存储不能由这些隔离测试代替。

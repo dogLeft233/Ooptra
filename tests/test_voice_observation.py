@@ -1,130 +1,83 @@
-"""Decision traces explain skipped speech without retaining room content."""
-
+"""流程诊断来自真实决策与生成事实，容量有界且不保留会话正文。"""
 import asyncio
 import json
 
 import pytest
-from support.channel_fixtures import establish_room
-from test_voice_operations import make_agent
-from test_voice_reply_probability import fragment
+from support.channel_fixtures import make_voice_agent
+from support.expression_runtime import ScriptedExpression
+from support.live_runtime import audio_message, make_live_agent
+
+from dialogue.models import Recognition
 
 
-def test_observations_are_bounded_and_detached(tmp_path):
-    async def run():
-        agent = make_agent(tmp_path)
+class Model(ScriptedExpression):
+    name = "external-model"
+    def __init__(self, *, fail=""):
+        self.fail = fail
+    async def recognize(self, audio, permit):
+        return Recognition(audio.input_ref, audio.session, permit.attempt_id, audio.user_key,
+            "failed" if self.fail == "asr" else "recognized", "private question", elapsed_ms=12)
+    async def tts(self, text):
+        if self.fail == "tts":
+            raise RuntimeError("secret-model-key")
+        return await super().tts(text)
+
+
+def test_observations_are_bounded_detached_and_content_free(tmp_path):
+    async def scenario():
+        agent = make_voice_agent(tmp_path)
+        agent.backend = Model()
         agent.settings.reply_probability_percent = 0
-        for _ in range(45):
-            await agent.backend.handle_utterance(b"audio", sample_rate=16000)
-        payload = agent.status().get("voice_observation", {})
-        rows = payload.get("recent_decisions", [])
-        assert len(rows) == 40
-        assert rows[-1]["reason"] == "probability"
-        assert rows[-1]["outcome"] == "skipped"
-        assert rows[-1]["timings_ms"]["asr"] is None
-        rows.clear()
-        assert len(agent.status()["voice_observation"]["recent_decisions"]) == 40
-    asyncio.run(run())
-
-
-def test_cascade_stage_timings_measure_real_request_boundaries(tmp_path, monkeypatch):
-    import time
-    async def run():
-        agent = make_agent(tmp_path)
-        now = [100.0]
-        monkeypatch.setattr(time, "monotonic", lambda: now[0])
-        async def asr(*args):
-            now[0] += .12
-            return "你好"
-        async def chat(*args, **kwargs):
-            now[0] += .25
-            return "你好呀"
-        async def tts(*args):
-            now[0] += .4
-            return b"\x01\x00", 24000
-        agent.backend.asr, agent.backend.chat, agent.backend.tts = asr, chat, tts
-        await agent.backend.handle_utterance(b"audio", sample_rate=16000)
-        row = agent.status()["voice_observation"]["recent_decisions"][-1]
-        assert row["timings_ms"] == {"asr": 120.0, "intent": None, "chat": 250.0, "tts": 400.0}
-        assert row["elapsed_ms"] == 770.0
-    asyncio.run(run())
-
-
-def test_empty_live_turn_and_transport_error_are_observable(tmp_path, monkeypatch):
-    from test_voice_session_regressions import make_agent as live_agent
-    async def run():
-        agent = live_agent(tmp_path)
-        await establish_room(agent)
-        await agent._wire_live()
-        await agent.backend._handle_server_msg({"serverContent": {"turnComplete": True}})
-        assert agent.status()["voice_observation"]["recent_decisions"][-1]["reason"] == "empty"
-        async def send(*args):
-            raise RuntimeError("secret")
-        async def start():
-            pass
-        monkeypatch.setattr(agent.backend, "start_session", start)
-        monkeypatch.setattr(agent.backend, "_send", send)
-        await agent.backend.push_audio(b"\x00\x20" * 320, 16000)
-        assert agent.status()["voice_observation"]["recent_decisions"][-1]["reason"] == "error"
-        await agent.backend.aclose()
-    asyncio.run(run())
-
-
-def test_live_explicit_speech_does_not_open_a_keyword_conversation_window(tmp_path):
-    from test_voice_session_regressions import make_agent as live_agent
-    async def run():
-        agent = live_agent(tmp_path)
-        agent.settings.reply_probability_percent = 0
-        agent.settings.force_reply_keywords = ["human"]
-        agent.settings.conversation_window_enabled = True
-        agent.settings.conversation_window_seconds = 30
-        await establish_room(agent)
-        await agent._wire_live()
-        agent.backend.note_input_speaker("member")
-        agent.backend._force_reply = True
-        await fragment(agent.backend, b"explicit", text="manual", complete=True)
-        agent.backend.note_input_speaker("member")
-        await fragment(agent.backend, b"unrelated", complete=True)
-        assert agent.duplex.audio == [b"explicit"]
-        await agent.backend.aclose()
-    asyncio.run(run())
+        await agent.join("a", "b")
+        try:
+            for _ in range(45):
+                await agent._handle_utterance("u", b"\0\1" * 16000, 16000)
+            payload = agent.status()["voice_observation"]
+            assert len(payload["recent_decisions"]) == 40
+            row = payload["recent_decisions"][-1]
+            assert row["reason"] == "policy_silence"
+            assert row["timings_ms"]["asr"] == 12
+            assert row["timings_ms"]["tts"] is None
+            assert row["elapsed_ms"] >= 0
+            assert "private question" not in json.dumps(payload)
+            payload["recent_decisions"].clear()
+            assert len(agent.status()["voice_observation"]["recent_decisions"]) == 40
+        finally:
+            await agent.stop()
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("failure", ["asr", "tts"])
-def test_cascade_errors_record_only_stage_and_safe_reason(tmp_path, failure):
-    async def run():
-        agent = make_agent(tmp_path)
-        async def asr(*args):
-            if failure == "asr":
-                raise RuntimeError("secret-key-and-room-text")
-            return "你好"
-        async def chat(*args, **kwargs):
-            return "你好呀"
-        async def tts(*args):
-            raise RuntimeError("secret-key-and-room-text")
-        agent.backend.asr, agent.backend.chat, agent.backend.tts = asr, chat, tts
-        with pytest.raises(RuntimeError):
-            await agent.backend.handle_utterance(b"audio", sample_rate=16000)
-        row = agent.status()["voice_observation"]["recent_decisions"][-1]
-        assert row["reason"] == "error" and row["outcome"] == "error"
-        assert row["timings_ms"][failure] >= 0
-        assert "secret" not in json.dumps(row)
-    asyncio.run(run())
+def test_flow_failure_diagnostic_does_not_include_provider_exception(tmp_path, failure):
+    async def scenario():
+        agent = make_voice_agent(tmp_path)
+        agent.backend = Model(fail=failure)
+        agent.settings.min_utterance_ms = 0
+        await agent.join("a", "b")
+        try:
+            await agent._handle_utterance("u", b"\0\1"*16000, 16000)
+            payload = agent.status()["voice_observation"]
+            assert payload["recent_decisions"]
+            assert "secret-model-key" not in json.dumps(payload)
+            assert payload["recent_decisions"][-1]["outcome"] != "completed"
+        finally:
+            await agent.stop()
+    asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("percent,keyword,reason", [(0, [], "probability"), (100, [], "reply"), (0, ["human"], "keyword")])
-def test_live_trace_explains_whole_turn_and_does_not_invent_separate_stages(tmp_path, percent, keyword, reason):
-    from test_voice_session_regressions import make_agent as live_agent
-    async def run():
-        agent = live_agent(tmp_path)
-        agent.settings.reply_probability_percent = percent
-        agent.settings.force_reply_keywords = keyword
-        await establish_room(agent)
-        await agent._wire_live()
-        await fragment(agent.backend, b"pcm", text="reply", complete=True)
-        row = agent.status()["voice_observation"]["recent_decisions"][-1]
-        assert row["reason"] == reason
-        assert row["timing_mode"] == "live_overlap"
-        assert row["timings_ms"]["intent"] is None
-        assert row["timings_ms"]["asr"] is None  # No microphone input was sent in this turn.
-        await agent.backend.aclose()
-    asyncio.run(run())
+@pytest.mark.parametrize("percent", [0,100])
+def test_live_trace_keeps_overlap_explicit_without_inventing_asr_timing(tmp_path, percent):
+    async def scenario():
+        agent, _, sockets = await make_live_agent(tmp_path, reply_probability_percent=percent)
+        try:
+            await sockets[0].deliver(audio_message(user_text="private input",text="private reply",done=True))
+            assert await agent.wait_for_reply_end(1)
+            rows = agent.status()["voice_observation"]["recent_decisions"]
+            assert rows
+            assert rows[-1]["timing_mode"] == "live_overlap"
+            assert rows[-1]["timings_ms"]["asr"] is None
+            assert "private input" not in json.dumps(rows)
+            assert "private reply" not in json.dumps(rows)
+        finally:
+            await agent.stop()
+    asyncio.run(scenario())

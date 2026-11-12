@@ -1,124 +1,116 @@
+"""真实Live协议与事务上下文的来源、工具取消及权限边界。"""
 from __future__ import annotations
 
 import asyncio
-import json
 
-from support.dialogue_fixtures import gemini_backend as GeminiLiveBackend
+from support.live_runtime import Socket, settle
 
-from context import create_context_bridge as ContextBridge
+from channels.models import RoomTarget, SessionRef
+from context import create_context_service
+from context.models import ContextRequest, Observation
+from dialogue import create_gemini_backend
+from dialogue.models import AudioInput, LiveSessionRequest, Reject
 from operations.models import VoiceAgentSettings
 from tests.support.context_fixtures import prepare_source
 
 
-class Memory:
-    def append(self, *args, **kwargs):
-        pass
+async def open_shared(tmp_path, *, authorize=False):
+    context = create_context_service(str(tmp_path / "memory.jsonl"))
+    await prepare_source(context.bridge, {"ok": True, "persona": "QQ persona", "provider": "memory_companion",
+                         "memory_scopes": [{"umo": "qq:GroupMessage:123"}]})
+    session = SessionRef("run", "binding", "session", RoomTarget("a", "c"))
+    if authorize:
+        context.observe(Observation("input", session, "capture", 0, "recognized", "请记住我喜欢茶", "user-a", "input"))
+    prepared = await context.prepare_context(ContextRequest(session, "user-a", "input" if authorize else ""))
+    socket = Socket()
+    async def connect(*args, **kwargs):
+        return socket
+    settings = VoiceAgentSettings(gemini_api_key="synthetic", persona="local", voice_leave_enabled=True)
+    backend = create_gemini_backend(settings, connector=connect)
+    live = await backend.open_live(LiveSessionRequest(session, prepared), tools=context.tools(prepared))
+    return context, prepared, socket, live
 
 
-def test_live_setup_uses_astrbot_persona_and_retains_existing_voice_tools():
+def test_live_setup_uses_astrbot_persona_and_retains_existing_voice_tools(tmp_path):
     async def run():
-        bridge = ContextBridge()
-        await bridge.poll(wait=0)
-        await prepare_source(bridge, {"ok": True, "persona": "QQ persona", "provider": "memory_companion"})
-        backend = GeminiLiveBackend(VoiceAgentSettings(persona="local"), Memory())
-        backend.context_bridge = bridge
-        sent = []
-
-        async def send(value):
-            sent.append(value)
-
-        backend._send = send
-        await backend._send_setup()
-        setup = sent[0]["setup"]
-        assert "QQ persona" in setup["system_instruction"]["parts"][0]["text"]
-        names = {tool["name"] for tool in setup["tools"][0]["function_declarations"]}
-        assert {"astrbot_recall", "astrbot_remember", "leave_voice_room"} <= names
+        context, _, socket, live = await open_shared(tmp_path)
+        try:
+            setup = socket.sent[0]["setup"]
+            assert "QQ persona" in setup["system_instruction"]["parts"][0]["text"]
+            names = {tool["name"] for tool in setup["tools"][0]["function_declarations"]}
+            assert {"astrbot_recall", "astrbot_remember", "leave_voice_room"} <= names
+        finally:
+            await live.aclose()
+            await context.close()
     asyncio.run(run())
 
 
-def test_memory_rpc_does_not_block_live_receiver_and_repeated_tool_id_is_deduplicated():
+def test_memory_rpc_does_not_block_live_receiver_and_repeated_tool_id_is_deduplicated(tmp_path):
     async def run():
-        bridge = ContextBridge(timeout=1)
-        await bridge.poll(wait=0)
-        await prepare_source(bridge, {"ok": True, "provider": "memory_companion"})
-        backend = GeminiLiveBackend(VoiceAgentSettings(reply_probability_percent=100), Memory())
-        backend.context_bridge = bridge
-        backend.note_input_speaker("user-a")
-        sent = []
-
-        async def send(value):
-            sent.append(value)
-
-        backend._send = send
-        call = {"id": "tool-1", "name": "astrbot_remember", "args": {"content": "fact"}}
-        await asyncio.wait_for(backend._handle_server_msg({"toolCall": {"functionCalls": [call]}}), .1)
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        request = (await bridge.poll(wait=0))[0]
-        assert request["payload"]["speaker"] == "user-a"
-        # Still receiving transcription while memory is pending.
-        await backend._handle_server_msg({"serverContent": {"inputTranscription": {"text": "记住 fact"}}})
-        assert backend._last_user_text == "记住 fact"
-        bridge.resolve(request["request_id"], {"ok": True, "state": "stored"})
-        await asyncio.gather(*backend._memory_tasks)
-        await backend._handle_server_msg({"toolCall": {"functionCalls": [call]}})
-        await asyncio.gather(*backend._memory_tasks)
-        assert len(sent) == 2
-        assert bridge.status()["pending_requests"] == 0
-        assert sent[-1]["toolResponse"]["functionResponses"][0]["response"]["ok"] is True
+        context, prepared, socket, live = await open_shared(tmp_path)
+        events = live.events()
+        try:
+            await live.send_input(AudioInput("audio", prepared.context_ref.session, b"\0\x40" * 100, 16000, "user-a"))
+            call = {"id": "tool-1", "name": "astrbot_recall", "args": {"query": "fact"}}
+            await socket.deliver({"toolCall": {"functionCalls": [call]}})
+            request = (await context.bridge.poll(wait=0))[0]
+            assert request["payload"]["speaker"] == "user-a"
+            # External RPC remains pending while the real socket reader accepts a transcription.
+            await socket.deliver({"serverContent": {"inputTranscription": {"text": "还在听"}}})
+            proposed = await asyncio.wait_for(anext(events), 1)
+            if not proposed.text:
+                proposed = await asyncio.wait_for(anext(events), 1)
+            assert proposed.text == "还在听"
+            context.bridge.resolve(request["request_id"], {"ok": True, "content": "memory result"})
+            await settle()
+            await socket.deliver({"toolCall": {"functionCalls": [call]}})
+            responses = [message["toolResponse"]["functionResponses"][0] for message in socket.sent if "toolResponse" in message]
+            assert len(responses) == 2
+            assert responses[0]["response"] == responses[1]["response"] == {"ok": True, "content": "memory result"}
+            assert context.bridge.status()["pending_requests"] == 0
+        finally:
+            await events.aclose()
+            await live.aclose()
+            await context.close()
     asyncio.run(run())
 
 
-def test_live_emits_evidence_without_committing_unplayed_reply():
+def test_live_emits_evidence_without_committing_unplayed_reply(tmp_path):
     async def run():
-        bridge = ContextBridge()
-        await bridge.poll(wait=0)
-        await prepare_source(bridge, {"ok": True, "umo": "qq:GroupMessage:123"})
-        backend = GeminiLiveBackend(VoiceAgentSettings(reply_probability_percent=0), Memory())
-        backend.context_bridge = bridge
-        results = []
-        backend.set_generated_out(results.append)
-        backend.note_input_speaker("u")
-        await backend._handle_server_msg({"serverContent": {
-            "inputTranscription": {"text": "hello"},
-            "outputTranscription": {"text": "not played"}, "turnComplete": True}})
-        turn = results[0]
-        assert turn.user_text == "hello"
-        assert turn.text == "not played"
-        assert turn.selected is False
-        assert turn.user_key == "u"
-        assert bridge.status()["pending_writes"] == 0
-        backend._announcement = True
-        backend._last_user_text = "internal instruction"
-        backend._last_reply = "announcement"
-        await backend._handle_server_msg({"serverContent": {"turnComplete": True}})
-        assert results[-1].internal is True
-        assert bridge.status()["pending_writes"] == 0
-        assert "internal instruction" not in json.dumps(bridge.history)
+        context, prepared, socket, live = await open_shared(tmp_path)
+        events = live.events()
+        try:
+            await live.send_input(AudioInput("audio", prepared.context_ref.session, b"\0\x40" * 100, 16000, "u"))
+            await socket.deliver({"serverContent": {"inputTranscription": {"text": "hello"},
+                                  "outputTranscription": {"text": "not played"}, "turnComplete": True}})
+            event = await anext(events)
+            while not event.text:
+                event = await anext(events)
+            assert event.text == "hello" and event.user_key == "u"
+            await live.resolve_turn(event.proposal, Reject("policy"))
+            assert context.history.as_messages() == []
+            assert context.bridge.status()["pending_writes"] == 0
+        finally:
+            await events.aclose()
+            await live.aclose()
+            await context.close()
     asyncio.run(run())
 
 
-def test_live_tool_cancellation_prevents_queued_memory_write():
+def test_live_tool_cancellation_prevents_queued_memory_write(tmp_path):
     async def run():
-        bridge = ContextBridge(timeout=1)
-        await bridge.poll(wait=0)
-        await prepare_source(bridge, {"ok": True, "provider": "memory_companion"})
-        backend = GeminiLiveBackend(VoiceAgentSettings(), Memory())
-        backend.context_bridge = bridge
-        calls = []
-
-        async def tool(*args, **kwargs):
-            calls.append(args)
-            return {"ok": True}
-
-        bridge.tool = tool
-        await backend._memory_lock.acquire()
-        await backend._handle_server_msg({"toolCall": {"functionCalls": [{
-            "id": "cancelled", "name": "astrbot_remember", "args": {"content": "never write"}}]}})
-        await backend._handle_server_msg({"toolCallCancellation": {"ids": ["cancelled"]}})
-        backend._memory_lock.release()
-        await asyncio.gather(*backend._memory_tasks, return_exceptions=True)
-        assert bridge.status()["pending_requests"] == 0
-        assert bridge.status()["pending_writes"] == 0
-        assert calls == []
+        context, _, socket, live = await open_shared(tmp_path, authorize=True)
+        try:
+            call = {"id": "cancelled", "name": "astrbot_remember", "args": {"content": "never write"}}
+            # Both external messages are already buffered: cancellation reaches the dispatcher
+            # before its newly scheduled tool worker can begin the local transaction.
+            await socket.queue.put(({"toolCall": {"functionCalls": [call]}}, None))
+            await socket.queue.put(({"toolCallCancellation": {"ids": ["cancelled"]}}, None))
+            await settle()
+            assert context.bridge.status()["pending_requests"] == 0
+            assert context.bridge.status()["pending_writes"] == 0
+            assert context.delivery("tool-cancelled").state == "unknown"
+        finally:
+            await live.aclose()
+            await context.close()
     asyncio.run(run())

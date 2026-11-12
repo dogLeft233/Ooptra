@@ -168,3 +168,11 @@ def merge_auto_visit_patch(
             result[key] = _detached(value)
     parse_auto_visit_config(result)
     return result
+
+
+def saved_prompts(config: AutoVisitConfig, kind: str, area: str = "") -> list[str]:
+    """查询公告候选的独立快照；空列表保留明确静默语义。"""
+    if kind not in {"enter", "leave"}:
+        return []
+    policy = effective_area(config, area) if area else config.defaults
+    return list(policy[kind + "_prompts"])

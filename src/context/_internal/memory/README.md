@@ -1,49 +1,25 @@
 # 历史与可靠投递台账
 
-状态：部分迁移。[jsonl.py](jsonl.py) 已拥有原 JSONL 历史，公开 `ConversationHistory.record(ConfirmedTurn)` 一次文件写入提交输入和确认输出；它没有跨调用幂等或与 AstrBot outbox 的共同事务。下文 SQLite 台账仍是目标设计。入口见 [上下文管理](../../README.md)。把历史记录、幂等键和 outbox 收敛在一个提交边界，隐藏存储及恢复；来源选择和 HTTP 租约不在这里。
+[ledger.py](ledger.py) 通过标准库 SQLite 统一拥有历史、输入/动作幂等、原始 outbox、逐目标回执和导入标记。生产入口是 [ContextService](../../api.py) 的 `observe/record_output/delivery/export_legacy`；来源适配只持有可重建队列与租约，不有第二份耐久 outbox。
 
-## 类型与提交边界
+## 提交与恢复
 
-| 数据 | 必需字段及含义 |
-| --- | --- |
-| `HistoryEntry` | `entry_id, scope, session_ref, input_ref/action_id, role, content, occurred_at, confirmation`；confirmation 区分输入事实、确认输出、部分/未知，不写完整生成草稿冒充已输出 |
-| `SourceBinding` 引用 | 记录创建时的不可变 `binding_id` 和完整目标快照；来源定义见 [来源与 RPC](../sources/README.md)，不保存指向当前可变设置的引用 |
-| `DeliveryEntry` | `delivery_id, request_id, operation=commit/remember, original_session, source_binding, payload, created_at, state, per_target_receipts`；request ID 重试不变 |
-| `RecordCommit` | 本地历史变更、可选投递事件、幂等键及内容摘要；同键不同内容返回冲突，不能静默覆盖 |
+单一写锁下开启有限本地事务，历史、幂等载荷/回执、可选投递共同提交；SQLite synchronous=FULL。失败完整回滚，不先确认再写文件。同 ID 异内容报冲突，助手全文只接受真实 completed 执行。输入按 `input_ref` 独立提交，后续输出不重复输入。当前不支持同动作后续追加确认范围；异内容必须显式使用新记录，不能覆盖原确认。
 
-- `commit_input(observation: RecognizedInput) -> InputRecordReceipt`：上下文observe调用，按input_ref幂等提交已观察用户事实；即使后续NoAction/NoSpeech无action也不依赖助手回复才能保存，空识别只保存状态不造用户文字。后续record引用同input_ref，不再重复用户历史。
-- `commit_record(record: OutputRecord) -> RecordReceipt`：同一持久化事务写历史、幂等键及可选 outbox；事务提交成功才返回“本地已记录”。外部离线不阻止合法 outbox 入队。
-- `enqueue_remember(request: RememberRequest, binding: SourceBinding) -> RememberReceipt`：先持久化再向租约领取开放；返回待确认，不声称已存长期记忆。
-- `recent(query: HistoryQuery) -> HistorySlice`：范围、来源/会话和可选说话者显式限定，读取结果不可变；不能沿用旧 `recent(user_key)` 就声称已经按房间隔离。
-- `ready(limit: int) -> tuple[DeliveryEntry,...]`、`apply_receipt(receipt: TargetReceipt) -> DeliveryStatus`：sources 子模块经窄端口调用；仅持久化回执，不操作 HTTP Future。
-- `delivery(id: DeliveryId) -> DeliveryStatus`：未知 ID、待发、部分确认、重试、确认、永久失败分别表示。
+128 个待投递容量满时仍提交本地历史，回执为 `rejected_capacity`；幂等行保留原来源和原载荷。相同记录重试只尝试入队，成功后 DeliveryId 稳定。临时失败为 retrying；永久失败和 confirmed 保留可查询终态。逐目标确认按 UMO 单调合并，重试视图只裁剪已确认目标；规范原始事件永不修改。
 
-`record` 对同动作多次到达只提交一次；相同动作后续更完整的可信确认需独立 `confirmation_revision`，只允许单调补充已确认范围，不重发已经确认的目标。首批实现不支持补充确认时，应明确拒绝这种更新，不用覆盖伪装幂等。
+## 位置、导入与降级
 
-## 存储决定与恢复
+数据库从原 `memory_path` 派生为同目录 `<原文件stem>_context.sqlite3`，不使用 OneBot 身份映射数据库；更换 memory_path 保持独立历史语义。`PRAGMA user_version=1`，`context_metadata.schema=1`；未知版本或其他数据库拒绝写入。
 
-比较：继续独立 JSONL + outbox JSON，改动少，但崩溃时两文件不能共同提交；为其补恢复日志会重复实现事务。目标首个实现使用标准库 SQLite 的事务能力，建立独立的上下文数据库，**不使用或改动 OneBot 身份映射数据库**。数据库路径由已解析的现有记忆文件路径派生为同目录 `ooptra_context.sqlite3`；迁移前校验与旧文件/映射库不冲突、目录可写、数据库schema归属正确，不能打开任意已有SQLite当新库。本设计不启用新配置或新文件，路径约定落地时同步操作指南。
+首次事务校验并导入原 JSONL 与 `astrbot_voice_outbox.json`，以稳定历史导入键、原 request ID 和来源提交，记录条目计数。坏历史/队列使整个导入回滚并拒绝启动；不会当空数据。原文件完整保留但停止写入，导入标记保证重启不重复导入。独立 `create_memory` 兼容视图沿用旧宽容解析，跳过原先不属于历史的坏行；生产 `create_context_service` 严格校验。JSONL 只剩导入/导出格式，没有旧写实现。
 
-最小逻辑表为 `history`、`deliveries`、`delivery_targets`、`idempotency`、`migration_state`；唯一键对应上述 ID。具体索引由范围查询与恢复测试决定，不预建通用 repository 框架。数据库连接/事务只在本子模块适配中使用；同步事务在线程中执行，单写入拥有者串行提交，不在事件循环阻塞，也不跨第三方网络等待持事务。
+`await service.export_legacy(empty_directory)` 在同一 SQLite 快照读取历史与未确认投递，导出 `voice_memory.jsonl`、`astrbot_voice_outbox.json`，最后发布含计数和 SHA-256 的 `context-export.json`。非空目录拒绝覆盖；没有匹配 manifest 的导出不完整。该接口不改原文件或当前数据库。降级时先停止生产写者、导出并核对 manifest，再由明确恢复流程把文件放到旧版本配置路径；直接运行旧版本会忽略新 SQLite 记录。
 
-旧 `voice_memory.jsonl`、`astrbot_voice_outbox.json` 只通过可回退导入读取：先备份/校验、以稳定导入键提交、核对条目数/原 request ID/原来源、标记完成，再切换拥有者。格式不合法则停止并报告，不推测缺失来源、丢掉待写或自动清空。切换前旧拥有者停止写入；不能双写两套权威历史。旧文件保留以支持人工恢复，新数据的回退/导出需要在该批次明确，不能直接丢弃新记录。数据库版本不支持时拒绝启动写入，不能当空库。
+正常备份必须包含 SQLite 的已提交状态；现有备份使用 SQLite backup API，避免仅复制主文件遗漏 WAL。不能承诺跨 AstrBot 与第三方存储的严格 exactly-once。
 
-## 投递状态机与界限
+## 验证
 
-`Pending → Leased → Confirmed`；可重试/部分失败回到 Pending，仅包含未确认目标；明确永久错误转 Failed。租约是可重建的传输状态，进程崩溃后过期重领；**超时未知不等于写入失败**，保持原 ID/原目标等待回执。全部目标确认才整体成功；协议 captured/stored 含义沿用 [外部同步协议](../../../../docs/astrbot-context-sync.md)。
+`tests/context/test_transactional_context.py` 从公开接口覆盖事务失败既无历史也无投递、重启幂等/冲突、满载后补受理、逐目标恢复、保留原文件与降级导出；使用临时真实 SQLite，不用假存储替代事务能力。
 
-保留现有 128 条 outbox 容量约束，记忆写请求占用原 ID 的预留槽位；满载返回明确 `OutboxFull`，不得先记录“已排队”。本地输出历史可以成功而外部投递因满载未受理，但 `RecordReceipt` 必须明确 `local_recorded + delivery_rejected`；两者不是伪造一个事务整体成功。
-
-投递满载后必须可补受理：首次事务在历史幂等记录内保留原绑定、待投递载荷和 `delivery_admission=RejectedCapacity`。调用者用相同键/相同内容重试 `record` 时，不重复历史，只尝试将这份尚未受理投递在新事务内加入outbox并更新同一回执；成功后该记录的DeliveryId稳定，后续重试只返回已有状态，已确认目标不重发。重试仍用原来源，不按新设置定向；原授权已撤销则返回明确Rejected，不默默换目标。满载记录不伪装已入队；这些信息随历史耐久保留，修复入口是公开record，无需额外通用retry框架。
-
-持久化失败：未提交不对外确认，原内存状态保持；实际输出已发生时由调用方保留同幂等键重试记录，不重播语音。关闭停止新提交、等待正在提交的有限事务；已受理条目重启可恢复，等待第三方不是停机前提。不能承诺跨第三方严格 exactly-once。
-
-## 证据、切片与验证
-
-当前 JSONL 历史和 sources 的 outbox 仍分开维护。sources 已改为落盘失败抛出 OSError 并回滚内存入队，写请求先落盘再投递；完整历史/幂等键/投递共同事务尚待实现。现有测试入口：`tests/test_memory_recent.py`、`tests/test_astrbot_context_bridge.py`。先迁移 record/delivery 和恢复，再接新 prepare；明确迁移旧后端写入方后再删除旧接口。
-
-目标公开行为测试：提交故障不成功、重试同键不重复、同键异载荷冲突、部分播放不写全文、切来源后原队列目标不变、逐目标重试、坏旧文件不静默丢失、重启恢复。变化场景：替换事务存储只改本子模块及导入适配，不改行为/生成；这是设计分析，当前未验证新数据库实现。
-
-当前 `submission.py` 拥有一次上下文提交的受理任务、JSONL 线程及失败结果。正常路径与取消兜底复用 `TurnSubmission.record`；首次事实不可被迟到的 interrupted 事实替换。重复等待不新增本地记录或外部请求。此能力不提供跨调用/重启幂等或 JSONL/outbox 共同事务。`tests/context/test_turn_submission.py` 覆盖取消与磁盘失败，应用阻塞文件回归在 `tests/test_voice_history_outcomes.py`。
-
-`TurnSubmission` 独立观察两份存储：外部失败仍执行本地；本地失败若伴随外部失败，以显式异常cause保留后者。重复等待共享同一结果，不重复写成功侧，也不自动重试失败侧。真实临时路径故障矩阵见 `tests/context/test_turn_submission.py`。
+完整观察的幂等行保存原来源 commit 载荷，先不发布投递；无输出终态或正常输出在同一 SQLite 事务领取其稳定投递身份。已存在 pending/confirmed/failed 投递时不创建第二个用户句子，不变更原外部载荷；本地输出历史仍按动作独立幂等。

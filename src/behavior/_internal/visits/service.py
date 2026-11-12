@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Callable
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 
 from behavior._internal.visits.settings import effective_area
 from behavior.api import VisitsHost, VisitStore
@@ -454,7 +454,7 @@ class AutoVisitController:
                 if not self._visit_task or self._visit_task.done():
                     self._phase = "waiting"
 
-    async def _say(self, kind: str, visit_id: str) -> None:
+    async def _say(self, kind: Literal["enter", "leave"], visit_id: str) -> None:
         policy = effective_area(self.config, self._visit_area)
         prompts = policy[f"{kind}_prompts"]
         if not prompts or not self.agent.is_auto_visit_current(visit_id):

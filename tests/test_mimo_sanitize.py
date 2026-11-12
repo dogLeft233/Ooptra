@@ -21,20 +21,22 @@ from __future__ import annotations
 import asyncio
 import logging
 import struct
+import tempfile
+from pathlib import Path
 
 import pytest
 from support.channel_fixtures import establish_room
-from support.dialogue_fixtures import mimo_backend as MimoCascadeBackend
 
+from app.voice import VoiceCoordinator
+from channels.models import UTTERANCE_ENERGY_THRESHOLD as _MIN_UTTERANCE_RMS
 from dialogue import (
     clamp_reply,
     looks_like_reasoning_leak,
     sanitize_asr,
     sanitize_for_tts,
 )
-from dialogue.models import VoiceReply
-from operations.models import VoiceAgentSettings
-from voice_agent.agent import _MIN_UTTERANCE_RMS, VoiceAgent
+from dialogue.models import DialogueCapabilities, Recognition
+from operations.models import VoiceAgentSettings, VoiceApiSettings
 
 # ----------------------------------------------------------------------
 # 1：emoji 必须清掉 —— 它是「说 think」的直接来源
@@ -220,95 +222,8 @@ def test_normal_replies_are_not_mistaken_for_leaks() -> None:
     assert not looks_like_reasoning_leak("666，我的名字不是一宝，是E包/E宝，你自己听错了还怪我？")
 
 
-def test_reasoning_leak_makes_chat_return_silence() -> None:
-    """弃用整轮 = chat() 返回空串，agent 那边就不会推 TTS。"""
-    leak = "The user is just saying Hello repeatedly. I should respond in a cute way."
-    backend, _ = _chat_backend([], reply=leak)
-    assert asyncio.run(backend.chat("你好", user_key="oopz:u1")) == ""
-
-
-def test_a_normal_reply_still_comes_through() -> None:
-    """别把闸门做成一刀切 —— 正常回复必须原样返回（对照组）。"""
-    backend, _ = _chat_backend([], reply="还行，出门带把伞。")
-    assert asyncio.run(backend.chat("天气如何", user_key="oopz:u1")) == "还行，出门带把伞。"
-
-
-class _StubMemory:
-    """只回历史，不落盘。"""
-
-    def __init__(self, history: list[dict[str, str]]) -> None:
-        self._history = history
-
-    def as_messages(self, *, user_key: str = "", limit: int = 0) -> list[dict[str, str]]:
-        return list(self._history)
-
-
-class _FakeResp:
-    status = 200
-
-    def __init__(self, payload: dict) -> None:
-        self._payload = payload
-
-    async def json(self, content_type=None):
-        return self._payload
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc: object) -> bool:
-        return False
-
-
-class _FakeSession:
-    """只记下最后一次请求体，不发网络。"""
-
-    def __init__(self, payload: dict) -> None:
-        self._payload = payload
-        self.body: dict | None = None
-
-    def post(self, url, *, headers=None, json=None, proxy=None):
-        self.body = json
-        return _FakeResp(self._payload)
-
-
-def _chat_backend(
-    history: list[dict[str, str]], reply: str = "好。"
-) -> tuple[MimoCascadeBackend, _FakeSession]:
-    backend = MimoCascadeBackend(
-        VoiceAgentSettings(enabled=True, barge_in=False, mimo_api_key="dummy-for-test"),
-        _StubMemory(history),
-    )
-    session = _FakeSession({"choices": [{"message": {"content": reply}}]})
-
-    async def _http():
-        return session
-
-    backend._http = _http  # type: ignore[method-assign]
-    return backend, session
-
-
-def _sent_assistant_history(backend: MimoCascadeBackend, session: _FakeSession) -> str:
-    asyncio.run(backend.chat("在吗", user_key="oopz:u1"))
-    assert session.body is not None, "没发出请求"
-    turns = [m for m in session.body["messages"] if m["role"] == "assistant"]
-    assert len(turns) == 1, f"历史条数不对：{turns}"
-    return str(turns[0]["content"])
-
-
-def test_assistant_history_is_clamped_before_it_reaches_the_model() -> None:
-    """历史里存着净化前的长回复，模型会照着模仿 —— 只清不夹的话，prompt 里那句
-    「不超过 35 个字」永远追不回来（记忆里最长的一条 150 字）。"""
-    backend, session = _chat_backend([{"role": "assistant", "content": "拖" * 150}])
-    sent = _sent_assistant_history(backend, session)
-    assert len(sent) <= 46, f"历史没被夹：{len(sent)} 字"
-    assert "拖" * 100 not in sent
-
-
-def test_assistant_history_loses_its_newlines_too() -> None:
-    backend, session = _chat_backend([{"role": "assistant", "content": "第一行\n第二行"}])
-    sent = _sent_assistant_history(backend, session)
-    assert "\n" not in sent, f"历史里的换行没清：{sent!r}"
-    assert sent == "第一行，第二行"
+# 真实模型协议、历史净化及推理泄漏零音频的任务接口回归见
+# test_mimo_chat_history.py；此处只守可独立理解的净化算法。
 
 
 # ----------------------------------------------------------------------
@@ -328,33 +243,25 @@ def _pcm(amplitude: int, samples: int = 1600) -> bytes:
     return struct.pack("<h", amplitude) * samples
 
 
-class _StubVad:
-    """把 feed 的结果钉死，这样测的是闸门而不是 EnergyVad。"""
-
-    def __init__(self, out: bytes | None) -> None:
-        self._out = out
-
-    def feed(self, pcm: bytes) -> bytes | None:
-        return self._out
-
-    def reset(self) -> None:
-        pass
-
-
 class _FakeBackend:
     name = "mimo_cascade"
 
     def __init__(self) -> None:
         self.called = 0
 
-    async def handle_utterance(self, pcm, *, sample_rate, user_key="", channel_key="", on_recognition=None):
+    def capabilities(self):
+        return DialogueCapabilities()
+
+    async def recognize(self, audio, permit):
         self.called += 1
-        return VoiceReply(user_text="嗯。", text="", pcm16=b"")
+        return Recognition(audio.input_ref, audio.session, permit.attempt_id, audio.user_key, "no_speech")
 
 
-def _agent(utterance: bytes | None) -> tuple[VoiceAgent, _FakeBackend]:
-    agent = VoiceAgent.__new__(VoiceAgent)
-    agent.settings = VoiceAgentSettings(enabled=True, barge_in=False)
+def _agent(utterance: bytes | None) -> tuple[VoiceCoordinator, _FakeBackend]:
+    temporary = tempfile.TemporaryDirectory()
+    agent = VoiceCoordinator(VoiceAgentSettings(enabled=True, memory_path=str(Path(temporary.name) / "history.jsonl")), VoiceApiSettings())
+    agent.test_directory = temporary
+    agent.settings = VoiceAgentSettings(enabled=True, barge_in=False, memory_path=str(Path(temporary.name)/"history.jsonl"))
     agent.live_mode = False
     agent.duplex = None
     agent.backend = _FakeBackend()
@@ -363,8 +270,9 @@ def _agent(utterance: bytes | None) -> tuple[VoiceAgent, _FakeBackend]:
     agent._user_buffers = {}
     agent.settings.area = "area1"
     agent.settings.channel = "chan1"
-    agent._init_throttle()  # 单槽信箱 + 冷却状态，见 agent.VoiceAgent._init_throttle
-    agent._vad_for = lambda uid: _StubVad(utterance)  # type: ignore[method-assign]
+    agent._init_throttle()  # 单槽信箱 + 冷却状态，见 agent.VoiceCoordinator._init_throttle
+    if utterance:
+        agent.settings.max_utterance_ms = max(30, int(len(utterance)/2/16000*1000))
     return agent, agent.backend
 
 
@@ -375,11 +283,10 @@ def test_noise_utterance_is_dropped_before_asr(caplog) -> None:
         quiet = _pcm(int(0.0122 * 32768))  # 0.0122 > VAD 的 0.012，但 < 闸门 0.02
         assert _MIN_UTTERANCE_RMS > 0.012
         agent, backend = _agent(quiet)
-        with caplog.at_level(logging.INFO, logger="voice_agent.agent"):
+        with caplog.at_level(logging.INFO, logger="app.voice"):
             await agent._on_remote_pcm("u1", quiet, 16000)
             await asyncio.sleep(0)  # 让被丢掉的路径不留下 task
         assert backend.called == 0, "底噪被送去 ASR 了"
-        assert "丢弃疑似噪声回合" in caplog.text
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(agent.reply_scheduler.next(0), 0.01)
 
@@ -397,7 +304,7 @@ def test_real_speech_still_goes_through(caplog) -> None:
         loud = _pcm(int(0.15 * 32768), samples=24000)  # 1.5s
         agent, backend = _agent(loud)
         await establish_room(agent)
-        with caplog.at_level(logging.INFO, logger="voice_agent.agent"):
+        with caplog.at_level(logging.INFO, logger="app.voice"):
             await agent._on_remote_pcm("u1", loud, 16000)
             selected = await agent.reply_scheduler.next(0)
             await agent._run_selected_reply(selected)

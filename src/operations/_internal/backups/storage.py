@@ -17,6 +17,8 @@ import zipfile
 from contextlib import closing
 from pathlib import Path, PurePosixPath
 
+from operations.models import StoppedDeployment, ValidatedRestore
+
 MAX_BYTES = 256 * 1024 * 1024
 MAX_FILES = 1024
 
@@ -46,9 +48,23 @@ def atomic_json(path: Path, value: dict) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(value, stream, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
         for attempt in range(5):
             try:
                 os.replace(name, path)
+                # Persist the directory entry where supported; Windows may reject directory handles.
+                try:
+                    directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+                except OSError:
+                    directory_fd = None
+                if directory_fd is not None:
+                    try:
+                        os.fsync(directory_fd)
+                    except OSError:
+                        pass
+                    finally:
+                        os.close(directory_fd)
                 break
             except PermissionError as exc:
                 # Windows readers/antivirus can briefly deny rename. Keep the
@@ -123,8 +139,11 @@ class BackupStore:
                 if any((Path(directory) / name).is_symlink() for name in dirs):
                     raise ValueError("用户数据包含符号链接目录，请先手动备份")
                 sources.extend(Path(directory) / name for name in files)
+        fd, temporary_name = tempfile.mkstemp(prefix='.backup-', suffix='.tmp', dir=self.directory)
+        os.close(fd)
+        temporary = Path(temporary_name)
         try:
-            with tempfile.TemporaryDirectory(dir=self.directory) as stage, zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            with tempfile.TemporaryDirectory(dir=self.directory) as stage, zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                 for source in sources:
                     if not source.exists() or source.name.endswith(("-wal", "-shm", "-journal")):
                         continue
@@ -139,6 +158,11 @@ class BackupStore:
                         copy = Path(stage) / f"{len(entries)}.sqlite"
                         with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True, timeout=5)) as db, closing(sqlite3.connect(copy)) as dest:
                             db.backup(dest)
+                    if sqlite:
+                        with closing(sqlite3.connect(copy)) as inspected:
+                            context_table = inspected.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='context_metadata'").fetchone()
+                            if context_table and inspected.execute('PRAGMA user_version').fetchone()[0] > 1:
+                                raise ValueError('上下文数据库版本超出当前维护能力，停止备份/恢复')
                     content = copy.read_bytes()
                     total += len(content)
                     if total > MAX_BYTES:
@@ -146,10 +170,27 @@ class BackupStore:
                     entries.append({"name": name, "size": len(content), "sha256": hashlib.sha256(content).hexdigest()})
                     archive.writestr(name, content)
                 archive.writestr("manifest.json", json.dumps({"format": 1, "created_at": created, "files": entries}))
+            with zipfile.ZipFile(temporary) as verified:
+                if verified.testzip() is not None:
+                    raise ValueError('归档写入校验失败')
+            with temporary.open('r+b') as completed:
+                completed.flush()
+                os.fsync(completed.fileno())
+            os.replace(temporary, target)
+            try:
+                directory_fd = os.open(self.directory, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+            except OSError:
+                directory_fd = None
+            if directory_fd is not None:
+                try:
+                    os.fsync(directory_fd)
+                except OSError:
+                    pass
+                finally:
+                    os.close(directory_fd)
             return {"id": backup_id, "created_at": created, "size": target.stat().st_size, "file_count": len(entries)}
-        except BaseException:
-            target.unlink(missing_ok=True)
-            raise
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def list(self, limit: int | None = 50) -> list[dict]:
         result = []
@@ -193,15 +234,38 @@ class BackupStore:
                     output = stage / name
                     output.parent.mkdir(parents=True, exist_ok=True)
                     output.write_bytes(content)
+                    if content[:16] == b'SQLite format 3\x00':
+                        with closing(sqlite3.connect(output)) as inspected:
+                            is_context = inspected.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='context_metadata'").fetchone()
+                            if is_context and inspected.execute('PRAGMA user_version').fetchone()[0] > 1:
+                                raise ValueError('备份的上下文数据库版本不受支持，禁止恢复')
                 return names
         except (KeyError, TypeError, json.JSONDecodeError, zipfile.BadZipFile, OSError) as exc:
             raise ValueError("备份损坏或无法读取") from exc
 
-    def restore(self, backup_id: str) -> None:
-        """Call only after the application has shut down its database connections."""
+    def inspect(self, backup_id: str) -> ValidatedRestore:
+        target = self.path(backup_id)
+        before = hashlib.sha256(target.read_bytes()).hexdigest()
+        with tempfile.TemporaryDirectory(dir=self.directory) as folder:
+            self.validate(backup_id, Path(folder))
+        if hashlib.sha256(target.read_bytes()).hexdigest() != before:
+            raise ValueError('验证期间备份内容变化，请重新检查')
+        return ValidatedRestore(backup_id, before)
+
+    def restore(self, reference: ValidatedRestore, stopped: StoppedDeployment) -> None:
+        """只消费已验证归档和监督器的停机凭据，恢复前复核内容指纹。"""
+        if not isinstance(reference, ValidatedRestore) or not isinstance(stopped, StoppedDeployment):
+            raise ValueError('恢复需要已验证备份和原部署停机凭据')
+        if not stopped.job_id or not stopped.start_marker or not stopped.handoff_token:
+            raise ValueError('恢复停机凭据无效')
+        backup_id = reference.backup_id
+        if hashlib.sha256(self.path(backup_id).read_bytes()).hexdigest() != reference.fingerprint:
+            raise ValueError('已验证的备份内容变化，禁止恢复')
         with tempfile.TemporaryDirectory(dir=self.directory) as folder:
             stage = Path(folder)
             names = self.validate(backup_id, stage)
+            if hashlib.sha256(self.path(backup_id).read_bytes()).hexdigest() != reference.fingerprint:
+                raise ValueError('恢复验证期间备份内容变化，禁止覆盖数据')
             previous = stage / "previous"
             previous.mkdir()
             replaced = []

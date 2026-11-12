@@ -175,8 +175,7 @@ def test_unrelated_config_save_preserves_shared_runtime_password(monkeypatch, tm
 
 def test_saved_password_is_canonical_and_environment_only_bootstraps_empty_config(monkeypatch):
     import config
-    from bridge.runtime import apply_runtime_overrides
-    from operations import load_voice_agent_settings
+    from operations import apply_runtime_overrides, load_voice_agent_settings
     monkeypatch.setenv("BOT_WEBUI_TOKEN", "environment-bootstrap")
     monkeypatch.setattr(config, "WEBUI_CONFIG", {"token": "saved-password"})
     apply_runtime_overrides()
@@ -204,8 +203,8 @@ def test_empty_password_allows_only_minimal_local_update_health(monkeypatch):
 
 
 def test_password_rotation_reaches_standalone_api_even_if_voice_reload_fails(monkeypatch):
+    from app.http import VoiceApiServer
     from operations.models import VoiceApiSettings
-    from voice_agent.api import VoiceApiServer
     async def check():
         console, app = console_app()
         async def failing_reload():

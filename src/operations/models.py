@@ -1,4 +1,4 @@
-"""系统维护公开值类型和外部平台端口；版本化计划仍按设计逐步迁入。"""
+"""系统维护公开值类型、版本化配置与计划，以及外部平台端口。"""
 
 from __future__ import annotations
 
@@ -6,6 +6,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 from urllib.parse import unquote, urlsplit
+
+DEPLOYMENT_CONTRACT_VERSION = 2
+CONTEXT_SCHEMA_MAX = 1
 
 
 @dataclass(frozen=True)
@@ -304,3 +307,149 @@ class VoiceApiSettings:
     host: str = "127.0.0.1"
     port: int = 3091
     token: str = field(default="", repr=False)
+
+
+class RevisionConflict(ValueError):
+    """调用者所见配置已过期，必须重新读取，不能覆盖新配置。"""
+
+
+@dataclass(frozen=True)
+class ConfigurationRequest:
+    request_id: str
+    expected_revision: str
+    change: ConfigurationChange
+
+    def __post_init__(self):
+        import re
+        if (not isinstance(self.request_id, str) or not 1 <= len(self.request_id) <= 128
+                or re.fullmatch(r'[a-zA-Z0-9_.:-]+', self.request_id) is None
+                or not isinstance(self.expected_revision, str)
+                or re.fullmatch(r'[a-f0-9]{64}', self.expected_revision) is None
+                or not isinstance(self.change, ConfigurationChange)):
+            raise ValueError('配置请求标识或版本无效')
+
+
+@dataclass(frozen=True)
+class ConfigurationResult:
+    request_id: str
+    revision: str
+    state: str
+    changed: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    applied: tuple[str, ...] = ()
+    failed: tuple[str, ...] = ()
+    restart_required: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RuntimeApplyReport:
+    applied: tuple[str, ...] = ()
+    failed: tuple[str, ...] = ()
+    restart_required: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class QuiesceResult:
+    closed: tuple[str, ...] = ()
+    pending: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        return not self.pending and not self.errors
+
+
+@dataclass(frozen=True)
+class HandoffRef:
+    job_id: str
+    revision: int
+    token: str = field(repr=False)
+
+
+@dataclass(frozen=True)
+class ExitResult:
+    accepted: bool
+    reason: str = ''
+
+
+@dataclass(frozen=True)
+class RuntimeHealth:
+    ready: bool
+    degraded: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class DeploymentAccess:
+    allowed: bool
+    reason: str = ''
+    job_id: str = ''
+
+
+@dataclass(frozen=True)
+class MaintenanceRequest:
+    action: str
+    target: UpdateTarget | None = None
+    backup_id: str = ''
+    confirm_channel_switch: bool = False
+
+    def __post_init__(self):
+        import re
+        if self.action == 'update':
+            if not isinstance(self.target, UpdateTarget) or self.backup_id:
+                raise ValueError('更新计划需要已解析的更新目标')
+        elif self.action == 'restore':
+            if self.target is not None or re.fullmatch(r'[a-f0-9]{32}', self.backup_id) is None:
+                raise ValueError('恢复计划需要有效备份引用')
+        else:
+            raise ValueError('未知维护动作')
+
+
+@dataclass(frozen=True)
+class MaintenancePlan:
+    plan_id: str
+    request: MaintenanceRequest
+    deployment_revision: str
+    config_revision: str
+    expires_at: float
+    impact: tuple[str, ...]
+    backup_fingerprint: str = ""
+
+
+@dataclass(frozen=True)
+class JobRef:
+    job_id: str
+
+
+@dataclass(frozen=True)
+class JobSnapshot:
+    job_id: str
+    revision: int
+    action: str
+    phase: str
+    detail: str
+    closed: tuple[str, ...] = ()
+    pending: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SystemSnapshot:
+    access: DeploymentAccess
+    job: JobSnapshot | None
+
+
+@dataclass(frozen=True)
+class StoppedDeployment:
+    job_id: str
+    pid: int
+    start_marker: str
+    handoff_token: str = field(repr=False)
+
+
+@dataclass(frozen=True)
+class ValidatedRestore:
+    backup_id: str
+    fingerprint: str
+
+
+
+class CredentialsError(ValueError):
+    """本地凭据无法解析或不能安全持久化，不携带凭据正文。"""

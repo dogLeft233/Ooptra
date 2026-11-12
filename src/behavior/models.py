@@ -3,7 +3,9 @@
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
+from channels.models import VOICE_CONTROL_MIN_MS as VOICE_CONTROL_MIN_MS
 from channels.models import SessionRef
+from context.models import ContextRevision
 
 
 @dataclass(frozen=True)
@@ -12,6 +14,24 @@ class AttemptPermit:
 
     session: SessionRef
     attempt_number: int
+    input_ref: str
+    expires_at: float
+    policy_version: int = 1
+
+    def __post_init__(self) -> None:
+        import math
+        if (type(self.session) is not SessionRef
+                or type(self.attempt_number) is not int or self.attempt_number < 1
+                or type(self.input_ref) is not str or not self.input_ref.strip()
+                or type(self.policy_version) is not int or self.policy_version < 1
+                or type(self.expires_at) not in {int, float} or not math.isfinite(self.expires_at)):
+            raise ValueError("尝试许可需要原会话、输入、正次数/版本及有限期限")
+
+    @property
+    def attempt_id(self) -> str:
+        identity = (self.session.process_run_id, self.session.binding_id, self.session.session_id,
+                    self.session.room_target.area, self.session.room_target.channel)
+        return "".join(f"{len(part)}:{part}" for part in identity) + f":{self.attempt_number}"
 
 
 @dataclass(frozen=True)
@@ -168,7 +188,6 @@ def resolve_volume_command(command: VolumeCommand, current: int) -> tuple[int | 
     return None, command.action == "mute"
 
 
-VOICE_CONTROL_MIN_MS = 250
 
 
 @dataclass(frozen=True)
@@ -201,3 +220,171 @@ class SpeechActivity:
         if (type(self.duration_ms) not in {int, float} or not math.isfinite(self.duration_ms)
                 or self.duration_ms < 0):
             raise ValueError("音频活动时长须为非负有限毫秒数")
+
+
+@dataclass(frozen=True)
+class SpeechIntent:
+    intent_id: str
+    action_id: str
+    session: SessionRef
+    trigger_id: str
+    context_version: ContextRevision
+    deadline: float
+    text: str = ""
+    user_key: str = ""
+    attempt_id: str = ""
+    kind: Literal["reply", "fixed", "announcement"] = "reply"
+    announcement_kind: Literal["enter", "leave"] = "enter"
+
+    def __post_init__(self) -> None:
+        import math
+        if (any(type(value) is not str or not value.strip()
+                for value in (self.intent_id, self.action_id, self.trigger_id))
+                or any(type(value) is not str for value in (self.text, self.user_key, self.attempt_id))
+                or type(self.announcement_kind) is not str or self.announcement_kind not in {"enter", "leave"}
+                or (self.kind in {"fixed", "announcement"} and not self.text.strip())
+                or type(self.session) is not SessionRef
+                or type(self.context_version) is not ContextRevision
+                or type(self.kind) is not str or self.kind not in {"reply", "fixed", "announcement"}
+                or type(self.deadline) not in {int, float} or not math.isfinite(self.deadline)):
+            raise ValueError("发言意图需要身份、会话、上下文版本及有限截止")
+
+
+@dataclass(frozen=True)
+class AudioReady:
+    trigger_id: str
+    session: SessionRef
+    user_key: str
+    context_version: ContextRevision
+
+    def __post_init__(self) -> None:
+        if (type(self.trigger_id) is not str or not self.trigger_id.strip()
+                or type(self.session) is not SessionRef or type(self.user_key) is not str
+                or type(self.context_version) is not ContextRevision):
+            raise ValueError("输入触发需要身份和会话")
+
+
+@dataclass(frozen=True)
+class RecognitionObserved:
+    trigger: AudioReady
+    permit: AttemptPermit
+    text: str
+    context_version: ContextRevision
+    audio_ms: float = 1000
+    control: VoiceControlDecision | None = None
+
+    def __post_init__(self) -> None:
+        import math
+        if (type(self.trigger) is not AudioReady or type(self.permit) is not AttemptPermit
+                or self.permit.session != self.trigger.session
+                or self.permit.input_ref != self.trigger.trigger_id
+                or type(self.text) is not str or type(self.context_version) is not ContextRevision
+                or type(self.audio_ms) not in {int, float} or not math.isfinite(self.audio_ms)
+                or self.audio_ms < 0 or (self.control is not None and type(self.control) is not VoiceControlDecision)):
+            raise ValueError("识别事实必须保留原输入许可、合法文字/控制与有限非负时长")
+
+
+@dataclass(frozen=True)
+class ReplySettings:
+    probability: int = 100
+    keywords: tuple[str, ...] = ()
+    window_seconds: float = 0
+    min_utterance_ms: int = 0
+    lifetime_seconds: float = 60
+    voice_leave_enabled: bool = False
+    voice_volume_enabled: bool = False
+
+    def __post_init__(self) -> None:
+        import math
+        if (type(self.probability) is not int or not 0 <= self.probability <= 100
+                or type(self.keywords) is not tuple
+                or any(type(word) is not str for word in self.keywords)
+                or type(self.voice_leave_enabled) is not bool or type(self.voice_volume_enabled) is not bool
+                or type(self.window_seconds) not in {int, float} or not math.isfinite(self.window_seconds)
+                or self.window_seconds < 0
+                or type(self.min_utterance_ms) is not int or self.min_utterance_ms < 0
+                or type(self.lifetime_seconds) not in {int, float}
+                or not math.isfinite(self.lifetime_seconds) or self.lifetime_seconds <= 0):
+            raise ValueError("回应策略参数无效")
+
+
+@dataclass(frozen=True)
+class Speak:
+    intent: SpeechIntent
+
+
+@dataclass(frozen=True)
+class NoAction:
+    reason: str
+
+
+@dataclass(frozen=True)
+class ControlAction:
+    action_id: str
+    session: SessionRef
+    control: VoiceControlDecision
+
+    def __post_init__(self) -> None:
+        if (type(self.action_id) is not str or not self.action_id.strip()
+                or type(self.session) is not SessionRef or type(self.control) is not VoiceControlDecision
+                or not (self.control.leave or self.control.volume is not None)):
+            raise ValueError("控制动作需要合法身份、会话和实际候选")
+
+
+@dataclass(frozen=True)
+class AttemptFinished:
+    permit: AttemptPermit
+    end_reason: str
+    handled_at: float
+
+
+@dataclass(frozen=True)
+class NotExecuted:
+    action_id: str
+    stage: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class FeedbackReceipt:
+    status: Literal["accepted", "duplicate", "conflict", "unknown"]
+
+
+@dataclass(frozen=True)
+class LiveProposal:
+    proposal_id: str
+    session: SessionRef
+    revision: int
+    text: str
+    user_key: str
+    context_version: ContextRevision
+    deadline: float
+    internal: bool = False
+
+    def __post_init__(self) -> None:
+        import math
+        if (type(self.proposal_id) is not str or not self.proposal_id.strip()
+                or type(self.session) is not SessionRef
+                or type(self.revision) is not int or self.revision < 0
+                or type(self.text) is not str or type(self.user_key) is not str
+                or type(self.context_version) is not ContextRevision
+                or type(self.internal) is not bool
+                or type(self.deadline) not in {int, float} or not math.isfinite(self.deadline)):
+            raise ValueError("实时提议需要合法身份、版本、文字、显式内部标记和有限期限")
+
+
+@dataclass(frozen=True)
+class DeferLive:
+    until: float
+
+
+@dataclass(frozen=True)
+class ControlProposal:
+    trigger_id: str
+    session: SessionRef
+    candidate: VoiceControlDecision
+
+    def __post_init__(self) -> None:
+        if (type(self.trigger_id) is not str or not self.trigger_id.strip()
+                or type(self.session) is not SessionRef or type(self.candidate) is not VoiceControlDecision):
+            raise ValueError("控制提议需要触发身份、原会话和解析后的候选")

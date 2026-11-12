@@ -14,10 +14,10 @@ import asyncio
 
 import pytest
 
+from app import assembly as runtime_module
+from app.voice import VoiceCoordinator
 from operations import apply_settings
 from operations.models import VoiceAgentSettings, VoiceApiSettings
-from voice_agent import runtime as runtime_module
-from voice_agent.agent import VoiceAgent
 
 
 def _settings(tmp_path, **overrides) -> VoiceAgentSettings:
@@ -60,7 +60,7 @@ def test_apply_settings_returns_empty_when_nothing_changed(tmp_path) -> None:
 
 def test_runtime_agent_and_backend_share_one_settings_object(tmp_path) -> None:
     settings = _settings(tmp_path)
-    agent = VoiceAgent(settings, VoiceApiSettings())
+    agent = VoiceCoordinator(settings, VoiceApiSettings())
 
     assert agent.settings is settings
     assert agent.backend.settings is settings
@@ -120,64 +120,76 @@ def test_reply_controls_reload_reaches_backend_without_replacing_it(monkeypatch,
     assert not result["restart_keys"]
 
 
-def test_reload_settings_rebuilds_vad_when_tuning_changes(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
+def test_reload_settings_rebuilds_vad_when_tuning_changes(monkeypatch, tmp_path):
     rt = _make_runtime(monkeypatch, _settings(tmp_path))
-    old_vad = rt.agent._vad
-
-    fresh = _settings(tmp_path, silence_ms=1234, max_utterance_ms=9000)
-    monkeypatch.setattr(
-        runtime_module, "load_voice_agent_settings", lambda: (fresh, VoiceApiSettings())
-    )
+    def feed(pcm):
+        audio = rt.agent.ingress.accept('member', pcm, 16000)
+        assert audio is not None
+        return rt.agent.ingress.cut(audio)
+    spoken = b'\0\x20' * (600 * 16)
+    short_tail = b'\0\0' * (1300 * 16)
+    assert feed(spoken + short_tail).status == 'ready'
+    fresh = _settings(tmp_path, silence_ms=2000, max_utterance_ms=9000)
+    monkeypatch.setattr(runtime_module, 'load_voice_agent_settings', lambda: (fresh, VoiceApiSettings()))
     result = asyncio.run(rt.reload_settings())
+    assert 'silence_ms' in result['changed']
+    assert feed(spoken + short_tail).status == 'accumulating'
+    assert feed(b'\0\0' * (1000 * 16)).status == 'ready'
 
-    assert "silence_ms" in result["changed"]
-    assert rt.agent._vad is not old_vad, "断句参数变了却没重建 VAD"
-    assert any("断句参数" in note for note in result["notes"])
+def test_reload_settings_rebuilds_memory_and_rewires_backend(monkeypatch, tmp_path):
+    import base64
+    import json
+    import time
 
-
-def test_reload_settings_rebuilds_memory_and_rewires_backend(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
     from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    from behavior.models import SpeechIntent
+    from channels.models import ActionOutcome, RoomTarget, SessionRef
+    from context import create_memory
+    from context.models import ConfirmedTurn, ContextRequest, OutputRecord
+    from dialogue import audio_output
 
     async def run():
         captured = []
-
         async def model(request):
-            captured.append(await request.json())
-            return web.json_response({"choices": [{"message": {"content": "hello"}}]})
-
+            body = await request.json()
+            if 'audio' in body:
+                event = {'choices': [{'delta': {'audio': {'data': base64.b64encode(b'\1\0' * 20).decode()}}}]}
+                return web.Response(text='data: ' + json.dumps(event) + '\n\ndata: [DONE]\n\n', content_type='text/event-stream')
+            captured.append(body)
+            return web.json_response({'choices': [{'message': {'content': 'hello'}}]})
         app = web.Application()
         app.router.add_post('/chat/completions', model)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        server = web.TCPSite(runner, '127.0.0.1', 0)
-        await server.start()
-        port = server._server.sockets[0].getsockname()[1]
-        model_options = {"backend": "mimo_cascade", "mimo_api_key": "synthetic",
-                         "mimo_base_url": f"http://127.0.0.1:{port}"}
-        rt = _make_runtime(monkeypatch, _settings(tmp_path, **model_options))
-        old_memory = rt.agent.memory
-        old_memory.append("user", "old history", user_key="member")
-        fresh = _settings(tmp_path, memory_path=str(tmp_path / "other.jsonl"), **model_options)
-        monkeypatch.setattr(runtime_module, "load_voice_agent_settings",
-                            lambda: (fresh, VoiceApiSettings()))
-        try:
-            result = await rt.reload_settings()
-            assert "memory_path" in result["changed"]
-            rt.agent.memory.append("user", "new history", user_key="member")
-            assert await rt.agent.backend.chat("current", user_key="member") == "hello"
-            assert [message["content"] for message in captured[0]["messages"]
-                    if message["role"] == "user"] == ["new history", "current"]
-            assert [row["content"] for row in old_memory.recent()] == ["old history"]
-        finally:
-            await rt.agent.backend.aclose()
-            await runner.cleanup()
-
+        async with TestServer(app) as server:
+            options = dict(backend='mimo_cascade', mimo_api_key='synthetic',
+                           mimo_base_url=str(server.make_url('/')).rstrip('/'))
+            rt = _make_runtime(monkeypatch, _settings(tmp_path, **options))
+            original_history_path = rt.agent.settings.memory_path
+            session = SessionRef('run', 'binding', 'session', RoomTarget('area', 'room'))
+            async def record(text, identity):
+                prepared = await rt.agent.context_service.prepare_context(ContextRequest(session, 'member'))
+                rt.agent.context_service.record_output(OutputRecord(identity, session,
+                    ConfirmedTurn(text, '', 'failed', 'member'),
+                    ActionOutcome(identity, 'failed', session), prepared.context_ref))
+            await record('old history', 'old')
+            fresh = _settings(tmp_path, memory_path=str(tmp_path / 'other.jsonl'), **options)
+            monkeypatch.setattr(runtime_module, 'load_voice_agent_settings', lambda: (fresh, VoiceApiSettings()))
+            try:
+                assert 'memory_path' in (await rt.reload_settings())['changed']
+                await record('new history', 'new')
+                prepared = await rt.agent.context_service.prepare_context(ContextRequest(session, 'member'))
+                intent = SpeechIntent('current', 'current', session, 'current', prepared.version,
+                    time.monotonic() + 5, 'current', 'member')
+                audio = audio_output(rt.agent.backend.generate(intent, prepared,
+                    tools=rt.agent.context_service.tools(prepared)))
+                assert b''.join([frame.pcm16 async for frame in audio.frames()]) == b'\1\0' * 20
+                assert [message['content'] for message in captured[0]['messages']
+                        if message['role'] == 'user'] == ['new history', 'current']
+                assert [row['content'] for row in create_memory(original_history_path).recent()] == ['old history']
+            finally:
+                await rt.stop()
     asyncio.run(run())
-
 
 def test_reload_settings_switches_backend_type(
     monkeypatch: pytest.MonkeyPatch, tmp_path

@@ -5,8 +5,8 @@ import asyncio
 import pytest
 from test_voice_operations import make_agent
 
+from app import diagnostics
 from behavior.models import VoiceControlDecision
-from voice_agent import diagnostics
 
 
 @pytest.mark.parametrize("backend", [" MIMO ", " MiMo_Cascade ", " CASCADE_MIMO "])

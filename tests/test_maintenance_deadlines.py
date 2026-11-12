@@ -146,7 +146,7 @@ def test_inflight_query_does_not_cache_results_after_job_changes(tmp_path, monke
         task = asyncio.create_task(service.query("preflight"))
         try:
             await asyncio.to_thread(entered.wait, 1)
-            service.write_job({"phase": "preparing"})
+            service.write_job({"id": "fixture", "phase": "preparing"})
         finally:
             release.set()
         result = await task

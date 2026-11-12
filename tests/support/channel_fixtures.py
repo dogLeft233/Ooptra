@@ -4,19 +4,14 @@ import asyncio
 from types import SimpleNamespace
 from uuid import uuid4
 
-from behavior import create_cascade_attempts
+from app.voice import VoiceCoordinator
 from channels.models import JoinRoom, RoomTarget
 from operations.models import VoiceAgentSettings, VoiceApiSettings
-from voice_agent.agent import VoiceAgent
 
 
 async def establish_room(agent) -> None:
-    if not hasattr(agent, "_bot"):
-        agent.bind_bot(None)
-    if not hasattr(agent, "_attempt_budget"):
-        agent._attempt_budget = create_cascade_attempts()
     if agent.channels.snapshot().confirmed:
-        agent._attempt_budget.start_session(agent.channels.snapshot().session)
+        agent.behavior.start_session(agent.channels.snapshot().session)
         return
 
     async def join(**kwargs):
@@ -25,14 +20,14 @@ async def establish_room(agent) -> None:
     async def leave():
         pass
 
-    if getattr(agent, "_bot", None) is None:
+    if not agent.platform_bound:
         agent.bind_bot(SimpleNamespace(voice=SimpleNamespace(join=join, leave=leave, backend=None)))
     target = RoomTarget(agent.settings.area or "area1", agent.settings.channel or "chan1")
     result = await agent.channels.execute(
         JoinRoom(uuid4().hex, target, agent.channels.snapshot().revision)
     )
     assert result.status == "completed"
-    agent._attempt_budget.start_session(result.session)
+    agent.behavior.start_session(result.session)
 
 
 class Duplex:
@@ -68,7 +63,8 @@ def make_voice_agent(tmp_path):
                 raise RuntimeError("leave failed")
             self.leaves += 1
 
-    agent = VoiceAgent(
+    bot = SimpleNamespace(voice=Voice())
+    agent = VoiceCoordinator(
         VoiceAgentSettings(
             enabled=True,
             backend="mimo_cascade",
@@ -78,7 +74,8 @@ def make_voice_agent(tmp_path):
             memory_path=str(tmp_path / "memory.jsonl"),
         ),
         VoiceApiSettings(),
-        bot=SimpleNamespace(voice=Voice()),
+        bot=bot,
     )
+    agent.test_platform = bot
     agent.duplex = Duplex()
     return agent

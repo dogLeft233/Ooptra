@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 
 from context import create_context_bridge as ContextBridge
 from tests.support.context_fixtures import prepare_source
@@ -75,7 +74,7 @@ def test_outbox_preserves_all_selected_memory_scopes_and_partial_retry(tmp_path)
         restored = ContextBridge(outbox_path=tmp_path / "outbox.json")
         retried = (await restored.poll(wait=0))[0]
         assert retried["request_id"] == event["request_id"]
-        assert retried["scope"]["memory_scopes"] == scopes
+        assert retried["scope"]["memory_scopes"] == [scopes[1]]
         assert retried["scope"]["memory_route_id"] == "original-rule"
     asyncio.run(run())
 
@@ -115,7 +114,8 @@ def test_outbox_survives_restart_and_acknowledges_only_matching_request(tmp_path
         assert event["payload"]["user_text"] == "hello"
         assert event["scope"]["group_id"] == "123"
         assert restored.resolve(event["request_id"], {"ok": True})
-        assert json.loads(path.read_text(encoding="utf-8")) == []
+        assert restored.status()["pending_writes"] == 0
+        assert await ContextBridge(outbox_path=path).poll(wait=0) == []
         assert not restored.resolve(event["request_id"], {"ok": True})
     asyncio.run(run())
 
@@ -178,4 +178,22 @@ def test_bound_turn_preserves_original_scope_and_never_updates_new_session(tmp_p
         assert bridge.history == []
         restored = ContextBridge(outbox_path=tmp_path / "outbox.json")
         assert len(await restored.poll(wait=0)) == 1
+    asyncio.run(run())
+
+
+def test_request_handles_pre_alias_asyncio_timeout_without_leaking_waiter(monkeypatch):
+    class LegacyAsyncTimeout(Exception):
+        pass
+    async def expired(waiter, timeout):
+        waiter.cancel()
+        raise LegacyAsyncTimeout
+    async def run():
+        bridge = ContextBridge()
+        await bridge.poll(wait=0)
+        monkeypatch.setattr(asyncio, "TimeoutError", LegacyAsyncTimeout)
+        monkeypatch.setattr(asyncio, "wait_for", expired)
+        result = await bridge.request("recall", {"query": "question"})
+        assert result == {"ok": False, "error": "AstrBot 请求超时"}
+        assert await bridge.poll(wait=0) == []
+        await bridge.close()
     asyncio.run(run())

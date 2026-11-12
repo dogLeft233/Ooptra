@@ -14,7 +14,7 @@
 本模块是语音 HTTP 契约的**唯一实现**，两个入口共用：
 
   * WebUI（3090）—— ``mount_voice_routes``，额外挂 /api/* 历史别名
-  * 独立 VOICE_API 端口（3091）—— ``build_voice_routes``，见 voice_agent/api.py
+  * 独立 VOICE_API 端口（3091）—— ``build_voice_routes``，见 app/http.py
 
 不要在任何地方另写一份 handler：3091 曾经自带一套手写路由，结果与 3090 分叉
 （缺 ``/voice/channels``、``/voice/members`` 因 pydantic 模型不可序列化而 500）。
@@ -43,8 +43,7 @@ from typing import Any
 
 from aiohttp import web
 
-from onebot_v11.sdk_integration import find_sdk_onebot_v11
-from oopz_sdk.adapters.onebot.v11.types import make_group_source
+from context.models import BindingRequest, PollRequest, RpcReceipt
 
 logger = logging.getLogger(__name__)
 
@@ -137,9 +136,9 @@ async def _member_names(uids: list[str]) -> dict[str, str]:
     if not unique:
         return {}
     try:
-        from oopz.name_resolver import get_resolver
+        from channels import name_directory
 
-        resolver = get_resolver()
+        resolver = name_directory()
     except Exception:
         logger.debug("name resolver unavailable", exc_info=True)
         return {}
@@ -154,25 +153,6 @@ async def _member_names(uids: list[str]) -> dict[str, str]:
         except Exception:
             names[uid] = ""
     return names
-
-
-def _voice_live_states(bot: Any) -> tuple[dict[str, dict], int]:
-    """取房间内成员的实时静音状态：``({uid: {m, hm, ...}}, 累计收到条数)``。
-
-    来源是各客户端用 Agora stream message 广播的 ``{m, uid, cid, hm}``。
-    Oopz 的 REST 与网关事件都不带这个状态，所以拿不到就是拿不到 ——
-    这里对任何异常都静默降级成空表，成员页该显示「未知」而不是 500。
-    """
-    try:
-        voice = getattr(bot, "voice", None)
-        states = voice.voice_states() if voice is not None else {}
-        received = int(getattr(voice, "voice_state_received", 0) or 0)
-    except Exception:
-        logger.debug("live voice states unavailable", exc_info=True)
-        return {}, 0
-    if not isinstance(states, dict):
-        return {}, received
-    return {str(uid): row for uid, row in states.items() if isinstance(row, dict)}, received
 
 
 def _channel_member_map(members_raw: Any) -> dict[str, list[Any]]:
@@ -275,14 +255,14 @@ def build_voice_routes(
             "astrbot_context": st.get("astrbot_context", {}),
         }
 
-    from voice_agent.preview import PreviewService
-    preview_service = PreviewService()
+    from dialogue import create_preview_service
+    preview_service = create_preview_service()
 
     async def voice_diagnostics(request: web.Request) -> web.Response:
         import base64
         import binascii
 
-        from voice_agent.diagnostics import diagnose
+        from app.diagnostics import diagnose
         try:
             body = await request.json() if request.can_read_body else {}
             if not isinstance(body, dict):
@@ -322,8 +302,7 @@ def build_voice_routes(
             return err(f"{type(exc).__name__}：试听生成失败，请检查模型与音色配置")
 
     async def voice_preview_prompts(request: web.Request) -> web.Response:
-        from behavior import parse_auto_visit_config
-        from voice_agent.preview import saved_prompts
+        from behavior import parse_auto_visit_config, saved_prompts
         controller = getattr(voice_runtime, "auto_visit", None)
         config = controller.config if controller is not None else parse_auto_visit_config(None)
         return ok({"prompts": saved_prompts(config, request.query.get("kind", ""), request.query.get("area", ""))})
@@ -427,15 +406,15 @@ def build_voice_routes(
 
     async def voice_members(request: web.Request) -> web.Response:
         agent = current_agent()
-        bot = agent._bot
-        if bot is None:
+        directory = agent.directory
+        if not directory.available:
             return err("Oopz bot 尚未就绪", 503)
         area = str(request.query.get("area") or agent._area or "")
         if not area:
             return err("缺少 area 参数")
         channel = str(request.query.get("channel") or "").strip()
         try:
-            members_raw = await bot.channels.get_voice_channel_members(area=area)
+            members_raw = await directory.member_data(area)
         except Exception as exc:
             logger.warning("get voice members failed: %s", exc)
             return err(f"获取语音成员失败：{exc}", 502)
@@ -452,7 +431,7 @@ def build_voice_routes(
             [str(_field(row, "uid", "pid", "person_uid", "user_id", default="") or "") for row in rows]
         )
         # 实时静音状态：成员用 Agora stream message 自己广播的那份（REST 不提供）
-        live_states, live_rx = _voice_live_states(bot)
+        live_states, live_rx = directory.live_states()
         items = []
         live_hits = 0
         for row in rows:
@@ -491,8 +470,8 @@ def build_voice_routes(
     async def voice_channels(request: web.Request) -> web.Response:
         """列出域内语音频道及在线人数，供插件按域汇总、按名字找频道。"""
         agent = current_agent()
-        bot = agent._bot
-        if bot is None:
+        directory = agent.directory
+        if not directory.available:
             return err("Oopz bot 尚未就绪", 503)
         area = str(request.query.get("area") or agent._area or "").strip()
         if not area:
@@ -500,22 +479,14 @@ def build_voice_routes(
 
         names: dict[str, str] = {}
         try:
-            groups = await bot.areas.get_area_channels(area)
-            for group in groups or []:
-                for ch in getattr(group, "channels", None) or []:
-                    ctype = str(getattr(ch, "channel_type", "") or "").upper()
-                    if ctype and ctype not in {"VOICE", "AUDIO"}:
-                        continue
-                    cid = str(getattr(ch, "channel_id", "") or getattr(ch, "id", "") or "")
-                    if not cid:
-                        continue
-                    names[cid] = str(getattr(ch, "name", "") or "")
+            for channel in await directory.named_channels(area):
+                names[channel["id"]] = channel["name"]
         except Exception as exc:
             logger.warning("list area channels failed: %s", exc)
 
         counts: dict[str, int] = {}
         try:
-            members_raw = await bot.channels.get_voice_channel_members(area=area)
+            members_raw = await directory.member_data(area)
             for cid, members in _channel_member_map(members_raw).items():
                 counts[cid] = len(
                     [
@@ -573,18 +544,10 @@ def build_voice_routes(
     # ── 域/频道（WebUI 用）──
     async def oopz_areas(_request: web.Request) -> web.Response:
         agent = current_agent()
-        bot = agent._bot
-        if bot is None:
+        directory = agent.directory
+        if not directory.available:
             return err("Oopz bot 尚未就绪", 503)
-        areas = await bot.areas.get_joined_areas()
-        items = []
-        for row in areas or []:
-            items.append(
-                {
-                    "id": str(getattr(row, "area_id", "") or getattr(row, "id", "") or ""),
-                    "name": str(getattr(row, "name", "") or ""),
-                }
-            )
+        items = list(await directory.named_areas())
         default_area, default_channel = _default_target()
         return ok(
             {
@@ -596,26 +559,13 @@ def build_voice_routes(
 
     async def oopz_channels(request: web.Request) -> web.Response:
         agent = current_agent()
-        bot = agent._bot
-        if bot is None:
+        directory = agent.directory
+        if not directory.available:
             return err("Oopz bot 尚未就绪", 503)
         area = str(request.query.get("area") or "").strip()
         if not area:
             return err("缺少 area 参数")
-        groups = await bot.areas.get_area_channels(area)
-        channels: list[dict[str, Any]] = []
-        for group in groups or []:
-            for ch in getattr(group, "channels", None) or []:
-                ctype = str(getattr(ch, "channel_type", "") or "").upper()
-                if ctype and ctype not in {"VOICE", "AUDIO"}:
-                    continue
-                channels.append(
-                    {
-                        "id": str(getattr(ch, "channel_id", "") or getattr(ch, "id", "") or ""),
-                        "name": str(getattr(ch, "name", "") or ""),
-                        "type": ctype or "VOICE",
-                    }
-                )
+        channels = list(await directory.named_channels(area))
         return ok({"area": area, "channels": channels})
 
     # ── 人格 / 记忆 ──
@@ -687,57 +637,48 @@ def build_voice_routes(
         if not re.fullmatch(r"[0-9a-f]{32}", client_id):
             return err("缺少有效桥接实例标识")
         try:
-            events = await current_agent().context_bridge.poll(client_id=client_id)
+            result = await current_agent().context_bridge.poll_request(PollRequest(client_id))
+            if result.status == "peer_conflict":
+                return err("桥接实例已变化", 409)
+            events = result.events()
         except ValueError as exc:
             return err(str(exc), 409)
         return ok({"protocol": 1, "events": events})
 
     async def context_result(request: web.Request) -> web.Response:
         body = await read_json(request)
-        request_id, result = body.get("request_id"), body.get("result")
-        if body.get("client_id") != current_agent().context_bridge.peer_id:
-            return err("桥接实例已变化", 409)
-        if (not isinstance(request_id, str) or len(request_id) > 100
-                or not isinstance(result, dict) or type(result.get("ok")) is not bool
-                or len(str(result)) > 50000):
+        try:
+            receipt = RpcReceipt.parse(body)
+        except ValueError:
             return err("桥接结果格式不正确")
-        accepted = current_agent().context_bridge.resolve(request_id, result)
-        return ok({"accepted": accepted})
+        result = current_agent().context_bridge.resolve_receipt(receipt)
+        if result.status == "rejected":
+            return err("桥接实例已变化", 409)
+        return ok({"accepted": result.accepted})
 
     async def context_refresh(_request: web.Request) -> web.Response:
         return ok(await current_agent().refresh_astrbot_context())
 
     async def context_text_channels(request: web.Request) -> web.Response:
-        bot = getattr(current_agent(), "_bot", None)
-        adapter = find_sdk_onebot_v11(bot)
-        if bot is None or adapter is None:
-            return err("Oopz OneBot v11 桥接未就绪，请先启用文字桥接并连接 AstrBot。", 503)
+        from channels.api import TransportFailure
         area = request.query.get("area", "").strip()
         if not area or len(area) > 256:
             return err("请选择 Oopz 文字频道所在域")
-        groups = await bot.areas.get_area_channels(area)
-        rows = []
-        for group in groups or []:
-            for channel in getattr(group, "channels", None) or []:
-                kind = getattr(channel, "channel_type", "")
-                if str(getattr(kind, "value", kind)).upper() not in {"TEXT", "CHAT"}:
-                    continue
-                cid = str(getattr(channel, "channel_id", "") or "")
-                if not cid:
-                    continue
-                mapped = adapter.ids.createId(make_group_source(area=area, channel=cid))
-                rows.append({"id": cid, "name": str(getattr(channel, "name", "") or cid),
-                             "group_id": str(mapped.number), "area": area})
-        return ok({"channels": rows, "bot_id": str(adapter.self_id)})
+        try:
+            return ok(await current_agent().directory.text_channels(area))
+        except TransportFailure:
+            return err("Oopz OneBot v11 桥接未就绪，请先启用文字桥接并连接 AstrBot。", 503)
 
     async def context_bindings(request: web.Request) -> web.Response:
         bridge = current_agent().context_bridge
         if not bridge.connected:
             return err("插件未连接。请启用 astrbot_plugin_ooptra 2.0.0 或以上版本，并检查 api_base 与 api_token。", 503)
         body = {"action": "list"} if request.method == "GET" else await read_json(request)
-        if body.get("action") not in {"list", "save", "delete", "source-save", "source-delete", "source-options"}:
+        try:
+            binding = BindingRequest.parse(body)
+        except ValueError:
             return err("不支持的绑定操作")
-        result = await bridge.request("bindings", body)
+        result = await bridge.bindings(binding)
         return ok(result) if result.get("ok") is True else err(result.get("error", "绑定操作失败"))
 
     pairs = [

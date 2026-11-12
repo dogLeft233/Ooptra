@@ -22,7 +22,7 @@ def test_source_preparation_preserves_archive_boundary(tmp_path, monkeypatch, mo
         if args[:2] == ["git", "archive"]:
             output = next(value.removeprefix("--output=") for value in args if value.startswith("--output="))
             with tarfile.open(output, "w") as archive:
-                for name, content in {"launcher.py": b"pass", "src/webui/server.py": b"OOPTRA_UPDATE_ID bootstrap_ready"}.items():
+                for name, content in {"launcher.py": b"pass", "src/webui/server.py": b"OOPTRA_UPDATE_ID bootstrap_ready", "src/operations/models.py": b"DEPLOYMENT_CONTRACT_VERSION = 2\nCONTEXT_SCHEMA_MAX = 1"}.items():
                     info = tarfile.TarInfo(name)
                     info.size = len(content)
                     archive.addfile(info, io.BytesIO(content))

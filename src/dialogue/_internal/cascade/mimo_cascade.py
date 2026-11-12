@@ -4,27 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import json
 import logging
 import re
 import struct
+import time
 import wave
 from io import BytesIO
 
 from behavior.models import VoiceControlDecision, parse_control_decision
+from context.models import PreparedContext
 from dialogue._internal.controls import (
     CONTROL_DECISION_FORMAT,
     LEAVE_INTENT_DESCRIPTION,
     VOLUME_INTENT_DESCRIPTION,
 )
 from dialogue._internal.memory_tools import MEMORY_RULES, memory_tools
-from dialogue._internal.observation import DecisionTrace, VoiceObservation
-from dialogue.api import HistoryReader, VoiceBackend
+from dialogue.api import ContextToolPort, VoiceBackend
 from dialogue.models import (
-    RecognitionSink,
-    RecognizedGenerationFailed,
-    VoiceReply,
-    VoiceStreamError,
     VoiceStreamInterrupted,
 )
 
@@ -267,21 +265,15 @@ def _parse_decision_json(raw: str):
 class MimoCascadeBackend(VoiceBackend):
     name = "mimo_cascade"
 
-    def __init__(self, settings, memory, *, reply_policy, **options) -> None:
+    def __init__(self, settings) -> None:
         self.settings = settings
-        self._history = memory
-        self._observation = VoiceObservation(self.name)
-        self.intent_response_valid = True
-        self._conversation = reply_policy
         self._session = None  # aiohttp.ClientSession，懒加载
-        self._generation_lock = asyncio.Lock()
-
-    @property
-    def observation(self) -> VoiceObservation:
-        return self._observation
-
-    def bind_history(self, reader: HistoryReader) -> None:
-        self._history = reader
+        self._recognitions = {}
+        self._jobs = set()
+        self._prepared_context: PreparedContext | None = None
+        self._audio_sink = None
+        self._tools: ContextToolPort | None = None
+        self._generation_id = ""
 
     def _proxy_url(self) -> str | None:
         from dialogue._internal.proxy import resolve_agent_proxy_url
@@ -352,17 +344,19 @@ class MimoCascadeBackend(VoiceBackend):
         return clean
 
     async def chat(self, user_text: str, *, user_key: str = "", _with_intent: bool = False) -> str:
-        bridge = self.context_bridge
+        bridge = self._tools
         source_context = bridge.context if bridge is not None else {}
         source_session = bridge.session_id if bridge is not None else ""
         shared = source_context.get("ok") is True
         tools_available = shared and bool(source_context.get("provider"))
 
         def check_source() -> None:
-            if shared and bridge is not None and bridge.session_id != source_session:
+            if shared and bridge is not None and (not bridge.active or bridge.session_id != source_session):
                 raise VoiceStreamInterrupted("Shared context source was replaced")
-        history = (list(bridge.history) if shared and bridge is not None else
-                   self._history.as_messages(user_key=user_key, limit=self.settings.memory_max_turns))
+        prepared = self._prepared_context
+        if prepared is None:
+            raise ValueError("表达必须携带准备上下文")
+        history = [{"role": message.role, "content": message.content} for message in prepared.history]
         # 历史里存着净化之前的回复（emoji、星号动作、换行、超长），照样会带偏
         # 模型 —— 一并清掉。长度也要夹：只清不夹的话，模型照着历史里的长回复
         # 模仿，prompt 里那句「不超过 35 个字」永远追不回来。
@@ -376,12 +370,14 @@ class MimoCascadeBackend(VoiceBackend):
             for m in history
         ]
         messages: list[dict[str, str]] = [
-            {"role": "system", "content": self.effective_persona + VOICE_ROOM_RULES}
+            {"role": "system", "content": prepared.persona + VOICE_ROOM_RULES}
         ]
         messages.extend(history)
         if bridge is not None and tools_available:
             check_source()
-            result = await bridge.tool("astrbot_recall", {"query": user_text})
+            from dialogue._internal.memory_tools import execute_memory_tool
+            result = await execute_memory_tool(bridge, prepared, "astrbot_recall", {"query": user_text},
+                                               call_id=f"{self._generation_id}:recall", speaker=user_key)
             check_source()
             messages[0]["content"] += MEMORY_RULES
             if result.get("ok") is True and result.get("context"):
@@ -446,8 +442,9 @@ class MimoCascadeBackend(VoiceBackend):
                             result = {"ok": False, "error": "Invalid memory tool name"}
                         else:
                             check_source()
-                            result = await bridge.tool(tool_name, args,
-                                                        speaker=user_key.removeprefix("oopz:"))
+                            from dialogue._internal.memory_tools import execute_memory_tool
+                            result = await execute_memory_tool(bridge, prepared, tool_name, args,
+                                call_id=str(call_id or ""), speaker=user_key.removeprefix("oopz:"))
                             check_source()
                         tool_results[call_id] = result
                     messages.append({"role": "tool", "tool_call_id": call.get("id", ""),
@@ -476,22 +473,7 @@ class MimoCascadeBackend(VoiceBackend):
             )
         return clean
 
-    async def chat_with_intent(self, user_text: str, *, user_key: str = "") -> tuple[VoiceControlDecision, str]:
-        raw = await self.chat(user_text, user_key=user_key, _with_intent=True)
-        try:
-            decision = _parse_decision_json(raw)
-        except (ValueError, TypeError) as exc:
-            raise ValueError("Invalid combined voice decision") from exc
-        if not isinstance(decision, dict) or not isinstance(decision.get("reply"), str):
-            raise ValueError("Invalid combined voice decision")
-        control = parse_control_decision({k: v for k, v in decision.items() if k != "reply"})
-        if control.leave or control.volume is not None:
-            return control, ""
-        clean = clamp_reply(sanitize_for_tts(decision["reply"]))
-        return control, "" if looks_like_reasoning_leak(clean) else clean
-
     async def detect_control_intent(self, user_text: str) -> VoiceControlDecision:
-        self.intent_response_valid = False
         body = {
             "model": self.settings.mimo_llm_model,
             "messages": [
@@ -506,10 +488,8 @@ class MimoCascadeBackend(VoiceBackend):
         raw = str((((data.get("choices") or [{}])[0] or {}).get("message") or {}).get("content") or "")
         try:
             decision = parse_control_decision(_parse_decision_json(raw))
-        except (ValueError, TypeError):
-            logger.warning("语音控制意图返回不合法，本轮不执行控制")
-            return VoiceControlDecision()
-        self.intent_response_valid = True
+        except (ValueError, TypeError) as exc:
+            raise ValueError("Invalid control classification") from exc
         return decision
 
     async def tts(self, text: str) -> tuple[bytes, int]:
@@ -529,6 +509,7 @@ class MimoCascadeBackend(VoiceBackend):
         session = await self._http()
         url = self.settings.mimo_base_url.rstrip("/") + "/chat/completions"
         chunks: list[bytes] = []
+        audio_bytes = 0
         async with session.post(
             url, headers=self._headers(), json=body, proxy=self._proxy_url()
         ) as resp:
@@ -552,9 +533,13 @@ class MimoCascadeBackend(VoiceBackend):
                 data_b64 = audio.get("data") if isinstance(audio, dict) else None
                 if data_b64:
                     try:
-                        chunks.append(base64.b64decode(data_b64))
-                    except Exception:
-                        logger.debug("bad tts chunk", exc_info=True)
+                        chunk = base64.b64decode(data_b64, validate=True)
+                        audio_bytes += len(chunk)
+                        if audio_bytes > self.settings.sample_rate_out * 2 * 60:
+                            raise ValueError("TTS audio exceeded its finite budget")
+                        chunks.append(chunk)
+                    except binascii.Error as exc:
+                        raise ValueError("Invalid provider PCM encoding") from exc
         pcm = b"".join(chunks)
         # MiMo TTS pcm 默认 24k；若长度异常则按配置输出率处理
         return pcm, self.settings.sample_rate_out
@@ -580,140 +565,136 @@ class MimoCascadeBackend(VoiceBackend):
         clean = clean_announcement(raw)
         return "" if looks_like_reasoning_leak(clean) else clean
 
-    async def handle_utterance(
-        self,
-        pcm16: bytes,
-        *,
-        sample_rate: int,
-        user_key: str = "",
-        channel_key: str = "",
-        on_recognition: RecognitionSink | None = None,
-    ) -> VoiceReply:
-        async with self._generation_lock:
-            return await self._generate_utterance(
-                pcm16, sample_rate=sample_rate, user_key=user_key, channel_key=channel_key, on_recognition=on_recognition)
+    async def recognize(self, input, permit):
+        import hashlib
+        import math
+        import time
 
-    async def _generate_utterance(self, pcm16: bytes, *, sample_rate: int,
-                                  user_key: str, channel_key: str, on_recognition: RecognitionSink | None = None) -> VoiceReply:
-        trace = DecisionTrace(self.observation)
+        from dialogue.models import Recognition
+        if input.session != permit.session:
+            raise ValueError("识别许可与音频会话不一致")
+        if not permit.input_ref or permit.input_ref != input.input_ref:
+            raise ValueError("识别许可与输入身份不一致")
+        if not permit.attempt_id or input.attempt_id != permit.attempt_id:
+            raise ValueError("识别许可与输入尝试不一致")
+        if not math.isfinite(permit.expires_at) or permit.expires_at <= time.monotonic():
+            raise ValueError("识别许可已过期")
+        key = permit.attempt_id
+        fingerprint = (input.input_ref, input.session, input.sample_rate,
+                       hashlib.sha256(input.pcm16).digest())
+        previous = self._recognitions.get(key)
+        if previous is not None:
+            if previous[0] != fingerprint:
+                raise ValueError("同一识别尝试不能绑定不同输入")
+            return await asyncio.shield(previous[1])
+        if len(self._recognitions) >= 1024:
+            for old in tuple(self._recognitions):
+                if self._recognitions[old][1].done():
+                    del self._recognitions[old]
+                    break
+            else:
+                raise RuntimeError("Recognition capacity exhausted")
+
+        async def run():
+            started = time.monotonic()
+            try:
+                text = await self.asr(input.pcm16, input.sample_rate)
+                return Recognition(input.input_ref, input.session, key, input.user_key,
+                                   "recognized" if text.strip() else "no_speech", text,
+                                   elapsed_ms=round((time.monotonic()-started)*1000, 1))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return Recognition(input.input_ref, input.session, key, input.user_key,
+                                   "failed", reason="recognition_unavailable",
+                                   elapsed_ms=round((time.monotonic()-started)*1000, 1))
+        task = asyncio.create_task(run(), name="dialogue-recognition")
+        self._recognitions[key] = (fingerprint, task)
         try:
-            return await self._decide_utterance(pcm16, sample_rate, user_key, channel_key, trace, on_recognition)
+            return await task
         except asyncio.CancelledError:
-            trace.reason, trace.outcome = "interrupted", "skipped"
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
             raise
-        except Exception:
-            trace.reason, trace.outcome = "error", "error"
-            raise
-        finally:
-            trace.finish()
 
-    async def _decide_utterance(self, pcm16, sample_rate, user_key, channel_key, trace, on_recognition: RecognitionSink | None = None):
-        if not pcm16:
-            return VoiceReply()
-        keywords = list(self.settings.force_reply_keywords)
-        percent = self.settings.reply_probability_percent
-        control_enabled = self.settings.voice_leave_enabled or self.settings.voice_volume_enabled
-        window = (self.settings.conversation_window_seconds
-                  if self.settings.conversation_window_enabled else 0)
-        in_window = self._conversation.observe("", [], user_key, window)
-        preselected = not control_enabled and not keywords and not in_window
-        if preselected and not self._conversation.select(percent):
-            trace.reason = "probability"
-            return VoiceReply()
-        with trace.measure("asr"):
-            text = await self.asr(pcm16, sample_rate)
-        if not text.strip():
-            return VoiceReply(user_text=text)
-        if on_recognition is not None:
-            on_recognition(text)
+    async def interpret_control(self, input):
+        import time
+
+        from dialogue.models import ControlInterpretation
+        started = time.monotonic()
         try:
-            return await self._respond_to_recognized(text, pcm16, sample_rate, user_key, trace,
-                                                      keywords, control_enabled, window, preselected, percent)
-        except (asyncio.CancelledError, VoiceStreamInterrupted):
+            candidate = await asyncio.wait_for(self.detect_control_intent(input.text), 5)
+        except asyncio.CancelledError:
             raise
-        except Exception as exc:
-            raise RecognizedGenerationFailed(text, str(exc)) from exc
+        except (ValueError, TypeError):
+            return ControlInterpretation("invalid", reason="invalid_provider_result", elapsed_ms=round((time.monotonic()-started)*1000, 1))
+        except Exception:
+            return ControlInterpretation("unavailable", reason="classification_unavailable", elapsed_ms=round((time.monotonic()-started)*1000, 1))
+        return ControlInterpretation("candidate", candidate, elapsed_ms=round((time.monotonic()-started)*1000, 1))
 
-    async def _respond_to_recognized(self, text, pcm16, sample_rate, user_key, trace,
-                                      keywords, control_enabled, window, preselected, percent):
-        audio_ms = len(pcm16) / 2 / max(1, sample_rate) * 1000.0
-        short = control_enabled and audio_ms < max(0, self.settings.min_utterance_ms)
-        addressed = False if short else self._conversation.observe(
-            text, keywords, user_key, window)
-        selected = not short and (preselected or addressed or self._conversation.select(percent))
-        named = self._conversation.matches_keywords(text, keywords)
-        trace.reason = ("short" if short else "keyword" if named
-                        else "window" if addressed else "reply" if selected else "probability")
-        reply_reason = trace.reason
-        reply_text = ""
-        failed = False
-        needs_chat = not control_enabled
-        control = VoiceControlDecision()
-        if control_enabled:
-            if selected:
-                try:
-                    trace.timing_mode = "combined_intent_chat"
-                    with trace.measure("chat"):
-                        control, reply_text = await self.chat_with_intent(text, user_key=user_key)
-                    trace.timings["intent"] = trace.timings["chat"]
-                except (VoiceStreamInterrupted, VoiceStreamError):
-                    raise
-                except Exception as exc:
-                    # A malformed/failed combined reply must still check semantic control.
-                    failed = True
-                    needs_chat = True
-                    trace.reason, trace.outcome = "error", "error"
-                    trace.timing_mode = "stages"
-                    logger.warning(
-                        "语音意图与聊天合并请求失败（%s），改用独立意图判断",
-                        type(exc.__cause__ or exc).__name__,
-                    )
-            if not selected or failed:
-                try:
-                    with trace.measure("intent"):
-                        control = await asyncio.wait_for(self.detect_control_intent(text), 5.0)
-                    if not self.intent_response_valid:
-                        failed = True
-                        trace.reason, trace.outcome = "error", "error"
-                    else:
-                        # A fresh, valid decision permits ordinary chat again. Never
-                        # speak the malformed combined result or bypass a control.
-                        failed = False
-                        trace.reason, trace.outcome = reply_reason, "skipped"
-                except Exception:
-                    failed = True
-                    trace.reason, trace.outcome = "error", "error"
-                    logger.warning("语音控制意图识别失败，本轮不执行控制", exc_info=True)
-            if control.leave or control.volume is not None:
-                if ((control.leave and not self.settings.voice_leave_enabled)
-                        or (control.volume is not None and not self.settings.voice_volume_enabled)):
-                    # A disabled control is never converted into a spoken promise.
-                    trace.reason, trace.outcome = "control_disabled", "skipped"
-                    return VoiceReply(user_text=text, user_key=user_key)
-                trace.reason, trace.outcome = "control", "control"
-                return VoiceReply(user_text=text, user_key=user_key, control=control)
-        if not selected or failed:
-            return VoiceReply(user_text=text, user_key=user_key)
-        if needs_chat:
-            with trace.measure("chat"):
-                reply_text = await self.chat(text, user_key=user_key)
-        # 权威历史由应用根据真实渠道执行结果提交；这里仅返回生成证据。
-        if not reply_text.strip():
-            trace.reason = "empty"
-            return VoiceReply(user_text=text, user_key=user_key)
-        with trace.measure("tts"):
-            pcm_out, rate_out = await self.tts(reply_text)
-            pcm_out = resample_pcm16(pcm_out, rate_out, self.settings.sample_rate_out)
-        if not pcm_out:
-            trace.reason = "empty"
-        else:
-            trace.outcome = "replied"
-        return VoiceReply(user_text=text, text=reply_text, pcm16=pcm_out,
-                          sample_rate=self.settings.sample_rate_out,
-                          user_key=user_key)
+    def generate(self, intent, context, *, tools=None):
+        import copy
+
+        from dialogue._internal.output import ExpressionJob
+
+        if intent.session != context.context_ref.session:
+            raise ValueError("表达意图与准备上下文会话不一致")
+        if intent.context_version != context.version:
+            raise ValueError("表达意图与准备上下文版本不一致")
+        # 每任务独占supplier sink/分句队列/HTTP资源；不通过共享字段切换请求。
+        child = type(self)(copy.deepcopy(self.settings))
+        child._prepared_context = context
+        child._tools = tools
+        async def produce(emit):
+            try:
+                async def on_audio(pcm, rate):
+                    await emit("audio", pcm16=pcm, sample_rate=rate)
+                streaming = child.capabilities().streaming_utterance
+                if streaming:
+                    child._audio_sink = on_audio
+                started = time.monotonic()
+                kind = getattr(intent, "kind", "reply")
+                if kind == "fixed":
+                    text = sanitize_for_tts(intent.text)
+                elif kind == "announcement":
+                    text = await child.rewrite_announcement(getattr(intent, "announcement_kind", "enter"), intent.text)
+                else:
+                    text = await child.chat(intent.text, user_key=intent.user_key)
+                if not streaming and kind != "fixed":
+                    await emit("timing", timings_ms=(("chat", round((time.monotonic()-started)*1000, 1)),))
+                if not text.strip():
+                    raise RuntimeError("Empty generated expression")
+                await emit("text_final", text=text)
+                started = time.monotonic()
+                pcm, rate = await child.tts(text)
+                if not streaming:
+                    await emit("timing", timings_ms=(("tts", round((time.monotonic()-started)*1000, 1)),))
+                if not pcm:
+                    raise RuntimeError("Empty generated audio")
+                if not streaming:
+                    await on_audio(pcm, rate)
+            finally:
+                await child.aclose()
+        job = ExpressionJob(intent.action_id, intent.session, produce, deadline=intent.deadline)
+        child._generation_id = job.generation_id
+        self._jobs.add(job)
+        job._task.add_done_callback(lambda _: self._jobs.discard(job))
+        return job
+
+    async def probe(self, request):
+        if getattr(self, "_task_session", None) is not None or getattr(self, "_jobs", None):
+            raise RuntimeError("Diagnostic probes require a disposable backend")
+        from dialogue._internal.diagnostics import run_diagnostic
+        return await run_diagnostic(self, request)
 
     async def aclose(self) -> None:
-        self._conversation.clear()
+        await asyncio.gather(*(job.aclose() for job in tuple(self._jobs)), return_exceptions=True)
+        recognition_tasks = [entry[1] for entry in self._recognitions.values()]
+        for task in recognition_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*recognition_tasks, return_exceptions=True)
+        self._recognitions.clear()
         session = self._session
         self._session = None
         if session is not None and not session.closed:

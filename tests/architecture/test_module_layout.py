@@ -74,12 +74,11 @@ def test_migrated_module_requires_public_entry_and_navigation(tmp_path: Path) ->
     assert any("需要 api.py" in error for error in errors)
 
 
-def test_legacy_dependencies_are_localized(tmp_path: Path) -> None:
+def test_sdk_dependencies_are_localized(tmp_path: Path) -> None:
     root = repository(tmp_path)
-    write(root, "src/behavior/_internal/policy.py", "from voice_agent import agent\n")
-    assert any("旧模块依赖" in error for error in check(root))
+    write(root, "src/behavior/_internal/policy.py", "from oopz_sdk import OopzBot\n")
+    assert any("SDK" in error for error in check(root))
     write(root, "src/behavior/_internal/policy.py")
-    write(root, "src/behavior/_internal/legacy.py", "from voice_agent import agent\n")
     write(root, "src/channels/_internal/adapters/oopz.py", "from oopz_sdk import OopzBot\n")
     assert check(root) == []
 
@@ -111,3 +110,24 @@ def test_migrated_implementation_cannot_return_to_legacy_directory(tmp_path, old
     root = repository(tmp_path)
     write(root, old_path)
     assert any("已迁移" in error for error in check(root))
+
+
+def test_retired_voice_namespace_cannot_return_through_application_import(tmp_path: Path) -> None:
+    root = repository(tmp_path)
+    write(root, "src/app/consumer.py", "from voice_agent import agent\n")
+    assert any("voice_agent 已删除" in error for error in check(root))
+    write(root, "src/app/consumer.py", "from channels.api import Channel\n")
+    assert check(root) == []
+
+
+@pytest.mark.parametrize("namespace", ["bridge", "oopz", "onebot_v11"])
+def test_retired_namespaces_cannot_use_a_legacy_escape(tmp_path, namespace):
+    root = repository(tmp_path)
+    write(root, "src/behavior/_internal/legacy.py", f"from {namespace} import controller\n")
+    assert any("已删除" in error for error in check(root))
+
+
+def test_application_cannot_bypass_channel_sdk_adapter(tmp_path):
+    root = repository(tmp_path)
+    write(root, "src/app/consumer.py", "from oopz_sdk import OopzBot\n")
+    assert any("SDK" in error for error in check(root))

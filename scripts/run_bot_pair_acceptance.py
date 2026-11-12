@@ -63,14 +63,13 @@ async def run_acceptance(
     timeout: float = 150, poll_interval: float = 1,
     on_report: Callable[[dict], None] | None = None,
 ) -> dict:
-    """控制两端 HTTP 与本地日志；不替代第三账号人工旁听。
+    """控制两端 HTTP 与实际渠道终态诊断；不替代第三账号人工旁听。
 
     整场有时限；所有退出路径均独立尝试两端退房及确认。
-    成功必须是本次进房后的三次有声回合完成，旧日志不能算新证据。
+    成功必须是本次进房后的三次实际播放完成，旧诊断和日志不能算新证据。
     """
     started = time.monotonic()
     report = {"outcome": "cancelled", "events": [], "completed_replies": [0, 0]}
-    offsets: list[int] = []
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=40)) as client:
         async def call(index, path, body=None):
             instance = instances[index]
@@ -93,12 +92,14 @@ async def run_acceptance(
 
         async def test():
             await both("/voice/leave", {})
-            for instance in instances:
-                path = instance.root / "logs/oopz_bot.log"
-                offsets.append(path.stat().st_size if path.exists() else 0)
             await both("/voice/join", {"area": area, "channel": channel})
             states = await both("/voice/status")
             baseline_turns = [state["status"]["turns"] for state in states]
+            def completed_ids(state):
+                return {row["trigger_id"] for row in state.get("voice_observation", {}).get("recent_decisions", [])
+                        if isinstance(row, dict) and isinstance(row.get("trigger_id"), str)
+                        and row.get("reason") == "reply" and row.get("outcome") == "completed"}
+            baseline_completed = [completed_ids(state["status"]) for state in states]
             if any(state["status"]["cascade_turn_limit"] != 3 for state in states):
                 raise RuntimeError("实例未加载三次自动接话限额")
             while True:
@@ -121,12 +122,10 @@ async def run_acceptance(
                     raise RuntimeError("实例提前退房")
                 if any(state["cascade_attempts"] > 3 for state in states):
                     raise RuntimeError("自动接话超过三次")
-                completed = []
-                for instance, offset in zip(instances, offsets, strict=True):
-                    with (instance.root / "logs/oopz_bot.log").open("rb") as stream:
-                        stream.seek(offset)
-                        text = stream.read().decode("utf-8", errors="replace")
-                    completed.append(text.count("流式语音回合完成：已输出音频=True"))
+                evidence = [sorted(completed_ids(state)-previous) for state, previous in
+                            zip(states, baseline_completed, strict=True)]
+                completed = [len(ids) for ids in evidence]
+                report["completion_evidence"] = evidence
                 report["completed_replies"] = completed
                 if (completed == [3, 3] and all(state["cascade_attempts"] == 3 and not state["speaking"] for state in states)
                         and all(state["turns"]-base >= expected for state, base, expected in zip(states, baseline_turns, (4, 3), strict=True))):

@@ -149,7 +149,6 @@ def test_start_session_sends_single_key_when_base_url_has_one(monkeypatch: pytes
     _capture_open(monkeypatch, urls)
     backend = GeminiLiveBackend(
         _settings(gemini_api_key="cfg-key", gemini_base_url=f"{ENDPOINT}?key=cfg-key"),
-        FakeMemory(),
     )
     with pytest.raises(Exception, match="captured"):
         asyncio.run(backend.start_session())
@@ -164,7 +163,6 @@ def test_start_session_uses_key_from_url_when_api_key_missing(monkeypatch: pytes
     _capture_open(monkeypatch, urls)
     backend = GeminiLiveBackend(
         _settings(gemini_api_key="", gemini_base_url=f"{ENDPOINT}?key=url-only-key"),
-        FakeMemory(),
     )
     with pytest.raises(Exception, match="captured"):
         asyncio.run(backend.start_session())
@@ -178,7 +176,7 @@ def test_start_session_without_any_key_raises_before_connecting(
 ) -> None:
     urls: list[str] = []
     _capture_open(monkeypatch, urls)
-    backend = GeminiLiveBackend(_settings(gemini_api_key=""), FakeMemory())
+    backend = GeminiLiveBackend(_settings(gemini_api_key=""))
     with pytest.raises(RuntimeError, match="未配置"):
         asyncio.run(backend.start_session())
     assert urls == []

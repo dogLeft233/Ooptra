@@ -24,7 +24,7 @@ def test_remote_pcm_wakes_owner_loop_from_real_thread():
         errors = []
         def deliver():
             try:
-                duplex.enqueue_remote_pcm('human', b'pcm', 16000)
+                duplex.enqueue_remote_pcm('human', b'\0\1', 16000)
             except Exception as exc:
                 errors.append(exc)
         thread = threading.Thread(target=deliver)
@@ -85,7 +85,7 @@ def test_speak_before_join_has_no_model_request_or_memory(tmp_path, monkeypatch,
     async def run():
         agent = make_agent(tmp_path, backend=backend)
         call = AsyncMock(return_value=(b'pcm', 16000))
-        monkeypatch.setattr(agent.backend, 'speak_text' if agent.live_mode else 'tts', call)
+        monkeypatch.setattr(agent.backend, 'open_live' if agent.live_mode else 'generate', call)
         result = await agent.speak_text('hello')
         assert not result['ok']
         call.assert_not_awaited()
@@ -105,7 +105,7 @@ def test_speak_without_playback_has_no_request(tmp_path, monkeypatch, backend, s
         if state == 'no_duplex':
             agent.duplex = None
         call = AsyncMock(return_value=(b'pcm', 16000))
-        monkeypatch.setattr(agent.backend, 'speak_text' if agent.live_mode else 'tts', call)
+        monkeypatch.setattr(agent.backend, 'open_live' if agent.live_mode else 'generate', call)
         assert not (await agent.speak_text('hello'))['ok']
         call.assert_not_awaited()
         assert not agent.memory.recent()

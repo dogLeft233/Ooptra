@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from oopz import credentials
 from oopz_sdk.adapters.onebot.v11.adapter import OneBotV11Adapter
 from oopz_sdk.adapters.onebot.v11.event import to_v11_event
 from oopz_sdk.adapters.onebot.v11.types import IdStore, make_user_source
@@ -17,19 +16,20 @@ from oopz_sdk.exceptions import (
     OopzApiError,
     OopzAuthError,
     OopzConnectionError,
-    OopzPasswordLoginError,
 )
 from oopz_sdk.models.event import MessageEvent
 from oopz_sdk.models.message import Message as MessageModel
 from oopz_sdk.services.message import Message
+from operations import create_credential_store, patch_credentials
+from operations.models import CredentialsError
 
+CREDENTIAL_FIELDS = ("app_version", "device_id", "person_uid", "jwt_token")
 
 def test_credentials_only_patch_target_dict_and_mixed_quotes(monkeypatch):
     text = 'OTHER = {"jwt_token": "untouched"}\n# 中文\nOOPZ_CONFIG = {\n'
-    text += ',\n'.join(f"'{key}': 'old'" for key in credentials.OOPZ_CONFIG_CREDENTIAL_FIELDS) + '\n}\n'
-    monkeypatch.setattr(credentials, '_read_config_template', lambda: text)
-    payload = {key: '新"value' for key in credentials.OOPZ_CONFIG_CREDENTIAL_FIELDS}
-    result = credentials._updated_config_content(payload)
+    text += ',\n'.join(f"'{key}': 'old'" for key in CREDENTIAL_FIELDS) + '\n}\n'
+    payload = {key: '新"value' for key in CREDENTIAL_FIELDS}
+    result = patch_credentials(text, payload)
     nodes = ast.parse(result).body
     assert ast.literal_eval(nodes[0].value) == {'jwt_token': 'untouched'}
     assert ast.literal_eval(nodes[1].value) == payload
@@ -47,13 +47,11 @@ def test_invalid_credentials_config_preserves_both_files(tmp_path, monkeypatch, 
     private = tmp_path / 'private_key.py'
     path.write_text(config, encoding='utf-8')
     private.write_text('old-key', encoding='utf-8')
-    monkeypatch.setattr(credentials, 'CONFIG_PATH', str(path))
-    monkeypatch.setattr(credentials, 'PRIVATE_KEY_PATH', str(private))
-    monkeypatch.setattr(credentials, '_apply_runtime', lambda payload: None)
-    payload = {key: 'new' for key in credentials.OOPZ_CONFIG_CREDENTIAL_FIELDS}
+    store = create_credential_store(config_path=path, private_key_path=private, runtime_config=lambda:SimpleNamespace())
+    payload = {key: 'new' for key in CREDENTIAL_FIELDS}
     payload['private_key_pem'] = 'synthetic-key'
-    with pytest.raises(OopzPasswordLoginError):
-        credentials.save_credentials(payload)
+    with pytest.raises(CredentialsError):
+        store.save(payload)
     assert path.read_text(encoding='utf-8') == config
     assert private.read_text(encoding='utf-8') == 'old-key'
 
@@ -82,12 +80,12 @@ def test_invalid_credentials_config_preserves_both_files(tmp_path, monkeypatch, 
     "match value:\n    case {'value': other, **OOPZ_CONFIG}:\n        pass",
 ])
 def test_credentials_reject_dynamic_dict_changes(tmp_path, monkeypatch, mutation):
-    original = 'OOPZ_CONFIG = ' + repr({key: 'old' for key in credentials.OOPZ_CONFIG_CREDENTIAL_FIELDS})
+    original = 'OOPZ_CONFIG = ' + repr({key: 'old' for key in CREDENTIAL_FIELDS})
     test_invalid_credentials_config_preserves_both_files(tmp_path, monkeypatch, original + '\n' + mutation)
 
 
 def test_credentials_reject_chained_alias_definition(tmp_path, monkeypatch):
-    original = 'alias = OOPZ_CONFIG = ' + repr({key: 'old' for key in credentials.OOPZ_CONFIG_CREDENTIAL_FIELDS})
+    original = 'alias = OOPZ_CONFIG = ' + repr({key: 'old' for key in CREDENTIAL_FIELDS})
     test_invalid_credentials_config_preserves_both_files(tmp_path, monkeypatch, original)
 
 
@@ -191,13 +189,15 @@ def test_credentials_save_never_imports_user_configuration(tmp_path, monkeypatch
     config = tmp_path / 'config.py'
     config.write_text(
         f'from pathlib import Path\nPath({str(marker)!r}).touch()\nOOPZ_CONFIG = '
-        + repr({key: 'old' for key in credentials.OOPZ_CONFIG_CREDENTIAL_FIELDS}), encoding='utf-8',
+        + repr({key: 'old' for key in CREDENTIAL_FIELDS}), encoding='utf-8',
     )
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.delitem(sys.modules, 'config', raising=False)
-    monkeypatch.setattr(credentials, 'CONFIG_PATH', str(config))
-    monkeypatch.setattr(credentials, 'PRIVATE_KEY_PATH', str(tmp_path / 'private_key.py'))
-    payload = {key: 'new' for key in credentials.OOPZ_CONFIG_CREDENTIAL_FIELDS}
-    payload['private_key_pem'] = 'synthetic-key'
-    credentials.save_credentials(payload)
+    store = create_credential_store(config_path=config, private_key_path=tmp_path / 'private_key.py')
+    payload = {key: 'new' for key in CREDENTIAL_FIELDS}
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    payload['private_key_pem'] = rsa.generate_private_key(public_exponent=65537, key_size=2048).private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode()
+    store.save(payload)
     assert not marker.exists()

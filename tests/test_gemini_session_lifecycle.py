@@ -1,4 +1,4 @@
-"""Gemini Live 会话生命周期：断线必须能被发现、能重连、不再静默吞音频。
+"""Gemini Live 公开会话生命周期：断线可查询，原绑定失效，显式重建。
 
 这个文件存在的理由（B3）：``_session_loop`` 退出时只 ``_ready.set()``，
 不回收 ``_ws`` / ``_session_task``，于是：
@@ -105,142 +105,102 @@ async def _settle(rounds: int = 20) -> None:
         await asyncio.sleep(0)
 
 
-def test_session_reports_active_after_start(opened: list[FakeLiveWs]) -> None:
-    async def run() -> None:
-        backend = GeminiLiveBackend(_settings(), FakeMemory())
-        assert backend.session_active is False
-        await backend.start_session()
-        assert backend.session_active is True
-        assert len(opened) == 1
-        # setup 已发出，且带上了模型与音色
+def _request():
+    from channels.models import RoomTarget, SessionRef
+    from context.models import ContextRef, ContextRevision, PreparedContext
+    from dialogue.models import LiveSessionRequest
+
+    session = SessionRef("run", "binding", "session", RoomTarget("area", "room"))
+    prepared = PreparedContext(ContextRef(session, 0, "local"), ContextRevision(), "测试", ())
+    return LiveSessionRequest(session, prepared)
+
+
+def test_session_reports_active_after_start(opened):
+    async def run():
+        backend = GeminiLiveBackend(_settings())
+        live = await backend.open_live(_request())
+        assert live.snapshot().state == "ready"
         setup = opened[0].sent[0]["setup"]
         assert setup["model"] == "models/gemini-test"
-        assert (
-            setup["generation_config"]["speech_config"]["voice_config"]
-            ["prebuilt_voice_config"]["voice_name"]
-            == "Kore"
-        )
-        await backend.aclose()
-
+        assert setup["generation_config"]["speech_config"]["voice_config"]["prebuilt_voice_config"]["voice_name"] == "Kore"
+        await live.aclose()
     asyncio.run(run())
 
 
-def test_server_drop_clears_session_active(opened: list[FakeLiveWs]) -> None:
-    """核心回归：服务端断开后 session_active 必须变 False。"""
-
-    async def run() -> None:
-        backend = GeminiLiveBackend(_settings(), FakeMemory())
-        await backend.start_session()
-        ws = opened[0]
-        await ws.drop()
-        await _settle()
-        assert backend.session_active is False, "会话已死却仍报 active"
-        await backend.aclose()
-
-    asyncio.run(run())
-
-
-def test_start_session_after_drop_really_reconnects(opened: list[FakeLiveWs]) -> None:
-    """核心回归：掉线后再 start_session 必须真的重新建连，不能变成空操作。"""
-
-    async def run() -> None:
-        backend = GeminiLiveBackend(_settings(), FakeMemory())
-        await backend.start_session()
+def test_server_drop_is_queryable_and_stale_input_is_rejected(opened):
+    from dialogue.models import AudioInput
+    async def run():
+        backend = GeminiLiveBackend(_settings())
+        request = _request()
+        live = await backend.open_live(request)
         await opened[0].drop()
         await _settle()
-
-        await backend.start_session()
-        assert len(opened) == 2, "start_session 没有重新建连（旧会话状态没清干净）"
-        assert backend.session_active is True
-        await backend.aclose()
-
+        assert live.snapshot().state == "failed"
+        result = await live.send_input(AudioInput("i", request.session, b"\0\1" * 160, 16000))
+        assert result.status == "unavailable"
+        await live.aclose()
     asyncio.run(run())
 
 
-def test_speak_text_reconnects_once_instead_of_raising(opened: list[FakeLiveWs]) -> None:
-    """核心回归：会话刚死时 speak_text 要重连一次再发，而不是抛 500。"""
-
-    async def run() -> None:
-        backend = GeminiLiveBackend(_settings(), FakeMemory())
-        await backend.start_session()
+def test_open_new_binding_after_drop_reconnects_once(opened):
+    async def run():
+        backend = GeminiLiveBackend(_settings())
+        first = await backend.open_live(_request())
         await opened[0].drop()
         await _settle()
-
-        await backend.speak_text("你好")
+        second = await backend.open_live(_request())
+        assert first.snapshot().state in {"failed", "closed"}
+        assert second.snapshot().state == "ready"
+        assert second.live_session_id != first.live_session_id
         assert len(opened) == 2
-        texts = [
-            msg["realtimeInput"]["text"]
-            for ws in opened
-            for msg in ws.sent
-            if "realtimeInput" in msg and "text" in msg["realtimeInput"]
-        ]
-        assert texts == ["你好"]
-        await backend.aclose()
-
+        await second.aclose()
     asyncio.run(run())
 
 
-def test_push_audio_does_not_silently_swallow_failure(
-    opened: list[FakeLiveWs], caplog: pytest.LogCaptureFixture
-) -> None:
-    """音频热路径断线时至少要留下 WARNING，不能是 debug 级黑洞。"""
-
-    async def run() -> None:
-        backend = GeminiLiveBackend(_settings(), FakeMemory())
-        await backend.start_session()
-        ws = opened[0]
-        await ws.drop()
+def test_failed_binding_never_reconnects_for_each_audio_frame(opened):
+    from dialogue.models import AudioInput
+    async def run():
+        backend = GeminiLiveBackend(_settings())
+        request = _request()
+        live = await backend.open_live(request)
+        await opened[0].drop()
         await _settle()
-        # 直接对已死的会话灌音频：内部会尝试重连，无论成败都不能无声无息
-        with caplog.at_level("DEBUG", logger="dialogue._internal.live.gemini_live"):
-            await backend.push_audio(b"\x00\x01" * 160, 16000)
-        # Audio frames schedule bounded background recovery rather than opening
-        # another session inline and bypassing the retry budget.
-        assert backend._reconnect_task is not None
-        await backend.start_session()  # Explicit actions can still retry immediately.
-        assert backend.session_active is True
-        await backend.aclose()
-
-    asyncio.run(run())
-
-
-def test_speak_text_without_key_raises_readable_error(
-    opened: list[FakeLiveWs],
-) -> None:
-    """没配 key 时要给出可读原因（旧行为已经如此，这里锁住别退化）。"""
-
-    async def run() -> None:
-        backend = GeminiLiveBackend(_settings(gemini_api_key=""), FakeMemory())
-        with pytest.raises(RuntimeError) as excinfo:
-            await backend.start_session()
-        assert "gemini.api_key" in str(excinfo.value)
-
-    asyncio.run(run())
-
-
-def test_session_ends_when_our_own_close_is_called(opened: list[FakeLiveWs]) -> None:
-    async def run() -> None:
-        backend = GeminiLiveBackend(_settings(), FakeMemory())
-        await backend.start_session()
-        await backend.aclose()
-        assert backend.session_active is False
-        await _settle()
-        # 主动关闭后不得再偷偷重连
+        for index in range(10):
+            assert (await live.send_input(AudioInput(str(index), request.session, b"\0\1" * 160, 16000))).status == "unavailable"
         assert len(opened) == 1
-
+        await live.aclose()
     asyncio.run(run())
 
 
-def test_unknown_voice_falls_back_to_default(opened: list[FakeLiveWs]) -> None:
-    async def run() -> None:
-        backend = GeminiLiveBackend(_settings(gemini_voice=""), FakeMemory())
-        await backend.start_session()
-        setup = opened[0].sent[0]["setup"]
-        assert (
-            setup["generation_config"]["speech_config"]["voice_config"]
-            ["prebuilt_voice_config"]["voice_name"]
-            == "Puck"
-        )
-        await backend.aclose()
+def test_open_without_key_raises_readable_error(opened):
+    async def run():
+        backend = GeminiLiveBackend(_settings(gemini_api_key=""))
+        with pytest.raises(RuntimeError, match=r"gemini\.api_key"):
+            await backend.open_live(_request())
+        assert not opened
+    asyncio.run(run())
 
+
+def test_explicit_close_closes_transport_and_rejects_future_input(opened):
+    from dialogue.models import AudioInput
+    async def run():
+        backend = GeminiLiveBackend(_settings())
+        request = _request()
+        live = await backend.open_live(request)
+        await live.aclose()
+        assert live.snapshot().state == "closed"
+        assert opened[0].closed
+        assert (await live.send_input(AudioInput("i", request.session, b"\0\1" * 160, 16000))).status == "unavailable"
+        await _settle()
+        assert len(opened) == 1
+    asyncio.run(run())
+
+
+def test_unknown_voice_falls_back_to_default(opened):
+    async def run():
+        backend = GeminiLiveBackend(_settings(gemini_voice=""))
+        live = await backend.open_live(_request())
+        setup = opened[0].sent[0]["setup"]
+        assert setup["generation_config"]["speech_config"]["voice_config"]["prebuilt_voice_config"]["voice_name"] == "Puck"
+        await live.aclose()
     asyncio.run(run())

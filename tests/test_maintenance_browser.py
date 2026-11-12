@@ -16,7 +16,7 @@ def test_browser_preparation_failure_does_not_stop_current_service(tmp_path, mon
         if args[:2] == ["git", "archive"]:
             output = next(value.removeprefix("--output=") for value in args if value.startswith("--output="))
             with tarfile.open(output, "w") as archive:
-                for name, content in {"src/webui/server.py": "OOPTRA_UPDATE_ID bootstrap_ready", "main.py": "pass", "launcher.py": "pass"}.items():
+                for name, content in {"src/webui/server.py": "OOPTRA_UPDATE_ID bootstrap_ready", "main.py": "pass", "launcher.py": "pass", "src/operations/models.py": "DEPLOYMENT_CONTRACT_VERSION = 2\nCONTEXT_SCHEMA_MAX = 1"}.items():
                     value = content.encode()
                     info = tarfile.TarInfo(name)
                     info.size = len(value)

@@ -1,17 +1,34 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator
 from typing import Any, Protocol, runtime_checkable
 
-from behavior.models import VoiceControlDecision, VolumeCommand
+from behavior.models import AttemptPermit, SpeechIntent
+from channels.models import OutputFrame, SessionRef
+from context.models import PreparedContext, RecallRequest, RememberRequest
 from dialogue.models import (
-    AudioSink,
-    CompletedInput,
+    Allow,
+    AudioInput,
+    ControlInput,
+    ControlInterpretation,
+    ControlResolution,
+    DiagnosticRequest,
+    DiagnosticResult,
     DialogueCapabilities,
-    GeneratedTurn,
-    RecognitionSink,
-    VoiceReply,
+    GenerationEvent,
+    GenerationEvidence,
+    Hold,
+    LiveEvent,
+    LiveSessionRequest,
+    LiveSnapshot,
+    PreviewArtifact,
+    PreviewFailure,
+    PreviewRequest,
+    ProposalRef,
+    Recognition,
+    Reject,
+    ResolveReceipt,
+    ToolRef,
 )
 
 
@@ -31,12 +48,6 @@ class DialogueSettings(Protocol):
     def backend(self) -> str: ...
 
     @property
-    def conversation_window_enabled(self) -> bool: ...
-
-    @property
-    def conversation_window_seconds(self) -> int: ...
-
-    @property
     def dashscope_api_key(self) -> str: ...
 
     @property
@@ -52,9 +63,6 @@ class DialogueSettings(Protocol):
     def deepseek_model(self) -> str: ...
 
     @property
-    def force_reply_keywords(self) -> list[str]: ...
-
-    @property
     def gemini_api_key(self) -> str: ...
 
     @property
@@ -65,9 +73,6 @@ class DialogueSettings(Protocol):
 
     @property
     def gemini_voice(self) -> str: ...
-
-    @property
-    def memory_max_turns(self) -> int: ...
 
     @property
     def mimo_api_key(self) -> str: ...
@@ -88,16 +93,10 @@ class DialogueSettings(Protocol):
     def mimo_tts_voice(self) -> str: ...
 
     @property
-    def min_utterance_ms(self) -> int: ...
-
-    @property
     def persona(self) -> str: ...
 
     @property
     def proxy(self) -> str: ...
-
-    @property
-    def reply_probability_percent(self) -> int: ...
 
     @property
     def sample_rate_out(self) -> int: ...
@@ -109,13 +108,7 @@ class DialogueSettings(Protocol):
     def voice_volume_enabled(self) -> bool: ...
 
 
-class HistoryReader(Protocol):
-    """读取已确认的近期历史；生成模块没有追加/清空权威历史的权限。"""
-
-    def as_messages(self, *, user_key: str = "", limit: int | None = None) -> list[dict[str, str]]: ...
-
-
-class MemoryTools(Protocol):
+class ContextToolPort(Protocol):
     """应用注入的共享上下文读取与授权工具端口；不暴露 outbox/pending。"""
 
     @property
@@ -128,23 +121,9 @@ class MemoryTools(Protocol):
     def history(self) -> list[dict[str, str]]: ...
     @property
     def session_id(self) -> str: ...
-    async def tool(self, name: str, args: Any, *, speaker: str = "") -> dict: ...
+    async def recall(self, request: RecallRequest) -> dict[str, Any]: ...
+    async def remember(self, request: RememberRequest) -> dict[str, Any]: ...
 
-
-class ReplyPolicyPort(Protocol):
-    """行为注入的准入判断；生成不创建策略状态或修改额度。"""
-
-    def select(self, percent: int) -> bool: ...
-    def matches_keywords(self, text: str, keywords: list[str]) -> bool: ...
-    def observe(self, text: str, keywords: list[str], user_key: str, seconds: float) -> bool: ...
-    def clear(self) -> None: ...
-
-
-@runtime_checkable
-class SessionStarter(Protocol):
-    """Live-only capability; cascade backends do not own a session."""
-
-    async def start_session(self) -> None: ...
 
 
 @runtime_checkable
@@ -152,102 +131,94 @@ class ConnectionReporter(Protocol):
     def connection_status(self) -> dict[str, object]: ...
 
 
-@runtime_checkable
-class ControlIntentDetector(Protocol):
-    """Standalone intent classification, available on cascade backends."""
 
-    async def detect_control_intent(self, user_text: str) -> VoiceControlDecision: ...
-
-
-@runtime_checkable
-class StreamingUtterance(Protocol):
-    """逐输入流式生成；同实例串行，等待期间可取消，不复用上一请求的音频sink。"""
-
-    async def handle_utterance_stream(
-        self, pcm16: bytes, *, sample_rate: int, user_key: str, channel_key: str,
-        on_audio: AudioSink, on_recognition: RecognitionSink | None = None,
-    ) -> VoiceReply: ...
+class ExpressionJob(Protocol):
+    """独占生成任务；events单订阅、有界背压，aclose只关闭本任务。"""
+    generation_id: str
+    action_id: str
+    session: SessionRef
+    def events(self) -> AsyncIterator[GenerationEvent]: ...
+    def snapshot(self) -> GenerationEvidence: ...
+    async def cancel(self) -> None: ...
+    async def aclose(self) -> None: ...
 
 
-@runtime_checkable
-class LiveInputRetirement(Protocol):
-    def detach_completed_input(self) -> CompletedInput | None:
-        """同步原子取走至多一份已turnComplete的用户事实并丢弃其缓存回复。
+class GeneratedAudio(Protocol):
+    """上游事件的唯一消费者；失败转OutputSourceError，证据不表示已播放。"""
+    def frames(self) -> AsyncIterator[OutputFrame]: ...
+    def evidence(self) -> GenerationEvidence: ...
+    async def aclose(self) -> None: ...
 
-        一次性、无I/O及取消点；不交付内部公告、显式提示或尚未结束的片段，不等待未来转录。
-        已在晚转录窗口内收到的修订包含在事实中，撤销后不能重放旧缓存。
-        调用方须在原会话/来源失效前绑定并收尾该事实。
+
+class LiveSession(Protocol):
+    """持续输入/提议/许可通道；events单订阅，输出任务独立交渠道执行。
+
+    当前连接失败关闭旧绑定；调用方从snapshot观察失败后，用新open_live重建。
+    Allow相同action幂等；旧提议/来源返回stale，Hold不能延长提议硬截止。
+    update_context只允许同一来源，已批准轮次保留其原上下文/工具授权。
+    """
+    live_session_id: str
+    async def send_input(self, input: AudioInput) -> ResolveReceipt: ...
+    def events(self) -> AsyncIterator[LiveEvent]: ...
+    async def resolve_turn(self, ref: ProposalRef, permission: Allow | Hold | Reject) -> ResolveReceipt: ...
+    def claim_control(self, ref: ToolRef, action_id: str) -> ResolveReceipt: ...
+    async def resolve_control(self, ref: ToolRef, result: ControlResolution) -> ResolveReceipt: ...
+    async def update_context(self, prepared: PreparedContext, *, tools: ContextToolPort | None = None) -> ResolveReceipt: ...
+    async def authorize_input(self, ref: ProposalRef, prepared: PreparedContext | None, *, tools: ContextToolPort | None = None) -> ResolveReceipt:
+        """仅接受同轮定稿输入的原来源授权；不重写已许可表达的历史快照。"""
+        ...
+    async def speak(self, intent: SpeechIntent) -> ResolveReceipt: ...
+    async def interrupt(self) -> None: ...
+    def snapshot(self) -> LiveSnapshot: ...
+    async def aclose(self) -> tuple[LiveEvent, ...]:
+        """关闭资源并返回至多128份已完成用户事实；不交缓存助手或未结束片段。
+
+        事实使用已收到的晚转录，不等待未来供应商数据；重复关闭返回同身份事实，
+        调用者通过上下文原input_ref幂等结算，不能依据关闭本身推断完整输入。
         """
         ...
 
 
-@runtime_checkable
-class LiveDialogue(SessionStarter, ConnectionReporter, LiveInputRetirement, Protocol):
-    """持续模型会话；输出回调只交付生成证据，实际播放/历史提交由应用负责。
-
-    回调应及时返回；GeneratedTurn 包含普通回复与内部公告的文字及生成终态，回调返回前不得清除该证据。耗时的播放确认由应用拥有的有界任务调用渠道 Playback 处理。aclose 撤销供应商
-    连接和工具任务，不替应用关闭渠道或提交历史。完整提议/许可协议仍在后续迁移。
-    """
-
-    def set_audio_out(self, handler: Callable[[bytes, int], Awaitable[None] | None] | None) -> None: ...
-    def set_text_out(self, handler: Callable[[str], Awaitable[None] | None] | None) -> None: ...
-    def set_turn_out(self, handler: Callable[[bool], Awaitable[None] | None] | None) -> None: ...
-    def set_generated_out(self, handler: Callable[[GeneratedTurn], Awaitable[None] | None] | None) -> None: ...
-    def set_voice_volume_out(self, handler: Callable[[VolumeCommand], Awaitable[dict]] | None) -> None: ...
-    def set_voice_leave_out(self, handler: Callable[[], bool] | None) -> None: ...
-    def note_input_speaker(self, uid: str) -> None: ...
-    async def push_audio(self, pcm16: bytes, sample_rate: int | None = None) -> None: ...
-    async def speak_text(self, text: str) -> None: ...
-    async def speak_announcement(self, kind: str, template: str) -> None: ...
-    async def reset_reply_session(self) -> None: ...
-    async def aclose(self) -> None: ...
+class PreviewService(Protocol):
+    @property
+    def busy(self) -> bool: ...
+    async def preview(self, settings: DialogueSettings, request: PreviewRequest) -> PreviewArtifact | PreviewFailure: ...
+    async def generate(self, settings: DialogueSettings, kind: str, text: str, voice: str = "") -> dict: ...
 
 
-class ObservationReader(Protocol):
-    def snapshot(self) -> dict: ...
-
-
-class VoiceBackend(ABC):
+class VoiceBackend:
     """语音大脑：输入一段 utterance PCM，输出文字 + 回话 PCM。"""
 
     name: str = "base"
-    context_bridge: MemoryTools | None = None
     settings: DialogueSettings
-
-    @property
-    @abstractmethod
-    def observation(self) -> ObservationReader: ...
 
     def capabilities(self) -> DialogueCapabilities:
         """声明可调用能力，不由调用方猜测供应商名。"""
         return DialogueCapabilities()
 
-    @property
-    def effective_persona(self) -> str:
-        bridge = self.context_bridge
-        return bridge.persona if bridge is not None and bridge.active else self.settings.persona
-
-    @abstractmethod
-    def bind_history(self, reader: HistoryReader) -> None:
-        """替换未来级联请求的历史读取端口；不重写当前请求已读取的快照。"""
-        ...
-
     async def tts(self, text: str) -> tuple[bytes, int]:
         """级联的固定文字合成；Live 不承诺逐字合成，应使用其表达能力。"""
         raise NotImplementedError("Fixed speech is unsupported by this backend")
 
-    @abstractmethod
-    async def handle_utterance(
-        self,
-        pcm16: bytes,
-        *,
-        sample_rate: int,
-        user_key: str = "",
-        channel_key: str = "",
-        on_recognition: RecognitionSink | None = None,
-    ) -> VoiceReply:
-        """识别完成后同步交付本次输入；取消不撤销已交付事实，不写历史。"""
-        raise NotImplementedError
+    async def recognize(self, input: AudioInput, permit: AttemptPermit) -> Recognition:
+        """级联识别能力；Live 不支持逐输入识别。"""
+        raise NotImplementedError("Recognition is unsupported by this backend")
+
+    async def interpret_control(self, input: ControlInput) -> ControlInterpretation:
+        """返回解析后的候选或明确非法/不可用，不执行控制。"""
+        raise NotImplementedError("Control interpretation is unsupported")
+
+    def generate(self, intent: SpeechIntent, context: PreparedContext, *, tools: ContextToolPort | None = None) -> ExpressionJob:
+        """启动已批准意图的独占表达任务，返回ExpressionJob。"""
+        raise NotImplementedError("Cascade generation is unsupported")
+
+    async def open_live(self, request: LiveSessionRequest, *, tools: ContextToolPort | None = None) -> LiveSession:
+        """开启固定上下文来源的持续生成会话。"""
+        raise NotImplementedError("Live generation is unsupported")
+
+    async def probe(self, request: DiagnosticRequest) -> DiagnosticResult:
+        """独占自检后端，禁止对活跃房间后端调用；外层负责aclose。"""
+        raise NotImplementedError("Diagnostic probes are unsupported")
 
     async def aclose(self) -> None:
         """停止本实例的生成与供应商资源；不触碰渠道房间或写历史。"""

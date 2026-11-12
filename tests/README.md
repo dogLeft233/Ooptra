@@ -20,7 +20,7 @@ tests/
   conftest.py               # 少量全局准备；模块 fixture 放各自 conftest.py
 ```
 
-目录按测试实际需要创建。当前五模块同名目录和 `app/` 均已包含公开契约测试；`acceptance/` 使用本地 HTTP 服务验证手动验收工具，不调用真实 Oopz/模型；`architecture/` 包含目录/依赖和测试发现检查；其余原有平铺测试保持原位，随对应实现逐批迁移。生成供应商使用本地 HTTP 模型服务检验协议和并发 sink；上下文使用真实隔离文件检验恢复与提交。新五模块代码的测试放到同名目录；旧路径修复可以继续使用其原测试文件。测试布局要求由审查维护，架构脚本目前不冻结旧测试文件清单。
+目录按测试实际需要创建。当前五模块同名目录和 `app/` 均已包含公开契约测试；`acceptance/` 使用本地 HTTP 服务验证手动验收工具，不调用真实 Oopz/模型；`architecture/` 包含目录/依赖和测试发现检查；其余原有平铺测试保持原位，随对应实现逐批迁移。生成供应商使用本地 HTTP 模型服务检验协议和并发 sink；上下文使用真实隔离 SQLite 检验事务、重启、去重和来源授权；旧 JSONL/outbox 仅作为导入材料。新五模块代码的测试放到同名目录；平铺的历史测试按行为名称保留，但已退休的生产导入必须同步移除。测试布局要求由审查维护，架构脚本目前不冻结旧测试文件清单。
 
 ## 归属和测试接口
 
@@ -42,12 +42,23 @@ python -m pytest -v -o faulthandler_timeout=60
 
 模块迁入后可执行 `python -m pytest tests/<module>/ -q`。全套测试仍从根目录执行，浏览器命令见 `.github/workflows/ci.yml`，语音运行验收见 [双机器人联调](../docs/bot-pair-acceptance.md)。目录重排本身不能代替真实集成验证。
 
-历史收尾：`tests/test_voice_history_outcomes.py` 覆盖非流式识别后等待 chat/TTS 时停止，仅保留原用户输入；Live 公告在渠道成功确认后仅追加助手文本。
 
-提交取消窗口：`tests/test_voice_history_outcomes.py` 用真实阻塞 JSONL 写入覆盖流式/非流式 stop 后仅一份输入/助手及一个 outbox 请求；`tests/context/test_turn_submission.py` 检查取消同时磁盘失败仍被观察且不重复受理。
+## 完整契约回归
 
-Live 排空取消：`tests/test_voice_history_outcomes.py` 经真实模型消息、阻塞渠道排空与真实 JSONL/outbox，覆盖停止、退房及来源刷新，确保仅保留原scope输入。阻塞提交回归通过取消事件握手同步，兼容 Python 3.10，不依赖 `Task.cancelling`。
+PR 审查反例入口：[静音和长排空](channels/test_review_playback.py)、[Live 定稿、记忆授权及断连](app/test_live_input_finalization.py)、[级联控制原行动结算](app/test_cascade_control_identity.py)。均使用真实渠道、上下文或应用流程，仅替代外部平台和模型传输；不能替代真实房间及双 bot 声学验收。
 
-两存储故障矩阵：`tests/context/test_turn_submission.py` 使用真实不可写目标路径覆盖外部失败、本地失败、双失败及取消/重复等待；`tests/test_voice_history_outcomes.py` 用九轮真实Live消息和八个阻塞排空确认，验证满载输入背压及九份原scope历史/outbox，无未确认助手记录。
+表达任务覆盖单订阅、背压、首帧前关闭、失败EOS和真实HTTP/WS边界；输入、播放覆盖字节预算、断点、帧序号、取消及未知效果。`tests/app/test_output_commit_lifecycle.py` 验证已受理SQLite线程、切房/取消原scope提交及失败静默回执。配置/维护覆盖跨进程锁、CAS、部分应用、候选gate、handoff、父进程退出凭据与原子归档发布。
 
-关闭前完成输入：`tests/test_voice_history_outcomes.py` 覆盖关键词等待期间stop/leave/refresh/同步bind保留原scope用户事实，bind阻塞真实写入验证close等待；未turnComplete片段不保存，真实晚转录窗口过期不拼接旧轮或释放缓存助手。
+已移除的供应商复合入口、私有音频回调、global历史绑定和`.__new__`状态拼装测试，分别由新公开任务/真实应用协议测试承接。测试数量不是完成标准；删除旧实现耦合用例时应注明保留的行为和新验证入口。
+
+`tests/operations/test_plan_lifecycle.py` 使用真实变更锁及子进程 watchdog 验证计划/配置并发无死锁和取消后的实际落盘。`tests/app/test_input_delivery.py`、上下文事务及Live定稿回归验证无输出输入的原来源采集、poll/resolve后迟到输出不重复用户句子和重启幂等。
+
+PR3 的旧 TurnSubmission/JSONL 回归已映射到当前 SQLite 事务回滚、`test_output_commit_lifecycle.py` 的受理后取消及 `test_voice_history_outcomes.py` 的输入提交/Live drain取消，未保留退休生成入口或非原子双写约定。
+
+后续上游双存储故障矩阵在当前单 SQLite 设计中映射为 `test_output_commit_lifecycle.py` 的真实投递 SQL 故障/取消/重试：已观察输入不丢失，失败输出事务回滚，原来源恢复采集一次。第九轮拥塞回归覆盖关闭后九句均只有用户且原scope投递各一次，不恢复旧 JSONL/outbox 双写能力。
+
+Live 边界回归覆盖 Hold 跨晚转录窗口继续等待、无真实边界的硬超时/断连不提交半句、Alice/Bob 同轮输入无错误归属，以及旧 PreparedContext 工具授权撤销。使用真实 LiveFlow/ContextService 与本地协议替身；等待输入定稿不以播放结束替代。
+
+同一回归入口还覆盖停止、退房、配置重建与账号重绑时的已完成 Hold 输入，以及事件未消费、来源已切换和真实 SQLite 写入失败后的资源回收与原来源重试。
+
+PR3 最新生命周期回归迁入 `app/test_live_input_finalization.py`：首次播放确认前取消保留原输入，真实 SQLite 拒写仍关闭模型/停止播放/实际退房，以及管理等待者重复取消后等待受理写入并传播取消。退休 `TurnSubmission`/JSONL 入口不恢复；同一契约由当前公开流程和事务台账验证。

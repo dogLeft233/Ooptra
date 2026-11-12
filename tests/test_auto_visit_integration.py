@@ -6,14 +6,14 @@ from types import SimpleNamespace
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from app.assembly import VoiceRuntime
 from operations.models import VoiceAgentSettings, VoiceApiSettings
-from voice_agent.runtime import VoiceRuntime
 from webui.voice_routes import build_voice_routes
 
 
 def make_runtime(tmp_path, monkeypatch):
     import config
-    from voice_agent import runtime
+    from app import assembly as runtime
 
     monkeypatch.setattr(config, "VOICE_AUTO_VISIT_CONFIG", {}, raising=False)
     monkeypatch.setattr(runtime, "load_voice_agent_settings", lambda: (
@@ -68,7 +68,6 @@ def test_bind_registers_presence_once_and_disconnect_is_system_leave(tmp_path, m
 
         rt = make_runtime(tmp_path, monkeypatch)
         bot = SimpleNamespace(registry=EventRegistry())
-        monkeypatch.setattr(rt.agent, "bind_bot", lambda value: None)
         rt.bind_bot(bot)
         rt.bind_bot(bot)
         assert len(bot.registry.get_handlers("voice.enter")) == 1
@@ -76,6 +75,7 @@ def test_bind_registers_presence_once_and_disconnect_is_system_leave(tmp_path, m
 
         async def leave(*, source):
             sources.append(source)
+            return {"ok": True}
 
         monkeypatch.setattr(rt.agent, "leave", leave)
         await rt.set_bot_ready(False)
@@ -87,7 +87,7 @@ def test_bind_registers_presence_once_and_disconnect_is_system_leave(tmp_path, m
 
 def test_hot_enable_from_default_off_starts_and_stops_scheduler(tmp_path, monkeypatch):
     async def run():
-        from voice_agent import runtime
+        from app import assembly as runtime
 
         rt = make_runtime(tmp_path, monkeypatch)
         monkeypatch.setattr(runtime, "load_voice_agent_settings", lambda: (
@@ -106,7 +106,7 @@ def test_hot_enable_from_default_off_starts_and_stops_scheduler(tmp_path, monkey
 def test_real_config_save_hot_applies_and_aliases_require_auth(tmp_path, monkeypatch):
     async def run():
         import config
-        from voice_agent.api import VoiceApiServer
+        from app.http import VoiceApiServer
         from webui import config_editor
         from webui.server import WebUIConsole
 
@@ -159,8 +159,10 @@ def test_disconnect_negative_result_pauses_auto_visit(tmp_path, monkeypatch):
         async def leave(**kwargs):
             return {"ok": False, "error": "browser unavailable"}
 
+        original_leave = rt.agent.leave
         monkeypatch.setattr(rt.agent, "leave", leave)
         await rt.set_bot_ready(False)
         assert rt.auto_visit.status()["paused"]
+        monkeypatch.setattr(rt.agent, "leave", original_leave)
         await rt.stop()
     asyncio.run(run())

@@ -35,12 +35,12 @@ def test_restart_discards_queued_audio_and_old_capture_callback():
         await duplex.close()
         await duplex.start()
         old_callback("user", b"late-old", 16000)
-        transport.callback("user", b"new", 16000)
+        transport.callback("user", b"new!", 16000)
         for _ in range(20):
-            if b"new" in delivered:
+            if b"new!" in delivered:
                 break
             await asyncio.sleep(0)
         await duplex.close()
-        assert delivered == [b"busy", b"new"]
+        assert delivered == [b"busy", b"new!"]
 
     asyncio.run(scenario())

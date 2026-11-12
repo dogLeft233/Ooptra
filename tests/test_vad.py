@@ -23,9 +23,9 @@ import struct
 
 from channels import create_vad
 from channels.api import VoiceActivityDetector
+from channels.models import UTTERANCE_ENERGY_THRESHOLD as _MIN_UTTERANCE_RMS
 from channels.models import VadvConfig
 from core.audio import pcm16_rms
-from voice_agent.agent import _MIN_UTTERANCE_RMS
 
 SR = 16000
 FRAME_MS = 30

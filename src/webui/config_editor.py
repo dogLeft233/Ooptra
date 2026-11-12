@@ -9,13 +9,19 @@ from __future__ import annotations
 import copy
 import importlib
 import os
+import uuid
 from typing import Any
 
 from behavior import merge_auto_visit_patch
 from core.logger_config import get_logger
 from core.paths import PROJECT_ROOT
 from operations import create_configuration
-from operations.models import ConfigurationChange, OutputVolume, validate_network_field
+from operations.models import (
+    ConfigurationChange,
+    ConfigurationRequest,
+    OutputVolume,
+    validate_network_field,
+)
 
 logger = get_logger("WebUIConfig")
 
@@ -788,24 +794,38 @@ def _normalize_updates(updates: Any) -> dict[str, dict[str, Any]]:
     return normalized
 
 
-def apply_updates(updates: Any) -> dict[str, Any]:
+def configuration_store():
+    """配置输入适配共用的事务能力，不在 HTTP 层实现文件提交。"""
+    return create_configuration(
+        path=CONFIG_PATH, runtime_config=_runtime_config,
+        group_mergers={'auto_visit': lambda current, patch: merge_auto_visit_patch(
+            {} if current is None else current, patch)},
+    )
+
+
+def parsed_change(updates: Any) -> ConfigurationChange:
+    return ConfigurationChange.from_normalized(_normalize_updates(updates), sources=GROUP_SOURCES)
+
+
+def apply_updates(updates: Any, *, expected_revision=None, request_id=None) -> dict[str, Any]:
     """校验并写回 config.py，随后就地更新运行中的字典。"""
     normalized = _normalize_updates(updates)
     change = ConfigurationChange.from_normalized(normalized, sources=GROUP_SOURCES)
-    configuration = create_configuration(
-        path=CONFIG_PATH, runtime_config=_runtime_config,
-        group_mergers={"auto_visit": lambda current, patch: merge_auto_visit_patch(
-            {} if current is None else current, patch)},
-    )
-    receipt = configuration.save_fields(change)
-    changed = receipt.changed_fields()
+    configuration = configuration_store()
+    request_id = request_id or uuid.uuid4().hex
+    receipt = (configuration.apply(ConfigurationRequest(request_id, expected_revision, change))
+               if expected_revision is not None else configuration.apply_latest(request_id, change))
+    changed = {group: list(fields) for group, fields in receipt.changed}
     restart_required = any(
         (group, field) not in _RESTART_FREE_FIELDS and group not in _HOT_RELOAD_GROUPS
         for group, fields in normalized.items()
         for field in fields
     )
-    logger.info("配置已保存: %s", changed)
-    return {"changed": changed, "restart_required": restart_required}
+    logger.info("event=config.request.confirmed request_id=%s state=%s fields=%s",
+                receipt.request_id, receipt.state, changed)
+    return {"changed": changed, "restart_required": restart_required,
+            "request_id": receipt.request_id, "revision": receipt.revision,
+            "application_state": receipt.state}
 
 
 def apply_auto_visit_updates(patch: Any) -> dict[str, Any]:

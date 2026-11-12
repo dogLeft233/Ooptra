@@ -1,6 +1,6 @@
 # 仓库贡献指南
 
-探索或修改代码前，先阅读 [ARCHITECTURE.md](ARCHITECTURE.md)，了解渠道交互、上下文管理、行为决策、对话生成、系统维护五模块的目标职责、接口与状态归属，以及当前实现的迁移入口。本文描述的目标接口尚未全部实现，修改时核对代码与迁移状态；变更影响职责、接口或运行路径时同步更新架构文档。
+探索或修改代码前，先阅读 [ARCHITECTURE.md](ARCHITECTURE.md)，了解渠道交互、上下文管理、行为决策、对话生成、系统维护五模块的职责、公开接口、状态归属与应用流程。接口以代码为准；变更影响职责、接口或运行路径时同步更新架构文档。
 
 ## 文档语言与索引
 
@@ -41,15 +41,15 @@
 Ooptra 基于 Python 3.10+，连接 Oopz 与 OneBot v11/AstrBot，并提供实时语音和 Web 控制台。
 
 - `main.py` 是应用入口；`launcher.py` 支持受管启动与更新。
-- `src/bridge/`、`src/onebot_v11/` 和 `src/oopz/` 负责集成与协议转换；`src/core/` 提供共享基础能力。
-- `src/voice_agent/` 包含语音会话、模型后端和房间自动化。
+- `src/channels/`、`context/`、`behavior/`、`dialogue/`、`operations/` 是五个业务模块；先读各自导航与公开接口。
+- `src/app/` 负责装配、跨模块流程及管理请求；`src/core/` 提供共享机制。平台与协议适配在渠道内部，退休命名空间由静态检查拦截。
 - `src/webui/` 包含控制台路由与前端资源；根目录 `assets/` 存放文档配图。
 - `src/oopz_sdk/` 是内置上游 SDK。保留其现有代码风格，兼容性修复需通过回归测试验证。
 - `tests/` 存放 Python 测试，`tests/browser/` 存放浏览器检查，`docs/` 存放操作与开发文档。
 
 ## 模块导航与目录约束
 
-新增能力或迁移实现时，从 [架构中的模块导航](ARCHITECTURE.md#接口与数据契约) 选择模块，先读其 `README.md` 和已实现的 `api.py`、`models.py`，再进入 `_internal/`。遵循 [目录规则](docs/coding-standards.md#模块目录与接口导航)；现有目录处于迁移期，导航中的接口草案不代表实现已存在。测试归属与执行入口见 [测试导航](tests/README.md)。
+新增能力或迁移实现时，从 [架构中的模块导航](ARCHITECTURE.md#接口与数据契约) 选择模块，先读其 `README.md` 和已实现的 `api.py`、`models.py`，再进入 `_internal/`。遵循 [目录规则](docs/coding-standards.md#模块目录与接口导航)；公开契约包含效果、失败、容量和取消语义，修改时同步实际调用者。测试归属与执行入口见 [测试导航](tests/README.md)。
 
 ## Codegraph 代码查询
 

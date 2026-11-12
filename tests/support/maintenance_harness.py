@@ -108,3 +108,15 @@ def MaintenanceService(*args, **kwargs):
 
 
 maintenance.MaintenanceService = MaintenanceService
+
+
+def switch_stopped(root, job):
+    """隔离部署用已停止身份夹具；确认真实进程的契约另行测试。"""
+    from operations.models import StoppedDeployment
+    job.update(schema=2, revision=1, owner='application', phase='awaiting_exit',
+               service_pid=1, service_start_marker='isolated-process', handoff_token='isolated-handoff')
+    if job.get('action') == 'restore':
+        job['backup_fingerprint'] = create_backup_store(root).inspect(job['backup_id']).fingerprint
+    write_maintenance_record(root / 'data/maintenance/job.json', job)
+    stopped = StoppedDeployment(job['id'], 1, 'isolated-process', 'isolated-handoff')
+    return maintenance_worker.switch(root, job, stopped)

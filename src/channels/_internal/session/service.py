@@ -6,6 +6,7 @@ from collections.abc import Awaitable
 from typing import Any, TypeVar
 from uuid import uuid4
 
+from channels._internal.output.playback import PlaybackExecutor
 from channels.api import RoomTransport, TransportFailure
 from channels.models import (
     ActionOutcome,
@@ -16,7 +17,9 @@ from channels.models import (
     LeaveRoom,
     RoomState,
     RunningAction,
+    SendText,
     SessionRef,
+    SetOutput,
     UnknownAction,
 )
 
@@ -32,9 +35,47 @@ class RoomChannel:
         self._run_id = uuid4().hex
         self._binding_id = uuid4().hex
         self._view = ChannelSnapshot(0, RoomState.IDLE)
+        self._output_uncertain_session: SessionRef | None = None
+        self._text_started: set[str] = set()
+        self._playback = PlaybackExecutor(
+            lambda: self._view.session if self._view.state is RoomState.JOINED else None,
+            self.push_audio, self._wait_playback, self._stop_playback)
         self._results: dict[str, ActionOutcome] = {}
         self._finished: dict[str, float] = {}
         self._tasks: dict[str, tuple[ChannelCommand, asyncio.Task[ActionOutcome]]] = {}
+
+    async def play(self, request, frames):
+        return await self._playback.play(request, frames)
+
+    def playback(self, action_id):
+        return self._playback.snapshot(action_id)
+
+    async def cancel_playback(self, action_id):
+        return await self._playback.cancel(action_id)
+
+    async def cancel_current_playback(self, session):
+        return await self._playback.cancel_current(session)
+
+    async def _stop_playback(self) -> None:
+        # A browser may accept its in-flight push while cancellation is being observed.
+        # Drain that exact work before clearing the queue, otherwise late PCM follows stop.
+        async with self._output_lock:
+            if self._pending_io:
+                _, pending = await asyncio.wait(self._pending_io, timeout=2)
+                if pending:
+                    raise TimeoutError("旧推送尚未隔离")
+            await self._io(self._transport.retire_output(), 2)
+            if (self._view.state is RoomState.UNCERTAIN and self._view.confirmed
+                    and self._view.session == self._output_uncertain_session):
+                self._view = ChannelSnapshot(self._view.revision + 1, RoomState.JOINED,
+                                             self._view.session, True)
+                self._output_uncertain_session = None
+
+    async def _wait_playback(self, timeout):
+        drain = getattr(self._transport, "wait_playback", None)
+        if drain is None:
+            return AudioPushResult(False, "confirmation_unavailable")
+        return await self._io(drain(timeout), timeout)
 
     def snapshot(self) -> ChannelSnapshot:
         return self._view
@@ -63,6 +104,7 @@ class RoomChannel:
         for action_id, ended in list(self._finished.items()):
             if now - ended >= 600 and self._tasks[action_id][1].done():
                 del self._tasks[action_id], self._results[action_id], self._finished[action_id]
+                self._text_started.discard(action_id)
         if (
             len(self._tasks) >= 1024
             or sum(not task.done() for _, task in self._tasks.values()) >= 128
@@ -88,6 +130,13 @@ class RoomChannel:
             try:
                 return await self._execute(command)
             except asyncio.CancelledError:
+                if isinstance(command, (SetOutput, SendText)):
+                    self._remember(ActionOutcome(command.action_id, "cancelled", command.session,
+                        "not_started" if isinstance(command, SendText) and command.action_id not in self._text_started else "effects_unconfirmed",
+                        media="text" if isinstance(command, SendText) else "output",
+                        target=command.target if isinstance(command, SendText) else None,
+                        parent_action_id=command.parent_action_id if isinstance(command, SendText) else ""))
+                    raise
                 session = self._view.session
                 try:
                     await self._retire()
@@ -100,12 +149,59 @@ class RoomChannel:
                     self._view = ChannelSnapshot(self._view.revision + 1, RoomState.IDLE)
                 self._remember(ActionOutcome(command.action_id, "cancelled", session, "cancelled"))
                 raise
+            except Exception:
+                if command.action_id not in self._results:
+                    self._remember(ActionOutcome(command.action_id, "failed", self._view.session, "internal_error"))
+                raise
 
     async def _execute(self, command: ChannelCommand) -> ActionOutcome:
-        if isinstance(command, LeaveRoom) and command.session != self._view.session:
+        if isinstance(command, (LeaveRoom, SetOutput, SendText)) and command.session != self._view.session:
             return self._remember(
-                ActionOutcome(command.action_id, "rejected", command.session, "stale_session")
+                ActionOutcome(command.action_id, "rejected", command.session, "stale_session",
+                    media="text" if isinstance(command, SendText) else None,
+                    target=command.target if isinstance(command, SendText) else None,
+                    parent_action_id=command.parent_action_id if isinstance(command, SendText) else "")
             )
+        if isinstance(command, SendText):
+            send = getattr(self._transport, "send_text", None)
+            def outcome(status, reason="", message_id=""):
+                return self._remember(ActionOutcome(command.action_id, status, command.session, reason,
+                    media="text", message_id=message_id, target=command.target,
+                    parent_action_id=command.parent_action_id))
+            if self._view.state is not RoomState.JOINED or send is None:
+                return outcome("rejected", "text_unavailable")
+            if any(not work.done() for work in self._pending_io):
+                return outcome("rejected", "effects_pending")
+            validate_target = getattr(self._transport, "text_target_exists", None)
+            if validate_target is None:
+                return outcome("rejected", "target_unavailable")
+            try:
+                valid = await self._io(validate_target(command.target), 10)
+            except (TransportFailure, OSError, TimeoutError):
+                return outcome("rejected", "target_unavailable")
+            if valid is not True:
+                return outcome("rejected", "target_unavailable")
+            self._text_started.add(command.action_id)
+            try:
+                message_id = await self._io(send(command.target, command.text), 15)
+            except (TransportFailure, OSError, TimeoutError):
+                return outcome("failed", "effects_unconfirmed")
+            if not isinstance(message_id, str) or not message_id.strip():
+                return outcome("failed", "effects_unconfirmed")
+            return outcome("completed", message_id=message_id)
+        if isinstance(command, SetOutput):
+            apply = getattr(self._transport, "apply_output", None)
+            if self._view.state is not RoomState.JOINED or apply is None:
+                return self._remember(ActionOutcome(command.action_id, "rejected", command.session, "output_unavailable"))
+            async with self._output_lock:
+                if any(not task.done() for task in self._pending_io):
+                    return self._remember(ActionOutcome(command.action_id, "rejected", command.session, "output_busy"))
+                try:
+                    applied = await self._io(apply(command.volume, command.muted), 10)
+                except (TransportFailure, OSError, TimeoutError):
+                    return self._remember(ActionOutcome(command.action_id, "failed", command.session, "transport_failed"))
+                return self._remember(ActionOutcome(command.action_id,
+                    "completed" if applied.ok else "failed", command.session, applied.reason))
         if not isinstance(command, LeaveRoom) and command.expected_revision != self._view.revision:
             return self._remember(
                 ActionOutcome(command.action_id, "rejected", reason="stale_revision")
@@ -168,6 +264,8 @@ class RoomChannel:
             self._view.revision + 1, RoomState.RETIRING, self._view.session, self._view.confirmed
         )
 
+        await self._playback.retire()
+
         async def drain() -> None:
             async with self._output_lock:
                 if self._pending_io:
@@ -187,6 +285,7 @@ class RoomChannel:
             try:
                 return await self._io(self._transport.push_audio(pcm, rate, finish=finish), 3)
             except (Exception, asyncio.CancelledError) as exc:
+                self._output_uncertain_session = session
                 self._view = ChannelSnapshot(
                     self._view.revision + 1, RoomState.UNCERTAIN, session, self._view.confirmed
                 )

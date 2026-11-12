@@ -17,13 +17,14 @@ from typing import Any
 from aiohttp import web
 
 import config as runtime_config
+from channels import create_platform_login
 from core.logger_config import get_logger
 from core.paths import LOGS_DIR, PROJECT_ROOT
 from core.version import __version__
+from operations import create_platform_configuration
 from webui import config_editor
 from webui.auth import AUTH_PATHS, ConsoleAuth
 from webui.log_tail import LogTailer
-from webui.oopz_login import OopzLoginService, credentials_summary
 
 logger = get_logger("WebUI")
 
@@ -55,16 +56,18 @@ class WebUIConsole:
         config: dict[str, Any] | None = None,
         voice_runtime: Any = None,
         shutdown: Any = None,
+        runtime_control: Any = None,
     ) -> None:
         self._state = state
         self._controller = controller
         self._config = config if isinstance(config, dict) else getattr(runtime_config, "WEBUI_CONFIG", {}) or {}
         self._voice_runtime = voice_runtime
         self._shutdown = shutdown
+        self._runtime_control = runtime_control
         self._bootstrap_ready = False
         self._maintenance = None
         self._tailer = LogTailer(LOGS_DIR)
-        self._login = OopzLoginService(controller, state)
+        self._login = create_platform_login(controller, configuration=create_platform_configuration())
         self._token = ""
         self._auth = ConsoleAuth(lambda: self._token, self._setup_password)
         self._host = DEFAULT_HOST
@@ -79,6 +82,11 @@ class WebUIConsole:
     # ------------------------------------------------------------------
     # 生命周期
     # ------------------------------------------------------------------
+
+    def set_runtime_control(self, control) -> None:
+        self._runtime_control = control
+        if self._maintenance is not None:
+            self._maintenance.set_runtime_control(control)
 
     @property
     def bootstrap_ready(self) -> bool:
@@ -124,7 +132,8 @@ class WebUIConsole:
         self._maintenance = create_maintenance(PROJECT_ROOT, shutdown=self._shutdown,
                                                port=self._port, host=self._host, token=self._token,
                                                runtime_status=self._controller.snapshot,
-                                               bootstrap_ready=lambda: self.bootstrap_ready)
+                                               bootstrap_ready=lambda: self.bootstrap_ready,
+                                               runtime_control=self._runtime_control)
         mount_maintenance_routes(app, self._maintenance)
         app.add_routes([web.get(path, self._handle_index) for path in PAGE_PATHS])
         app.add_routes(
@@ -222,6 +231,11 @@ class WebUIConsole:
         if (protected and path not in AUTH_PATHS and not browser_session
                 and not self._auth.plugin_authenticated(request)):
             return web.json_response({"ok": False, "error": "请登录控制台"}, status=401)
+        if request.method not in {'GET', 'HEAD', 'OPTIONS'}:
+            from operations import deployment_access
+            access = deployment_access(PROJECT_ROOT)
+            if not access.allowed:
+                return web.json_response({'ok': False, 'error': access.reason}, status=503)
         return await handler(request)
 
     async def _observe_owned(self, task):
@@ -247,12 +261,13 @@ class WebUIConsole:
             raise cancelled
         return result
 
-    async def _save_configuration(self, updates, *, restart_after=False):
+    async def _save_configuration(self, updates, *, restart_after=False, expected_revision=None, request_id=None):
         if self._closing:
             raise RuntimeError("控制台正在停止，暂不能保存配置")
         snapshot = copy.deepcopy(updates)
         task = asyncio.create_task(
-            self._commit_configuration(snapshot, restart_after=restart_after),
+            self._commit_configuration(snapshot, restart_after=restart_after,
+                                       expected_revision=expected_revision, request_id=request_id),
             name="webui-configuration-save",
         )
         self._configuration_tasks.add(task)
@@ -265,26 +280,112 @@ class WebUIConsole:
         task.add_done_callback(finished)
         return await self._observe_owned(task)
 
-    async def _commit_configuration(self, updates, *, restart_after):
-        # Serialize persistence and application together. Another save must not
-        # commit a later token then have this task apply the earlier token last.
+    async def _commit_configuration(self, updates, *, restart_after, expected_revision=None, request_id=None):
+        from pathlib import Path
+
+        from operations import configuration_transaction
+        return await configuration_transaction(Path(config_editor.CONFIG_PATH).parent,
+            lambda: self._apply_configuration(updates, restart_after=restart_after,
+                expected_revision=expected_revision, request_id=request_id))
+
+    async def _apply_configuration(self, updates, *, restart_after, expected_revision=None, request_id=None):
+        from operations.models import ConfigurationChange, RevisionConflict, RuntimeApplyReport
+
         async with self._configuration_lock:
-            result = await asyncio.to_thread(config_editor.apply_updates, updates)
-            if "token" in (result.get("changed") or {}).get("webui", []):
-                self._change_password(str(updates["webui"]["token"]))
-                result["reauth_required"] = True
-                result.setdefault("notes", []).append("控制台密码与插件 API Token 已同步，请重新登录；插件请使用新 Token")
-            # Runs on the main event loop, after successful persistence, even if
-            # the HTTP waiter disconnected. It is part of this owned operation.
-            await self._hot_reload_voice(result)
-            if result.get("reauth_required") and restart_after is True:
+            options = {}
+            if expected_revision is not None:
+                options['expected_revision'] = expected_revision
+            if request_id is not None:
+                options['request_id'] = request_id
+            result = await asyncio.to_thread(config_editor.apply_updates, updates, **options)
+            store = config_editor.configuration_store()
+            previous = (await asyncio.to_thread(store.result, result['request_id'])
+                        if result.get('request_id') else None)
+            if result.get('application_state') == 'applied':
+                return result
+            retrying = result.get('application_state') == 'partial'
+            if retrying and result.get('revision') != store.revision():
+                raise RevisionConflict('配置已被新版本替代，禁止重试旧请求的热应用')
+            failed = set(previous.failed if previous else ())
+            applied = set(previous.applied if previous else ())
+            restart_required = set(previous.restart_required if previous else ())
+            changed = result.get('changed') or {}
+
+            # Password rotation is a separate component; a later model failure
+            # must not invalidate browser sessions again on the retry.
+            if 'token' in changed.get('webui', []) and (not retrying or 'console' in failed):
                 try:
-                    await self._controller.restart("WebUI 保存配置并重连")
-                    result["bridge_restart_requested"] = True
+                    self._change_password(str(updates['webui']['token']))
                 except Exception:
-                    logger.exception("配置已保存，但桥接重连失败")
-                    result["bridge_restart_error"] = True
-                    result.setdefault("notes", []).append("桥接重连失败，请重新登录后手动重连")
+                    failed.add('console')
+                    logger.exception('event=config.apply.failed component=console')
+                else:
+                    failed.discard('console')
+                    applied.add('console')
+                    result['reauth_required'] = True
+                    result.setdefault('notes', []).append('控制台密码与插件 API Token 已同步，请重新登录；插件请使用新 Token')
+
+            runtime_components = {'voice', 'voice_lifecycle', 'voice_api', 'auto_visit', 'runtime', 'maintenance_blocked'}
+            retry_runtime = failed & runtime_components
+            relevant = bool({'voice', 'voice_api', 'auto_visit'} & set(changed)
+                            or 'token' in changed.get('webui', []))
+            if (not retrying and relevant) or retry_runtime:
+                if self._runtime_control is not None and result.get('revision'):
+                    change = config_editor.parsed_change(updates)
+                    if retrying and not retry_runtime & {'runtime', 'maintenance_blocked'}:
+                        groups = set()
+                        if retry_runtime & {'voice', 'voice_lifecycle'}:
+                            groups.add('voice')
+                        if 'voice_api' in retry_runtime:
+                            groups.update({'voice_api', 'webui'})
+                        if 'auto_visit' in retry_runtime:
+                            groups.add('auto_visit')
+                        selected = tuple(group for group in change.groups if group.name in groups)
+                        if selected:
+                            change = ConfigurationChange(selected)
+                    try:
+                        report = await self._runtime_control.apply_config(result['revision'], change)
+                    except Exception:
+                        failed.add('runtime')
+                        logger.exception('配置已保存，但运行组件应用失败')
+                    else:
+                        failed.difference_update(retry_runtime)
+                        failed.update(report.failed)
+                        applied.update(report.applied)
+                        restart_required.update(report.restart_required)
+                        result['hot_reloaded_fields'] = list(report.applied)
+                else:
+                    await self._hot_reload_voice(result)
+                    failed.difference_update(retry_runtime)
+                    if result.get('hot_reload_failed'):
+                        failed.add('runtime')
+                    else:
+                        applied.add('voice')
+
+            # A persisted failed bridge restart is retried once; successfully
+            # restarted bridges are not touched by an unrelated voice retry.
+            if ('bridge' in failed or (not retrying and result.get('reauth_required') and restart_after is True)):
+                try:
+                    await self._controller.restart('WebUI 保存配置并重连')
+                except Exception:
+                    failed.add('bridge')
+                    result['bridge_restart_error'] = True
+                    logger.exception('配置已保存，但桥接重连失败')
+                else:
+                    failed.discard('bridge')
+                    applied.add('bridge')
+                    result['bridge_restart_requested'] = True
+            if result.get('restart_required'):
+                restart_required.update(f'{group}.{field}' for group, fields in changed.items() for field in fields)
+            result['hot_reload_failed'] = bool(failed & runtime_components)
+            if failed:
+                result.setdefault('notes', []).append('部分组件应用失败：' + '、'.join(sorted(failed)))
+            if result.get('request_id'):
+                saved = await asyncio.to_thread(store.record_application, result['request_id'],
+                    RuntimeApplyReport(tuple(sorted(applied)), tuple(sorted(failed)), tuple(sorted(restart_required))))
+                result['application_state'] = saved.state
+                result['applied_components'] = list(saved.applied)
+                result['failed_components'] = list(saved.failed)
             return result
 
     async def _setup_password(self, password: str) -> None:
@@ -325,8 +426,15 @@ class WebUIConsole:
     # ------------------------------------------------------------------
 
     def _process_identity(self) -> dict[str, Any]:
-        return {"pid": os.getpid(), "update_id": os.environ.get("OOPTRA_UPDATE_ID", ""),
-                "executable": sys.executable, "bootstrap_ready": self.bootstrap_ready}
+        update_id = os.environ.get('OOPTRA_UPDATE_ID', '')
+        snapshot = self._maintenance.snapshot() if self._maintenance is not None else None
+        job = snapshot.job if snapshot is not None else None
+        waiting = bool(update_id and job is not None and job.job_id == update_id
+                       and job.phase in {'switching', 'checking', 'rolling_back'})
+        return {'pid': os.getpid(), 'update_id': update_id,
+                'start_marker': os.environ.get('OOPTRA_PROCESS_MARKER', ''),
+                'executable': sys.executable, 'bootstrap_ready': self.bootstrap_ready,
+                'candidate_waiting_commit': waiting}
 
     async def _handle_status(self, _request: web.Request) -> web.StreamResponse:
         oopz_cfg = getattr(runtime_config, "OOPZ_CONFIG", {}) or {}
@@ -398,7 +506,7 @@ class WebUIConsole:
         }
 
     async def _handle_credentials(self, _request: web.Request) -> web.StreamResponse:
-        return web.json_response({"ok": True, "credentials": credentials_summary()})
+        return web.json_response({"ok": True, "credentials": self._login.credentials_summary()})
 
     # ------------------------------------------------------------------
     # 更新检查
@@ -483,11 +591,18 @@ class WebUIConsole:
     # ------------------------------------------------------------------
 
     async def _handle_config_get(self, _request: web.Request) -> web.StreamResponse:
+        request_id = _request.query.get('request_id') if _request is not None else None
+        if request_id:
+            from dataclasses import asdict
+            result = await asyncio.to_thread(config_editor.configuration_store().result, request_id)
+            return web.json_response({'ok': result is not None,
+                'result': asdict(result) if result else None}, status=200 if result else 404)
         return web.json_response(
             {
                 "ok": True,
                 "path": config_editor.CONFIG_PATH,
                 "groups": config_editor.schema_payload(),
+                "revision": config_editor.configuration_store().revision(),
             }
         )
 
@@ -497,7 +612,8 @@ class WebUIConsole:
             return web.json_response({"ok": False, "error": "请求体必须是 JSON"}, status=400)
         try:
             result = await self._save_configuration(
-                payload.get("updates"), restart_after=payload.get("restart_after", False))
+                payload.get("updates"), restart_after=payload.get("restart_after", False),
+                expected_revision=payload.get("expected_revision"), request_id=payload.get("request_id"))
         except ValueError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
         except Exception as exc:
@@ -520,7 +636,7 @@ class WebUIConsole:
         if self._voice_runtime is None and "token" in changed.get("webui", []):
             return
         try:
-            from voice_agent.runtime import get_voice_runtime
+            from app.assembly import get_voice_runtime
 
             applied = await (self._voice_runtime or get_voice_runtime()).reload_settings()
         except Exception as exc:

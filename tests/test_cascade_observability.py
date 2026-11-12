@@ -21,13 +21,24 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from support.channel_fixtures import establish_room
 
-from dialogue.models import VoiceReply
-from operations.models import VoiceAgentSettings
-from voice_agent.agent import VoiceAgent
+from app.voice import VoiceCoordinator
+from dialogue import create_expression_job
+from dialogue.models import DialogueCapabilities, Recognition
+from operations.models import VoiceAgentSettings, VoiceApiSettings
+
+
+@dataclass
+class VoiceReply:
+    user_text: str = ""
+    text: str = ""
+    pcm16: bytes = b""
+    sample_rate: int = 24000
+
 
 PCM = b"\x00\x01" * 16000  # 32000 字节 = 16000 样本 = 1.0s @16k
 
@@ -61,28 +72,30 @@ class FakeCascade:
 
     name = "mimo_cascade"
 
+    def capabilities(self):
+        return DialogueCapabilities()
+
     def __init__(self, reply: VoiceReply) -> None:
         self.reply = reply
 
-    async def handle_utterance(
-        self, pcm: bytes, *, sample_rate: int, user_key: str = "", channel_key: str = "", on_recognition=None
-    ) -> VoiceReply:
-        return self.reply
+    async def recognize(self, audio, permit):
+        return Recognition(audio.input_ref, audio.session, permit.attempt_id, audio.user_key,
+                           "recognized" if self.reply.user_text else "no_speech", self.reply.user_text)
+
+    def generate(self, intent, prepared, *, tools):
+        async def produce(emit):
+            await emit("text_final", text=self.reply.text)
+            await emit("audio", pcm16=self.reply.pcm16, sample_rate=self.reply.sample_rate)
+        return create_expression_job(intent.action_id, intent.session, produce, deadline=intent.deadline)
 
 
-async def _make_agent(reply: VoiceReply) -> tuple[VoiceAgent, FakeTransport]:
-    agent = VoiceAgent.__new__(VoiceAgent)
-    agent.settings = VoiceAgentSettings(enabled=True, sample_rate_out=24000)
+async def _make_agent(reply, tmp_path):
+    agent = VoiceCoordinator(VoiceAgentSettings(enabled=True, sample_rate_out=24000,
+        voice_leave_enabled=False, voice_volume_enabled=False, reply_probability_percent=100,
+        memory_path=str(tmp_path / "history.jsonl")), VoiceApiSettings())
     agent.duplex = FakeTransport()
     agent.backend = FakeCascade(reply)
     agent.live_mode = False
-    agent._busy = asyncio.Lock()
-    agent._speaking = False
-    agent.turns = 0
-    agent.last_reply = ""
-    agent.last_user_text = ""
-    agent.settings.area = "area1"
-    agent.settings.channel = "chan1"
     await establish_room(agent)
     return agent, agent.duplex
 
@@ -103,15 +116,15 @@ def _reply(**kw: Any) -> VoiceReply:
 # ----------------------------------------------------------------------
 
 
-def test_asr_turn_logs_metadata_without_speech_content(caplog) -> None:
+def test_asr_turn_logs_metadata_without_speech_content(caplog, tmp_path) -> None:
     """一次回合记录字数与时长，不记录转写或回复正文。
 
     时长是关键：只有它能把「模型听不懂」和「VAD 把句子切碎了」区分开。
     """
 
     async def run() -> None:
-        agent, _ = await _make_agent(_reply())
-        with caplog.at_level(logging.INFO, logger="voice_agent.agent"):
+        agent, _ = await _make_agent(_reply(), tmp_path)
+        with caplog.at_level(logging.INFO, logger="app.flows"):
             await agent._handle_utterance("u1", PCM, 16000)
 
         assert "今天天气怎么样" not in caplog.text
@@ -122,12 +135,12 @@ def test_asr_turn_logs_metadata_without_speech_content(caplog) -> None:
     asyncio.run(run())
 
 
-def test_empty_asr_result_is_still_logged(caplog) -> None:
+def test_empty_asr_result_is_still_logged(caplog, tmp_path) -> None:
     """识别为空也要记 —— 「听到了但没转出字」正是要排查的情形。"""
 
     async def run() -> None:
-        agent, _ = await _make_agent(_reply(user_text="", text="", pcm16=b""))
-        with caplog.at_level(logging.INFO, logger="voice_agent.agent"):
+        agent, _ = await _make_agent(_reply(user_text="", text="", pcm16=b""), tmp_path)
+        with caplog.at_level(logging.INFO, logger="app.flows"):
             await agent._handle_utterance("u1", PCM, 16000)
 
         assert "event=voice.asr.completed input_chars=0" in caplog.text, "识别为空时什么都不记，等于没发生过"
@@ -140,14 +153,14 @@ def test_empty_asr_result_is_still_logged(caplog) -> None:
 # ----------------------------------------------------------------------
 
 
-def test_push_failure_is_logged_once_per_turn(caplog) -> None:
+def test_push_failure_is_logged_once_per_turn(caplog, tmp_path) -> None:
     """整回合只报一条 WARNING；失败通常整回合都失败，逐分片刷屏会盖住线索。"""
 
     async def run() -> None:
-        agent, transport = await _make_agent(_reply())
+        agent, transport = await _make_agent(_reply(), tmp_path)
         transport.push_result = {"ok": False, "error": "not joined"}
 
-        with caplog.at_level(logging.WARNING, logger="voice_agent.agent"):
+        with caplog.at_level(logging.WARNING, logger="app.flows"):
             await agent._handle_utterance("u1", PCM, 16000)
 
         warned = [r for r in caplog.records if "推流失败" in r.getMessage()]
@@ -157,12 +170,12 @@ def test_push_failure_is_logged_once_per_turn(caplog) -> None:
     asyncio.run(run())
 
 
-def test_push_success_is_silent(caplog) -> None:
+def test_push_success_is_silent(caplog, tmp_path) -> None:
     """正常推流不能有任何 WARNING，否则这条日志会变成噪音。"""
 
     async def run() -> None:
-        agent, transport = await _make_agent(_reply())
-        with caplog.at_level(logging.WARNING, logger="voice_agent.agent"):
+        agent, transport = await _make_agent(_reply(), tmp_path)
+        with caplog.at_level(logging.WARNING, logger="app.flows"):
             await agent._handle_utterance("u1", PCM, 16000)
 
         assert transport.pushes, "根本没推流，用例是假通过"
@@ -171,11 +184,11 @@ def test_push_success_is_silent(caplog) -> None:
     asyncio.run(run())
 
 
-def test_turn_counter_and_speaking_are_restored(caplog) -> None:
+def test_turn_counter_and_speaking_are_restored(caplog, tmp_path) -> None:
     """推完要把 ``_speaking`` 落回去、回合数 +1（cascade 的回合边界就在这里）。"""
 
     async def run() -> None:
-        agent, _ = await _make_agent(_reply())
+        agent, _ = await _make_agent(_reply(), tmp_path)
         await agent._handle_utterance("u1", PCM, 16000)
 
         assert agent.turns == 1, "cascade 的回合数没有 +1"

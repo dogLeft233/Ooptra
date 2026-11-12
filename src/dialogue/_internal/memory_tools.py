@@ -19,3 +19,27 @@ def memory_tools() -> list[dict[str, Any]]:
          "parameters": {"type": "OBJECT", "properties": {"content": {"type": "STRING"}},
                         "required": ["content"]}},
     ]
+
+
+async def execute_memory_tool(port, prepared, name, args, *, call_id, speaker=""):
+    """供应商参数只提供内容；来源/授权/幂等身份取自可信调用上下文。"""
+    from context.models import RecallRequest, RememberRequest
+
+    if not isinstance(args, dict) or not isinstance(call_id, str) or not call_id:
+        return {"ok": False, "error": "Invalid memory tool request"}
+    field = "query" if name == "astrbot_recall" else "content" if name == "astrbot_remember" else ""
+    value = args.get(field) if field else None
+    if (not field or set(args) != {field} or not isinstance(value, str)
+            or not value.strip() or len(value) > 8000):
+        return {"ok": False, "error": "Invalid memory tool arguments"}
+    if not port.active:
+        return {"ok": False, "error": "Memory source is no longer active"}
+    try:
+        if name == "astrbot_recall":
+            return await port.recall(RecallRequest(call_id, prepared.context_ref, value, speaker))
+        if not prepared.authorized_write_grants:
+            return {"ok": False, "error": "Memory write is not authorized"}
+        return await port.remember(RememberRequest(call_id, prepared.context_ref, value,
+                                                   prepared.authorized_write_grants[0], speaker))
+    except ValueError:
+        return {"ok": False, "error": "Memory source or authorization is no longer valid"}
