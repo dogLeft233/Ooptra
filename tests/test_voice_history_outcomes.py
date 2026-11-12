@@ -798,3 +798,72 @@ def test_public_retirement_keeps_complete_input_during_cached_audio_release(tmp_
             released.set()
             await backend.aclose()
     asyncio.run(run())
+
+
+def test_cancelled_leave_waits_for_accepted_input_write_and_preserves_cancellation(tmp_path):
+    """管理等待者反复取消也不能把已经受理的真实磁盘提交遗留后台。"""
+    async def run():
+        from behavior import create_reply_policy
+        from context import create_memory
+
+        agent = make_voice_agent(tmp_path)
+        playback = Playback()
+        leaving = None
+        class LeaveOnCompletion(LiveSocket):
+            async def __anext__(self):
+                nonlocal leaving
+                message = await super().__anext__()
+                if json.loads(message).get("serverContent", {}).get("turnComplete"):
+                    leaving = asyncio.create_task(agent.leave())
+                return message
+        socket = LeaveOnCompletion()
+        entered, release = threading.Event(), threading.Event()
+        record = agent.memory.record
+        def blocked_record(turn):
+            entered.set()
+            assert release.wait(3), "test must release the accepted disk write"
+            return record(turn)
+        agent.memory.record = blocked_record
+        async def connect(*args, **kwargs): return socket
+        agent.settings.backend = "gemini_live"
+        agent.settings.gemini_api_key = "synthetic"
+        agent.settings.reply_probability_percent = 0
+        agent.settings.force_reply_keywords = ["机器人"]
+        agent.settings.conversation_window_enabled = False
+        agent.backend = create_gemini_backend(agent.settings, agent.memory,
+            reply_policy=create_reply_policy(), connector=connect)
+        agent.live_mode = True
+        agent.bind_duplex(playback)
+        await agent.join("area", "room")
+        try:
+            agent.backend.note_input_speaker("speaker")
+            await socket.queue.put(({"serverContent": {
+                "inputTranscription": {"text": "原房间已经说完的问题"},
+                "outputTranscription": {"text": "不应保存的草稿"}, "turnComplete": True}}, None))
+            assert await asyncio.to_thread(entered.wait, 1)
+            assert leaving is not None
+            leaving.cancel()
+            await asyncio.sleep(0)
+            leaving.cancel()
+            await asyncio.sleep(0)
+            assert not leaving.done(), "accepted write must finish before leave cancellation returns"
+            release.set()
+            cancelled = False
+            try:
+                await leaving
+            except asyncio.CancelledError:
+                cancelled = True
+            saved = create_memory(str(tmp_path / "memory.jsonl"))
+            assert saved.as_messages() == [{"role": "user", "content": "原房间已经说完的问题"}]
+            assert saved.recent()[0]["user_key"] == "oopz:speaker"
+            assert socket.closed and playback.stopped > 0
+            assert not agent.channels.snapshot().confirmed
+            assert cancelled, "leave must propagate its caller's cancellation after accepted work ends"
+        finally:
+            release.set()
+            if leaving is not None:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await leaving
+            await agent.leave()
+            await agent.backend.aclose()
+    asyncio.run(run())

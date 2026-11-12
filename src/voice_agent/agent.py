@@ -1136,11 +1136,24 @@ class VoiceAgent:
         return result
 
     async def _leave_locked(self, *, source: str = "system") -> dict[str, Any]:
+        # 资源关闭会消费自己发起的子任务取消；管理等待者的取消不能混入
+        # 这些内部等待，否则会被 suppress 当成子任务的正常取消吞掉。
+        cleanup = asyncio.create_task(self._leave_resources_locked(source=source),
+                                      name="voice-leave-resources")
+        cancelled = False
         try:
-            return await self._leave_resources_locked(source=source)
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    cancelled = True
+            result = cleanup.result()
         finally:
             # 输入落盘失败不能跳过模型、播放及实际退房的资源收尾。
             await self._await_lifecycle_tasks()
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
 
     async def _leave_resources_locked(self, *, source: str) -> dict[str, Any]:
         self._retire_live_input()
