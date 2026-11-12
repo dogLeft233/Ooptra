@@ -85,6 +85,106 @@ class LiveSocket:
         await self.queue.put(None)
 
 
+@pytest.mark.parametrize("operation", ["stop", "leave"])
+def test_stop_before_live_confirmation_starts_preserves_completed_input(tmp_path, operation):
+    async def run():
+        from behavior import create_reply_policy
+        from context import create_memory
+
+        agent = make_voice_agent(tmp_path)
+        stopping = None
+
+        class StopOnCompletion(LiveSocket):
+            async def __anext__(self):
+                nonlocal stopping
+                message = await super().__anext__()
+                if json.loads(message).get("serverContent", {}).get("turnComplete"):
+                    # reader 同步处理结束包；停止先入队，生成确认随后入队。
+                    stopping = asyncio.create_task(
+                        agent.stop_current_reply() if operation == "stop" else agent.leave())
+                return message
+
+        class UnconfirmedPlayback(Playback):
+            async def wait_tts_complete(self, timeout=30):
+                raise AssertionError("stop must precede the first playback confirmation")
+
+        socket = StopOnCompletion()
+
+        async def connect(*args, **kwargs):
+            return socket if not socket.closed else LiveSocket()
+
+        agent.settings.backend = "gemini_live"
+        agent.settings.gemini_api_key = "synthetic"
+        agent.backend = create_gemini_backend(agent.settings, agent.memory,
+            reply_policy=create_reply_policy(), connector=connect)
+        agent.live_mode = True
+        agent.bind_duplex(UnconfirmedPlayback())
+        await agent.join("area", "room")
+        try:
+            agent.backend.note_input_speaker("speaker")
+            await socket.deliver({"serverContent": {
+                "inputTranscription": {"text": "完整的用户问题"},
+                "outputTranscription": {"text": "未确认播放的回复"},
+                "modelTurn": {"parts": [{"inlineData": {
+                    "data": base64.b64encode(b"\x00\x40" * 480).decode(),
+                    "mimeType": "audio/pcm;rate=24000"}}]}}})
+            await socket.deliver({"serverContent": {"turnComplete": True}})
+            assert stopping is not None
+            await asyncio.wait_for(stopping, 1)
+            saved = create_memory(str(tmp_path / "memory.jsonl"))
+            assert saved.as_messages() == [{"role": "user", "content": "完整的用户问题"}]
+            assert saved.recent()[0]["user_key"] == "oopz:speaker"
+        finally:
+            await agent.leave()
+            await agent.backend.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("operation", ["stop", "leave"])
+def test_retired_live_input_write_failure_does_not_prevent_resource_stop(tmp_path, operation):
+    async def run():
+        from behavior import create_reply_policy
+
+        agent = make_voice_agent(tmp_path)
+        playback, socket = Playback(), LiveSocket()
+
+        async def connect(*args, **kwargs):
+            return socket
+
+        agent.settings.backend = "gemini_live"
+        agent.settings.gemini_api_key = "synthetic"
+        agent.settings.reply_probability_percent = 0
+        agent.settings.force_reply_keywords = ["机器人"]
+        agent.settings.conversation_window_enabled = False
+        agent.backend = create_gemini_backend(agent.settings, agent.memory,
+            reply_policy=create_reply_policy(), connector=connect)
+        agent.live_mode = True
+        agent.bind_duplex(playback)
+        await agent.join("area", "room")
+        try:
+            await socket.deliver({"serverContent": {
+                "inputTranscription": {"text": "待保留的完整输入"},
+                "outputTranscription": {"text": "缓存草稿"},
+                "modelTurn": {"parts": [{"inlineData": {
+                    "data": base64.b64encode(b"\x00\x40" * 480).decode(),
+                    "mimeType": "audio/pcm;rate=24000"}}]}, "turnComplete": True}})
+            # 使用真实不可写的文件目标，不替换上下文提交或磁盘写入实现。
+            (tmp_path / "memory.jsonl").mkdir()
+            with pytest.raises(OSError):
+                if operation == "stop":
+                    await agent.stop_current_reply()
+                else:
+                    await agent.leave()
+            assert socket.closed, "history failure must not leave the model connection open"
+            assert playback.stopped > 0, "history failure must not skip stopping local audio"
+            if operation == "leave":
+                assert not agent.channels.snapshot().confirmed
+        finally:
+            await agent.leave()
+            await agent.backend.aclose()
+    asyncio.run(run())
+
+
 def test_client_interruption_never_records_the_full_generated_reply(tmp_path):
     async def run():
         agent = make_voice_agent(tmp_path)

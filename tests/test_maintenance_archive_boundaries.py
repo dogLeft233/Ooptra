@@ -12,6 +12,10 @@ from tests.support.maintenance_harness import maintenance
 @pytest.mark.parametrize("unsafe_member", [None, "../escaped.py", "symlink", "hardlink"])
 def test_source_preparation_preserves_archive_boundary(tmp_path, monkeypatch, modern_filters, unsafe_member):
     if not modern_filters:
+        # 旧版默认不使用过滤器；3.14 的默认值却会引用下面要移除的 data_filter。
+        if hasattr(tarfile.TarFile, "extraction_filter") and hasattr(tarfile, "fully_trusted_filter"):
+            monkeypatch.setattr(tarfile.TarFile, "extraction_filter",
+                                staticmethod(tarfile.fully_trusted_filter))
         monkeypatch.delattr(tarfile, "data_filter", raising=False)
 
     def run(root, args, timeout=30, env=None):

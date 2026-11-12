@@ -443,10 +443,11 @@ class VoiceAgent:
             self._lifecycle_tasks = set()
         self._lifecycle_tasks.add(task)
         def observed(done: asyncio.Task) -> None:
-            self._lifecycle_tasks.discard(done)
             if not done.cancelled() and done.exception() is not None:
                 logger.error("event=voice.lifecycle.failed session_id=%s task=%s",
                              session_id, done.get_name(), exc_info=done.exception())
+            else:
+                self._lifecycle_tasks.discard(done)
         task.add_done_callback(observed)
 
     async def _await_lifecycle_tasks(self) -> None:
@@ -464,6 +465,8 @@ class VoiceAgent:
                 task.result()
             except Exception as exc:
                 failure = failure or exc
+            finally:
+                self._lifecycle_tasks.discard(task)
         if failure is not None:
             raise failure
         if cancelled:
@@ -506,7 +509,6 @@ class VoiceAgent:
         self._drop_stale_duplex()
 
     async def _drain_retired_channels(self) -> str | None:
-        await self._await_lifecycle_tasks()
         retired = getattr(self, "_retired_channels", [])
         while retired:
             channel = retired[0]
@@ -785,6 +787,7 @@ class VoiceAgent:
     async def _join_locked(self, area: str = "", channel: str = "") -> dict[str, Any]:
         if self._bot is None:
             raise RuntimeError("Oopz bot 尚未就绪")
+        await self._await_lifecycle_tasks()
         retired_error = await self._drain_retired_channels()
         if retired_error is not None:
             raise RuntimeError(retired_error)
@@ -990,7 +993,11 @@ class VoiceAgent:
                           else f"oopz:{result.user_key}"),
                 channel_key=f"{session.room_target.area}/{session.room_target.channel}" if session else "")
 
+            started = False
+
             async def complete() -> None:
+                nonlocal started
+                started = True
                 recorded = False
                 try:
                     evidence = await completed_playback.finish(finished_rate)
@@ -1040,6 +1047,14 @@ class VoiceAgent:
             def observed(done: asyncio.Task) -> None:
                 self._reply_tasks.discard(done)
                 self._completion_tasks.discard(done)
+                # 首次运行前取消不会进入 complete 的 finally；任务拥有者在
+                # 创建时即承担输入收尾，停止流程等待这份原 scope 提交。
+                if not started:
+                    self._playbacks.discard(completed_playback)
+                    if not result.internal and result.user_text and session is not None:
+                        self._track_lifecycle_task(asyncio.create_task(
+                            submission.record(input_turn), name="voice-unstarted-input"),
+                            session_id=session.session_id)
                 if not done.cancelled() and done.exception() is not None:
                     logger.error("event=voice.history.commit_failed session_id=%s", session.session_id if session else "",
                                  exc_info=done.exception())
@@ -1121,6 +1136,13 @@ class VoiceAgent:
         return result
 
     async def _leave_locked(self, *, source: str = "system") -> dict[str, Any]:
+        try:
+            return await self._leave_resources_locked(source=source)
+        finally:
+            # 输入落盘失败不能跳过模型、播放及实际退房的资源收尾。
+            await self._await_lifecycle_tasks()
+
+    async def _leave_resources_locked(self, *, source: str) -> dict[str, Any]:
         self._retire_live_input()
         self._operation_epoch += 1
         retired_error = await self._drain_retired_channels()
@@ -1217,7 +1239,6 @@ class VoiceAgent:
     async def _stop_reply_locked(self, *, restart: bool) -> None:
         self._retire_live_input()
         self._operation_epoch += 1
-        await self._await_lifecycle_tasks()
         self._discard_live_audio = True
         await self._stop_round_worker()
         await self._cancel_reply_tasks()
@@ -1230,6 +1251,7 @@ class VoiceAgent:
                 await self.duplex.stop_tts()
         self._speaking = False
         self._reply_generating = False
+        await self._await_lifecycle_tasks()
         if self.live_mode:
             # Gemini interrupt is intentionally a no-op. A fresh session is the
             # only safe boundary after a timed-out reply; old audio stays muted.
