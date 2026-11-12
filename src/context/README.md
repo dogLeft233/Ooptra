@@ -15,7 +15,7 @@
 ## 真实调用路径
 
 1. 流式识别最终成功后，无论信箱是否选中、bot是否正在生成/播放，都提交输入观察；未完成/失败的识别不成为完整输入。识别结果乱序完成仍保存一次，不回退当前投影。渠道事实或识别结果转换成 `Observation` 后 `observe`。完整识别按 `input_ref` 先持久化用户输入，再安装投影；沉默、生成失败仍保留输入。Live 增量文本 `complete=False` 仅更新投影，不提交半句话、不签发写授权。
-2. `snapshot(RoomTarget)` 返回不可变情境；`prepare_context(ContextRequest)` 捕获原范围、版本、来源、人设和裁剪历史。已知版本过期报冲突，不锁住渠道跨网络等待。来源准备由 `.bridge.prepare` 在进房/刷新时完成，每次生成不重新解析来源。
+2. `snapshot(RoomTarget)` 返回不可变情境；`prepare_context(ContextRequest)` 捕获原范围、版本、来源、人设和裁剪历史。普通回复直接准备并使用返回版本；快照不能为后续调用预留版本。显式指定已知版本时，过期报冲突，不锁住渠道跨网络等待。来源准备由 `.bridge.prepare` 在进房/刷新时完成，每次生成不重新解析来源。
 准备历史按 `ContextRequest.input_ref` 的精确持久标识排除本次输入，避免供应商再追加本次问题时重复；相同文字的旧输入照常保留。历史浏览和情境快照仍包含已持久化的本次输入。Live 原输入已通过实时音频/转录进入供应商，传入 input_ref 的准备也遵循此排除规则，不额外把本次转录当历史重放。
 
 3. 生成只读取 `PreparedContext` 和 `tools(prepared)` 绑定端口。`RecallRequest`/`RememberRequest` 绑定 `ContextRef`；写入还验证登记的 `WriteAuthorization`、期限和完整原输入。模型参数不决定目标。

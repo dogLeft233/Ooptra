@@ -57,4 +57,6 @@ python -m pytest -v -o faulthandler_timeout=60
 
 多人现场：`tests/context/test_room_conversation.py` 验证房间近期历史、身份、乱序和个人记忆隔离；`tests/test_aliyun_deepseek.py` 验证忙碌期间输入保留，以及说话者资料实际进入接话判断与正式生成HTTP请求。
 
+级联上下文交错：`tests/app/test_cascade_context_interleavings.py` 经公开准备入口控制新观察、取消和流程失效顺序，验证原回复、控制优先及语义/非语义两条路径；使用真实上下文和 SQLite，不连接真实模型或房间。
+
 异步观察：`tests/context/test_async_observations.py` 验证受理容量、取消、关闭、乱序和来源换绑；`tests/app/test_recognition_write_isolation.py` 使用真实SQLite写锁验证识别、快照及准备不阻塞事件循环，并验证事务失败诊断和进房失败/取消清理。
