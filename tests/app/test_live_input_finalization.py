@@ -428,3 +428,45 @@ def test_live_close_releases_playback_when_socket_shutdown_fails(tmp_path):
             socket.close = close_socket
             await context.close()
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("boundary_first", [False, True])
+def test_new_single_speaker_recovers_personal_grant_after_mixed_turn(tmp_path, boundary_first):
+    """混合轮次隔离授权，下一轮仍能按新的完整输入识别本人。"""
+    async def scenario():
+        context, socket, flow = await open_flow(
+            tmp_path, shared=True, speaker="Alice", late_seconds=.03)
+        try:
+            await socket.deliver(audio_message(user_text="大家讨论", text="知道了", done=boundary_first))
+            await flow.send_input("Bob", b"\0\x40" * 320, 16000)
+            await socket.deliver({"serverContent": {
+                "inputTranscription": {"text": "共同的话题"}, "turnComplete": True}})
+
+            async def first_finished():
+                while flow.busy or not context.history.recent():
+                    await asyncio.sleep(0)
+            await asyncio.wait_for(first_finished(), 1)
+            await context.bridge.poll(wait=0)
+
+            await flow.send_input("Carol", b"\0\x40" * 320, 16000)
+            await socket.deliver(audio_message(user_text="请记住我喜欢咖啡"))
+            await socket.deliver({"toolCall": {"functionCalls": [{
+                "id": "carol-write", "name": "astrbot_remember",
+                "args": {"content": "我喜欢咖啡"}}]}})
+
+            async def answered():
+                while not any("toolResponse" in message for message in socket.sent):
+                    await asyncio.sleep(0)
+            await asyncio.wait_for(answered(), 1)
+            response = next(message["toolResponse"]["functionResponses"][0]["response"]
+                for message in socket.sent if "toolResponse" in message)
+            assert response.get("queued") is True, response
+            events = await context.bridge.poll(wait=0)
+            writes = [event for event in events if event["operation"] == "remember"]
+            assert len(writes) == 1
+            assert writes[0]["payload"]["speaker"] == "Carol"
+            assert writes[0]["scope"]["memory_scopes"] == [{"umo": "group:original"}]
+        finally:
+            await flow.close()
+            await context.close()
+    asyncio.run(scenario())
